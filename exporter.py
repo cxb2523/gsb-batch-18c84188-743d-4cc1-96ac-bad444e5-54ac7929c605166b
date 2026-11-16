@@ -9,12 +9,18 @@
 #
 # How it works:
 #   1. Frames are piped to ffmpeg while the music plays (video only, temp file).
-#   2. The video timeline is driven by the AUDIO position, not by the wall clock.
-#      -> frames are duplicated if the app renders slower than 60 FPS, so video
-#         and audio always stay in sync (also when you pause).
+#   2. The video timeline is driven by the AUDIO position, not by the wall
+#      clock. Frames are duplicated if the app renders slower than 60 FPS.
+#      While playback is paused no frames are written; at unpause the mixer's
+#      wall-clock jump (get_pos() keeps counting on some platforms) is removed,
+#      so the timeline continues smoothly from the pre-pause position instead
+#      of inserting one big block of repeated frames.
 #   3. When recording stops, the ORIGINAL audio files of all played tracks are
 #      concatenated, chapters (one per song) are written, and everything is
 #      muxed into a single mp4. Temp files are deleted afterwards.
+#   4. Chapter boundaries and the final chapter end are derived from the frames
+#      actually written, never from the full duration of a song that was cut
+#      short by an early stop or a track change.
 # -----------------------------------------------------------------------------
 import os
 import queue
@@ -22,6 +28,16 @@ import shutil
 import subprocess
 import threading
 from datetime import datetime
+
+# A position jump larger than this after an unpause is treated as the
+# wall-clock time the mixer kept counting while playback was paused and is
+# removed from the export timeline. Real audio progress between two 60 FPS
+# frames is ~17 ms, so 100 ms is a safe threshold.
+RESUME_JUMP_SECS = 0.1
+# Hard cap for frames written from a single render tick. Audio position still
+# drives the total count, but a glitch can never dump a huge block of
+# duplicated frames at once; any genuine backlog is spread over later ticks.
+MAX_FRAMES_PER_TICK = 30
 
 
 def find_ffmpeg():
@@ -67,6 +83,12 @@ class ExportManager:
         self._cur = None          # {'duration': sec}
         self._offset = 0.0
 
+        # Pause-aware timeline state
+        self._paused = False          # playback is currently paused
+        self._last_track_pos = None   # last (raw) track position we saw
+        self._pos_correction = 0.0    # paused wall-clock time hidden from the
+                                      #   export timeline, for the current track
+
     # ------------------------------------------------------------------ start
     def start(self, width, height):
         if self.is_recording or self.is_finalizing:
@@ -110,6 +132,9 @@ class ExportManager:
         self._failed = False
         self._tracks, self._chapters = [], []
         self._cur, self._offset = None, 0.0
+        self._paused = False
+        self._last_track_pos = None
+        self._pos_correction = 0.0
         self._last_frame = None
         self._queue = queue.Queue(maxsize=180)
         self._writer = threading.Thread(target=self._writer_task, daemon=True)
@@ -131,19 +156,58 @@ class ExportManager:
             if not self.is_recording:
                 return
             if self._cur is not None:
-                self._offset += self._cur["duration"]
+                # The chapter boundary is where the video actually is right
+                # now: every frame written so far counts, the full duration of
+                # the previous song does not (it may have been cut short by an
+                # early stop / track change).
+                self._offset = self.frames / self.fps
             self._cur = {"duration": max(float(duration), 0.1)}
             self._tracks.append(path)
             self._chapters.append({"start": self._offset, "title": title or os.path.basename(path)})
+            # Timeline tracking starts afresh for every track.
+            self._paused = False
+            self._last_track_pos = None
+            self._pos_correction = 0.0
 
     # ----------------------------------------------------------------- frames
-    def frames_due(self, track_pos):
+    def frames_due(self, track_pos, paused=False):
         """How many video frames must be written so the video catches up with
-        the audio position. 0 -> no need to even grab a frame."""
+        the audio position. 0 -> no need to even grab a frame.
+
+        The video timeline is driven by the AUDIO position, not by the wall
+        clock. While playback is paused no frames are produced, and when it
+        resumes any wall-clock jump the mixer reports (get_pos() keeps counting
+        on some platforms) is filtered out, so writing continues smoothly from
+        the pre-pause position instead of dumping one big block of repeated
+        frames."""
         if not self.is_recording or self._cur is None or track_pos is None or self._failed:
             return 0
-        t = self._offset + min(max(track_pos, 0.0), self._cur["duration"])
-        return max(0, int(t * self.fps) - self.frames)
+
+        if paused:
+            # Frozen audio position -> frozen video timeline. Remember where we
+            # were so the jump at unpause can be measured against it.
+            self._paused = True
+            self._last_track_pos = min(max(float(track_pos), 0.0), self._cur["duration"])
+            return 0
+        self._paused = False
+
+        pos = min(max(float(track_pos), 0.0), self._cur["duration"])
+        if self._last_track_pos is not None:
+            delta = pos - self._last_track_pos
+            # At unpause a big forward jump is the pause time the mixer kept
+            # counting; it must not become export time. Normal tick deltas
+            # (~17 ms at 60 FPS) pass through untouched.
+            if delta > RESUME_JUMP_SECS:
+                self._pos_correction += delta
+        self._last_track_pos = pos
+
+        eff_pos = pos - self._pos_correction
+        if eff_pos < 0.0:
+            # Defensive: never let the corrected timeline run backwards.
+            self._pos_correction = pos
+            eff_pos = 0.0
+        t = self._offset + min(eff_pos, self._cur["duration"])
+        return min(max(0, int(t * self.fps) - self.frames), MAX_FRAMES_PER_TICK)
 
     def write(self, rgb_bytes, count):
         """rgb_bytes: raw RGB frame (w*h*3). It is written `count` times."""

@@ -549,7 +549,7 @@ class HotVisualizer:
             self.notify("Fenstergröße geändert - Export gestoppt")
             self.stop_export()
             return
-        n = ex.frames_due(fp.get_position())
+        n = ex.frames_due(fp.get_position(), paused=(fp.playback_state == 'paused'))
         if n > 0:
             grab = getattr(pygame.image, 'tobytes', None) or pygame.image.tostring
             ex.write(grab(self.screen, 'RGB'), n)
