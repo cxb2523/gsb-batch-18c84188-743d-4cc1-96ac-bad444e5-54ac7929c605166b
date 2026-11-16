@@ -112,18 +112,28 @@ async function pickCodec(width, height, fps, bitrate) {
   throw new Error(`This browser cannot encode ${width}×${height} H.264 at ${fps}fps (use Chrome)`);
 }
 
-// Yield to the browser without timers: background tabs throttle setTimeout to once a second (or a minute),
-// which would stall a render if you switch tabs. Channel messages are not throttled.
+// Yield to the browser without timers: background tabs throttle setTimeout/requestAnimationFrame to once a
+// second (or a minute), which would stall a render if you switch tabs. MessageChannel tasks are not
+// throttled, and neither are microtasks, so the export keeps pumping while hidden.
 const channel = new MessageChannel();
 const waiting = [];
 channel.port1.onmessage = () => waiting.shift()?.();
 const yieldTask = () => new Promise((r) => { waiting.push(r); channel.port2.postMessage(0); });
+
+// If the tab is hidden while a yield is pending, resolve it straight away too. The channel messages are
+// already unthrottled, so this only covers browsers that defer even those tasks on visibility changes.
+const onVisibility = () => { if (document.hidden) while (waiting.length) waiting.shift()?.(); };
 
 /**
  * Render `seconds` of the current scene to an MP4 Blob.
  * step(dt, t): advance the world one frame (env + scene update). render(): draw the frame to the canvas.
  * script: [{ at: seconds, run() }] events fired on time (scene buttons, time and weather changes).
  * audio: the Ambience (sound is rendered offline in sync), or null for a silent clip.
+ *
+ * Audio and video share one clock: before every frame the audio clock is pinned to the frame time, so the
+ * play()/setLoop() calls the scene makes inside update() land exactly on the frame that triggered them.
+ * If no audio encoder is available (or the audio render fails), the clip is written without a sound track
+ * instead of failing the whole export.
  */
 export async function renderClip({ canvas, step, render, audio = null, seconds = 15, fps = 60, bitrate = 18e6, script = [], onProgress }) {
   if (typeof VideoEncoder === 'undefined') throw new Error('This browser has no WebCodecs (use Chrome)');
@@ -151,16 +161,22 @@ export async function renderClip({ canvas, step, render, audio = null, seconds =
   copy.width = width;
   copy.height = height;
   const ctx2d = copy.getContext('2d', { alpha: false });
-  if (audio) audio.beginOffline(seconds + 0.25);
+  // A null audio here means a deliberately silent clip; offlineAudio tracks whether *this* render built an
+  // offline graph that must be torn down again.
+  const offlineAudio = audio ? audio.beginOfflineForExport(seconds + 0.25) : null;
   const events = [...script].sort((a, b) => a.at - b.at);
   const frames = Math.round(seconds * fps);
   const dt = 1 / fps;
   let ei = 0;
+  document.addEventListener('visibilitychange', onVisibility);
   try {
     for (let i = 0; i < frames; i++) {
       if (failure) throw failure;
       const t = i * dt;
-      if (audio) audio._clock = t;
+      // Pin the audio clock to the frame time *before* anything runs this frame: script events and the
+      // scene update both schedule at now() === t, so one-shot sounds sit exactly on their visual event
+      // and loop-bed gain ramps advance on the same timeline as the frames (no hardware clock involved).
+      if (offlineAudio) audio._clock = t;
       while (ei < events.length && events[ei].at <= t + 1e-9) events[ei++].run();
       step(dt, t);
       render();
@@ -170,15 +186,24 @@ export async function renderClip({ canvas, step, render, audio = null, seconds =
       frame.close();
       while (venc.encodeQueueSize > 6 && !failure) await yieldTask();
       if (i % 15 === 0) {
-        onProgress?.(i / frames * (audio ? 0.85 : 1));
+        onProgress?.(i / frames * (offlineAudio ? 0.85 : 1));
         await yieldTask();
       }
     }
     await venc.flush();
+  } catch (e) {
+    // The video path failed: drop the offline graph and restore the live audio graph before propagating.
+    // abortOffline is a no-op unless an offline graph is actually active.
+    audio?.abortOffline?.();
+    throw e;
   } finally {
     venc.close();
+    document.removeEventListener('visibilitychange', onVisibility);
   }
-  if (failure) throw failure;
+  if (failure) {
+    audio?.abortOffline?.();
+    throw failure;
+  }
   // decode order is output order; presentation times give composition offsets if the encoder reorders
   const samples = vSamples.map((s, i) => {
     const dts = i * frameTicks;
@@ -186,11 +211,20 @@ export async function renderClip({ canvas, step, render, audio = null, seconds =
     return { data: s.data, dur: frameTicks, key: s.key, cto: pts - dts };
   });
 
+  // Sound is best-effort: no AudioEncoder, an unsupported config or a failed offline render leaves the
+  // video intact as a silent MP4 rather than losing the whole export.
   let audioTrack = null;
-  if (audio) {
+  if (offlineAudio) {
     onProgress?.(0.88);
-    const buffer = await audio.endOffline();
-    audioTrack = await encodeAac(buffer, seconds);
+    try {
+      const buffer = await audio.endOffline();
+      audioTrack = await encodeAac(buffer, seconds);
+    } catch (e) {
+      console.warn('Audio export unavailable, writing a silent clip:', e?.message || e);
+      audioTrack = null;
+      // endOffline restores on failure; this is a harmless no-op if the live graph is already back.
+      audio.restoreLive?.();
+    }
   }
   onProgress?.(1);
   return muxMp4({ width, height, timescale, samples, avcC }, audioTrack);
@@ -212,7 +246,13 @@ async function encodeAac(buffer, seconds) {
   normalize(buffer, seconds);
   const sampleRate = buffer.sampleRate, channels = 2;
   const cfg = { codec: 'mp4a.40.2', sampleRate, numberOfChannels: channels, bitrate: 192000 };
-  if (typeof AudioEncoder === 'undefined' || !(await AudioEncoder.isConfigSupported(cfg)).supported) return null;
+  // No AudioEncoder at all, or this browser cannot do AAC: the caller muxes a silent video.
+  if (typeof AudioEncoder === 'undefined') return null;
+  let supported = false;
+  try {
+    supported = (await AudioEncoder.isConfigSupported(cfg)).supported;
+  } catch (e) { /* fall through to the silent path */ }
+  if (!supported) return null;
   const chunks = [];
   let asc = null;
   let failure = null;
@@ -225,19 +265,28 @@ async function encodeAac(buffer, seconds) {
     },
     error: (e) => { failure = e; },
   });
-  aenc.configure(cfg);
-  const len = Math.min(buffer.length, Math.round(seconds * sampleRate));
-  const l = buffer.getChannelData(0), r = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : l;
-  for (let i = 0; i < len; i += 1024) {
-    const n = Math.min(1024, len - i);
-    const planar = new Float32Array(n * 2);
-    planar.set(l.subarray(i, i + n), 0);
-    planar.set(r.subarray(i, i + n), n);
-    aenc.encode(new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames: n, numberOfChannels: channels, timestamp: Math.round((i / sampleRate) * 1e6), data: planar }));
+  try {
+    aenc.configure(cfg);
+    const len = Math.min(buffer.length, Math.round(seconds * sampleRate));
+    const l = buffer.getChannelData(0), r = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : l;
+    for (let i = 0; i < len; i += 1024) {
+      const n = Math.min(1024, len - i);
+      const planar = new Float32Array(n * 2);
+      planar.set(l.subarray(i, i + n), 0);
+      planar.set(r.subarray(i, i + n), n);
+      aenc.encode(new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames: n, numberOfChannels: channels, timestamp: Math.round((i / sampleRate) * 1e6), data: planar }));
+    }
+    await aenc.flush();
+    if (failure || !chunks.length) {
+      console.warn('AAC encoding produced no audio, writing a silent clip:', failure?.message || 'no chunks');
+      return null;
+    }
+  } catch (e) {
+    console.warn('AAC encoding failed, writing a silent clip:', e?.message || e);
+    return null;
+  } finally {
+    try { aenc.close(); } catch (e) { /* already closed */ }
   }
-  await aenc.flush();
-  aenc.close();
-  if (failure) throw failure;
   // AAC LC, 48 kHz, stereo, if the encoder did not hand over its AudioSpecificConfig
   if (!asc) {
     const idx = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000].indexOf(sampleRate);

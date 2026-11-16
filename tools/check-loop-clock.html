@@ -1,0 +1,31 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check: a loop bed's gain ramps advance on the frame clock — its rendered energy rises over clip time
+// even though no hardware clock moves (OfflineAudioContext.currentTime is 0 until startRendering).
+import { Ambience } from '../engine/audio.js';
+import { segmentEnergy, finish, logTo } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+try {
+  const audio = new Ambience();
+  audio.beginOffline(2.25);
+  audio.setLoop('fire', 0.8);
+  const clockSamples = [];
+  for (let i = 0; i < 2 * 60; i++) {
+    const t = i / 60;
+    audio._clock = t;
+    if (i % 30 === 0) clockSamples.push(audio.now());
+    audio.update(1 / 60, { cur: { wind: 0, rain: 0, storm: 0, snow: 0, fog: 0 }, daylight: 1, night: 0 });
+  }
+  const buffer = await audio.endOffline();
+  const eEarly = segmentEnergy(buffer, 0.05, 0.35);
+  const eLate = segmentEnergy(buffer, 1.2, 2.0);
+  const ratio = eLate / Math.max(1e-9, eEarly);
+  const restored = audio._offline !== true && audio._live == null;
+  const clockOk = clockSamples.every((t, i) => Math.abs(t - i * 0.5) < 1e-9);
+  const detail = { clockSamples, eEarly: +eEarly.toExponential(3), eLate: +eLate.toExponential(3), ratio: +ratio.toFixed(1), restored, clockOk };
+  log(JSON.stringify(detail));
+  finish({ pass: ratio > 3 && clockOk && restored, detail });
+} catch (e) { log('FATAL ' + e.message); log(e.stack); finish({ pass: false, fatal: e.message }); }
+</script></body></html>

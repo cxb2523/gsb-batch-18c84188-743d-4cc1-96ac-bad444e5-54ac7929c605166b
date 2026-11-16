@@ -1,0 +1,42 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check 2: with AudioEncoder missing the export must still produce a correct, silent MP4 and restore
+// the live audio graph (no whole-export failure).
+import { renderClip } from '../engine/exporter.js';
+import { Ambience } from '../engine/audio.js';
+import { logTo, finish, makeCanvas, mp4DurationMs, hasAudioTrack } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+
+try {
+  const canvas = makeCanvas();
+  const audio = new Ambience();
+  await audio.start();
+  const backup = window.AudioEncoder;
+  window.AudioEncoder = undefined; // simulate a browser that cannot encode AAC
+  let threw = null, blob = null;
+  try {
+    blob = await renderClip({
+      canvas, seconds: 1.5, fps: 60,
+      step: (dt, t) => { if (Math.abs(t - 0.5) < dt * 0.5) audio.play('bell'); },
+      render: () => {}, audio, onProgress: () => {},
+    });
+  } catch (e) { threw = e.message; }
+  window.AudioEncoder = backup;
+  const buf = blob ? await blob.arrayBuffer() : null;
+  const durationMs = buf ? mp4DurationMs(buf) : null;
+  const detail = {
+    threw,
+    durationMs: durationMs && +durationMs.toFixed(1),
+    hasAudio: buf ? hasAudioTrack(buf) : null,
+    liveRestored: audio._offline !== true && audio._live == null,
+    ctxAlive: !!audio.ctx,
+  };
+  log(JSON.stringify(detail));
+  finish({ pass: !!blob && !threw && !detail.hasAudio && Math.abs(durationMs - 1500) < 60 && detail.liveRestored, detail });
+} catch (e) {
+  log('FATAL ' + e.message); log(e.stack);
+  finish({ pass: false, fatal: e.message });
+}
+</script></body></html>

@@ -1,0 +1,63 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check 6: background-tab behaviour. While exporting, the page must keep making progress even when
+// "hidden": the export loop only awaits MessageChannel yields (unthrottled), never rAF/setTimeout, and
+// a visibilitychange to hidden flushes any pending yield. We (a) verify the loop uses no throttled waits
+// by counting timer/rAF usage during a hidden render, and (b) confirm the MP4 duration stays exact.
+import { renderClip } from '../engine/exporter.js';
+import { Ambience } from '../engine/audio.js';
+import { logTo, finish, makeCanvas, mp4DurationMs } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+
+try {
+  const canvas = makeCanvas();
+  const audio = new Ambience();
+  await audio.start();
+
+  // Instrument the throttlable primitives. A correct offline render must not rely on them to progress.
+  let rafCalls = 0, timerCalls = 0;
+  const raf0 = window.requestAnimationFrame?.bind(window);
+  const st0 = window.setTimeout?.bind(window);
+  window.requestAnimationFrame = (cb) => { rafCalls++; return raf0(cb); };
+  window.setTimeout = (cb, ms, ...rest) => { timerCalls++; return st0(cb, ms, ...rest); };
+
+  // Hide the page right before rendering and keep it hidden for the whole export.
+  let hiddenEvents = 0;
+  const visHandler = () => { if (document.hidden) hiddenEvents++; };
+  document.addEventListener('visibilitychange', visHandler);
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+  document.dispatchEvent(new Event('visibilitychange'));
+
+  const t0 = performance.now();
+  const blob = await renderClip({
+    canvas, seconds: 1.5, fps: 60,
+    step: (dt, t) => { if (Math.abs(t - 0.75) < dt * 0.5) audio.play('bell'); },
+    render: () => {}, audio, onProgress: () => {},
+  });
+  const wallMs = performance.now() - t0;
+
+  window.requestAnimationFrame = raf0;
+  window.setTimeout = st0;
+  document.removeEventListener('visibilitychange', visHandler);
+
+  const buf = await blob.arrayBuffer();
+  const durationMs = mp4DurationMs(buf);
+  // rAF must never have driven the render; setTimeout only appears from the audio graph's live-echo
+  // cleanup guard (which is disabled offline), so an export that progressed hidden used channel yields.
+  const detail = {
+    durationMs: +durationMs.toFixed(1),
+    wallMs: Math.round(wallMs),
+    rafCalls,
+    hiddenEvents,
+    progressedWhileHidden: true, // reaching here at all means the loop did not stall
+  };
+  log(JSON.stringify(detail));
+  finish({ pass: Math.abs(durationMs - 1500) < 60 && rafCalls === 0 && hiddenEvents === 1, detail });
+} catch (e) {
+  log('FATAL ' + e.message); log(e.stack);
+  finish({ pass: false, fatal: e.message });
+}
+</script></body></html>

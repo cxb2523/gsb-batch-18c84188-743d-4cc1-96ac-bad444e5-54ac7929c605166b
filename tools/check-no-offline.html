@@ -1,0 +1,38 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check 3: when OfflineAudioContext cannot be constructed at all, export degrades to silent and leaves
+// the live audio graph fully intact.
+import { renderClip } from '../engine/exporter.js';
+import { Ambience } from '../engine/audio.js';
+import { logTo, finish, makeCanvas, hasAudioTrack } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+
+try {
+  const canvas = makeCanvas();
+  const audio = new Ambience();
+  await audio.start();
+  const liveCtx = audio.ctx;
+  const backup = window.OfflineAudioContext;
+  window.OfflineAudioContext = class { constructor() { throw new Error('blocked by policy'); } };
+  let threw = null, blob = null;
+  try {
+    blob = await renderClip({ canvas, seconds: 2, fps: 60, step: () => {}, render: () => {}, audio, onProgress: () => {} });
+  } catch (e) { threw = e.message; }
+  window.OfflineAudioContext = backup;
+  const buf = blob ? await blob.arrayBuffer() : null;
+  const detail = {
+    threw,
+    silent: buf ? !hasAudioTrack(buf) : null,
+    liveCtxSame: audio.ctx === liveCtx,
+    offlineFlagClear: audio._offline !== true,
+    liveSnapshotNull: audio._live == null,
+  };
+  log(JSON.stringify(detail));
+  finish({ pass: !!blob && !threw && detail.silent && detail.liveCtxSame && detail.offlineFlagClear && detail.liveSnapshotNull, detail });
+} catch (e) {
+  log('FATAL ' + e.message); log(e.stack);
+  finish({ pass: false, fatal: e.message });
+}
+</script></body></html>

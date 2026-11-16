@@ -88,6 +88,13 @@ All clips are standard MP4 files (H.264 + AAC, index first) and land in your Dow
 - **Social kit.** With the save endpoint running (`python3 tools/save-endpoint.py`), `await __pixel.kit()` in the browser console renders every scene's demo clip as 16:9 and 1:1 MP4 (3840×2160, 2160×2160) and a hero photo as 4:5 and 1:1 PNG (2160×2700, 2160×2160) into `exports/`. Square and portrait frames use pixel size 3 (6 in the 2× files) with the camera fitted to the diorama.
 - `tools/fmp4-to-mp4.py` rewrites a fragmented MP4 (from Chrome's MediaRecorder or a screen recorder) as a standard one without re-encoding.
 
+### Export audio sync and testing
+
+Offline export locks audio to the frame clock: before every 60 fps step the audio clock is pinned to that frame's time, so any `play()`/`setLoop()` the scene triggers inside `update()` (bells, horns, birds, and the wind/rain/water beds' gain ramps) lands exactly on the frame that fired it — never on a hardware timeline. When the export ends the live audio graph is restored, and if the browser has no AAC encoder (or the offline render fails) the clip is still written, silently, instead of failing. The render loop yields only through `MessageChannel` tasks (not `setTimeout`/rAF), so switching tabs mid-export does not stall it.
+
+- `node tools/node-tests.mjs` — deterministic checks for the frame-clock pinning, offline/live graph restore (including render failures), the silent-MP4 fallback paths, the MP4 duration/track muxing, and the background-safe yield mechanism. No browser needed.
+- `node tools/run-export-test.cjs` — headless-Chrome acceptance pages (video-only export and the no-`OfflineAudioContext` degradation run reliably; the pages that call `startRendering()` are retried because headless virtual time intermittently deadlocks the audio thread in some sandboxes, independent of the engine).
+
 ## How it works
 
 1. The scene renders at low resolution (output size ÷ pixel size, e.g. 480×270) into an HDR colour buffer, view normals and depth.

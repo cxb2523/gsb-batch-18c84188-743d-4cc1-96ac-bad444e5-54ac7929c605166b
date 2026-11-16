@@ -1,0 +1,29 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check: one-shot sounds triggered from the scene update land at the frame-clock time in the rendered
+// audio. Kept to a single short OfflineAudioContext render for maximum headless reliability; the clock
+// pinning logic itself is also covered deterministically in tools/node-tests.mjs.
+import { Ambience } from '../engine/audio.js';
+import { detectBellTimes, finish, logTo } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+try {
+  const audio = new Ambience();
+  const bellAt = [0.5];
+  audio.beginOffline(1.25);
+  for (let i = 0; i < 60; i++) {
+    const t = i / 60;
+    audio._clock = t; // exporter pins this before every frame
+    if (Math.abs(t - bellAt[0]) < (1 / 60) * 0.5) audio.play('bell');
+    audio.update(1 / 60, { cur: { wind: 0, rain: 0, storm: 0, snow: 0, fog: 0 }, daylight: 1, night: 0 });
+  }
+  const scheduledClockOk = audio.now() === 59 / 60;
+  const buffer = await audio.endOffline();
+  const { peaks, matched } = detectBellTimes(buffer, bellAt);
+  const restored = audio._offline !== true && audio._live == null;
+  const detail = { bellAt, peaks, matched, restored, scheduledClockOk };
+  log(JSON.stringify(detail));
+  finish({ pass: matched.every(Boolean) && restored && scheduledClockOk, detail });
+} catch (e) { log('FATAL ' + e.message); log(e.stack); finish({ pass: false, fatal: e.message }); }
+</script></body></html>

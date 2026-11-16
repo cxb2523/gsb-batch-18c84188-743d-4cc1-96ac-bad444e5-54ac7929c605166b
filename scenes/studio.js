@@ -641,8 +641,10 @@ export default {
       const lo = audio?.loops?.lofi;
       let phase, index;
       if (audio?.ctx && audio.on && lo && lo.next) {
-        // follow the synth's own clock so the speakers punch on the real kick
-        const now = audio.ctx.currentTime;
+        // Follow the synth's own clock so the speakers punch on the real kick. During offline export
+        // audio.now() is the frame-driven clock (the OfflineAudioContext hardware time never advances),
+        // so the beat stays locked to the rendered frames.
+        const now = audio.now();
         const k = Math.max(1, Math.ceil((lo.next - now) / BEAT - 1e-6));
         phase = Math.min(1, Math.max(0, (now - (lo.next - k * BEAT)) / BEAT));
         index = lo.beat - k;

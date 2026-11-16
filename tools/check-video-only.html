@@ -1,0 +1,20 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Video-only renderClip (audio: null): isolates the WebCodecs video path from the OAC deadlock.
+import { renderClip } from '../engine/exporter.js';
+import { logTo, finish, makeCanvas, mp4DurationMs, hasAudioTrack } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+try {
+  const canvas = makeCanvas();
+  const blob = await renderClip({
+    canvas, seconds: 1.5, fps: 60, step: () => {}, render: () => {}, audio: null, onProgress: () => {},
+  });
+  const buf = await blob.arrayBuffer();
+  const durationMs = mp4DurationMs(buf);
+  const detail = { durationMs: +durationMs.toFixed(1), hasAudio: hasAudioTrack(buf), bytes: blob.size };
+  log(JSON.stringify(detail));
+  finish({ pass: Math.abs(durationMs - 1500) < 60 && !detail.hasAudio && blob.size > 0, detail });
+} catch (e) { log('FATAL ' + e.message); finish({ pass: false, fatal: e.message }); }
+</script></body></html>

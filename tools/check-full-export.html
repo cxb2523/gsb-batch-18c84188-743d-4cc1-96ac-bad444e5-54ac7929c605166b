@@ -1,0 +1,49 @@
+<!doctype html>
+<html><body><pre id="log">start
+</pre>
+<script type="module">
+// Check 1: full renderClip with audio — MP4 duration is exact, has an audio track, one-shot sounds are
+// scheduled at their frame time, and the live audio graph is restored and usable afterwards.
+import { renderClip } from '../engine/exporter.js';
+import { Ambience } from '../engine/audio.js';
+import { logTo, finish, makeCanvas, mp4DurationMs, hasAudioTrack } from './export-test-lib.js';
+const log = (...a) => logTo('log', ...a);
+
+try {
+  const canvas = makeCanvas();
+  const audio = new Ambience();
+  await audio.start();
+  const liveCtx = audio.ctx;
+  const bellAt = [0.5];
+  const scheduled = [];
+  const blob = await renderClip({
+    canvas, seconds: 1.5, fps: 60,
+    step: (dt, t) => {
+      for (const at of bellAt) if (Math.abs(t - at) < dt * 0.5) { scheduled.push(audio.now()); audio.play('bell'); }
+    },
+    render: () => {}, audio, onProgress: () => {},
+  });
+  const buf = await blob.arrayBuffer();
+  const durationMs = mp4DurationMs(buf);
+  const audioTrack = hasAudioTrack(buf);
+  const syncOk = scheduled.length === 1 && Math.abs(scheduled[0] - bellAt[0]) < 1e-9;
+  const liveRestored = audio.ctx === liveCtx && audio._offline !== true && audio._clock === undefined && audio._live == null;
+  // live graph still accepts nodes after export
+  let liveUsable = false;
+  try {
+    const o = audio.ctx.createOscillator();
+    const g = audio.ctx.createGain();
+    o.connect(g); g.connect(audio.master);
+    o.start();
+    o.stop(audio.now() + 0.05);
+    audio.play('bell');
+    liveUsable = true;
+  } catch (e) { log('live use error: ' + e.message); }
+  const detail = { durationMs: +durationMs.toFixed(1), expectedMs: 1500, audioTrack, scheduled, liveRestored, liveUsable };
+  log(JSON.stringify(detail));
+  finish({ pass: Math.abs(durationMs - 1500) < 60 && audioTrack && syncOk && liveRestored && liveUsable, detail });
+} catch (e) {
+  log('FATAL ' + e.message); log(e.stack);
+  finish({ pass: false, fatal: e.message });
+}
+</script></body></html>

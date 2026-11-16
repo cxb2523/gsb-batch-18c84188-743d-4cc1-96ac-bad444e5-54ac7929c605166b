@@ -207,6 +207,8 @@ export class Ambience {
    * Offline rendering for clip export: everything the scene plays or loops is scheduled on an
    * OfflineAudioContext while the export steps the world; set audio._clock to the clip time before
    * each update. endOffline() renders and returns the AudioBuffer, then the live graph comes back.
+   * The whole render runs on the simulation clock (now() === _clock): nothing here reads the
+   * context's own currentTime, which on an OfflineAudioContext never advances until startRendering().
    */
   beginOffline(seconds, sampleRate = 48000) {
     const keys = ['ctx', 'master', 'dest', 'white', 'brown', 'pink', 'wind', 'rain', 'rainLow', 'water', 'waterSwell', 'birdBus', 'bugBus', 'loops', 'lofiBus', 'roofBus', 'dripTimer', 'on', '_acc', 'birdTimer', 'cricketTimer', 'hornTimer', '_clock', '_offline'];
@@ -222,11 +224,42 @@ export class Ambience {
     this.on = true;
   }
 
+  /**
+   * Build the offline graph for an export. Returns true when sound will be rendered, or false (leaving the
+   * live graph untouched) when this browser has no working OfflineAudioContext, so the export proceeds silent.
+   */
+  beginOfflineForExport(seconds, sampleRate = 48000) {
+    try {
+      this.beginOffline(seconds, sampleRate);
+      return true;
+    } catch (e) {
+      console.warn('Offline audio unavailable, exporting without sound:', e?.message || e);
+      this._live = null;
+      this._offline = false;
+      return false;
+    }
+  }
+
+  /** Render the offline graph. The live graph is always restored, even when rendering fails. */
   async endOffline() {
-    const buffer = await this.ctx.startRendering();
+    try {
+      return await this.ctx.startRendering();
+    } finally {
+      this.restoreLive();
+    }
+  }
+
+  /** Throw the offline graph away without rendering (failed export) and bring the live graph back. */
+  abortOffline() {
+    if (!this._offline) return;
+    try { this.ctx?.close?.(); } catch (e) { /* already gone */ }
+    this.restoreLive();
+  }
+
+  restoreLive() {
+    if (!this._live) return;
     Object.assign(this, this._live);
     this._live = null;
-    return buffer;
   }
 
   async start() {
