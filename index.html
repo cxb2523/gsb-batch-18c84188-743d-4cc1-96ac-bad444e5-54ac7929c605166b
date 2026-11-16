@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Snake Game</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css?family=Chilanka&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="game-container">
+        <h1>JavaScript <span class="green-text"> Snake </span> Game <img src="assets/snakelogo.jpg" alt="Snake game logo"></h1>
+        <canvas id="canvas"></canvas>
+        <div class="text">
+            <p class="score">Snake Size: <span id="snakeSize">1</span></p>
+            <p>Developed by: <a href="https://leandrols.github.io" target="_blank" rel="noopener noreferrer">Leandro L.</a></p>
+            <ul>
+                <li><a href="https://github.com/LeandroLS/SnakeGame" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+                <li><a href="https://www.linkedin.com/in/silvall" target="_blank" rel="noopener noreferrer">Linkedin</a></li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- A ordem importa: config.js primeiro, pois os demais dependem dele. -->
+    <script src="./config.js"></script>
+    <script src="./objects/World.js"></script>
+    <script src="./objects/Snake.js"></script>
+    <script src="./objects/Food.js"></script>
+    <script src="./game.js"></script>
+</body>
+
+</html>
