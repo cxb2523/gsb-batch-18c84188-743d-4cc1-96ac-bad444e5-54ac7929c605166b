@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 const MediaStoreContext = createContext<MediaStore | null>(null);
 
@@ -25,6 +25,29 @@ export interface StateStore<T> {
     getServerSnapshot?: () => T;
     setState: (state: T) => void;
     subscribe: (callback: StoreListener) => StoreListenerUnsubscribe;
+    /**
+     * Re-read the value directly from the media element and notify listeners
+     * if it changed. Used when the media element may have silently clamped or
+     * rejected a change without emitting an event.
+     */
+    forceSync?: () => void;
+}
+
+/**
+ * Tracks the target time of a seek that has not yet settled in the media
+ * element. While `getState()` returns a number, playback UI displays that
+ * target time instead of the media element's live `currentTime`.
+ *
+ * - `setState(time)` marks a programmatic (non-interactive) seek. It is
+ *   cleared automatically by the next `seeked` event, or by a safety timeout
+ *   when the media element rejects or clamps the request without seeking.
+ * - `beginInteraction()` / `endInteraction()` bracket a drag or keyboard
+ *   adjustment. `seeked` events emitted by intermediate seeks while an
+ *   interaction is active do not clear the target time.
+ */
+export interface PendingSeekStore extends StateStore<number | null> {
+    beginInteraction: () => void;
+    endInteraction: () => void;
 }
 
 export function createStateStore<T>(initialState: T): StateStore<T> {
@@ -72,6 +95,7 @@ export interface MediaStore {
     playbackRate: StateStore<number>;
     duration: StateStore<number>;
     currentTime: StateStore<number>;
+    pendingSeek: PendingSeekStore;
     fullscreen: StateStore<boolean>;
     opaque: (key: string) => StateStore<unknown>;
 }
@@ -700,6 +724,13 @@ function createMediaCurrentTimeStore(mediaElement: StateStore<HTMLMediaElement |
         listeners.forEach(listener => listener());
     }
 
+    function forceSync() {
+        const nextTime = mediaElement.getState()?.currentTime ?? 0;
+        if (nextTime === currentTime) return;
+        currentTime = nextTime;
+        listeners.forEach(listener => listener());
+    }
+
     function detectChanges() {
         cleanup();
         update();
@@ -725,12 +756,126 @@ function createMediaCurrentTimeStore(mediaElement: StateStore<HTMLMediaElement |
             element.currentTime = Math.min(Math.max(time, 0), element.duration);
             update();
         },
+        forceSync,
         subscribe(callback) {
             listeners.add(callback);
             return () => {
                 listeners.delete(callback);
             }
         },
+    }
+}
+
+export function createMediaPendingSeekStore(
+    mediaElement: StateStore<HTMLMediaElement | null>,
+    currentTimeStore: StateStore<number>,
+): PendingSeekStore {
+    const listeners = new Set<StoreListener>();
+    let pendingSeek: number | null = null;
+    let interacting = false;
+    let cleanup: StoreListenerUnsubscribe = () => {};
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let seekGeneration = 0;
+
+    function clearFallbackTimer() {
+        if (fallbackTimer !== undefined) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = undefined;
+        }
+    }
+
+    function notify() {
+        listeners.forEach(listener => listener());
+    }
+
+    function clearPending() {
+        seekGeneration++;
+        clearFallbackTimer();
+        if (pendingSeek === null) return;
+        pendingSeek = null;
+        notify();
+    }
+
+    function detectChanges() {
+        cleanup();
+        clearFallbackTimer();
+        seekGeneration++;
+        pendingSeek = null;
+        interacting = false;
+
+        const element = mediaElement.getState();
+        if (!element) return;
+
+        function handleSeeked() {
+            // While the user is still dragging, intermediate seeks must not
+            // clear the target time their UI is anchored to. Once the
+            // interaction has ended, every seeked re-syncs the cached time so
+            // an async clamp is reflected even if the commit ran before the
+            // media finished seeking.
+            if (interacting) return;
+            currentTimeStore.forceSync?.();
+            clearPending();
+        }
+
+        element.addEventListener('seeked', handleSeeked);
+        cleanup = () => {
+            element.removeEventListener('seeked', handleSeeked);
+            clearFallbackTimer();
+        };
+    }
+
+    mediaElement.subscribe(detectChanges);
+    detectChanges();
+
+    return {
+        getState() {
+            return pendingSeek;
+        },
+        setState(time) {
+            const element = mediaElement.getState();
+            if (time === null || !Number.isFinite(time) || Number.isNaN(time)) {
+                clearPending();
+                return;
+            }
+            const generation = ++seekGeneration;
+            pendingSeek = time;
+            clearFallbackTimer();
+            // The media element may reject or silently clamp a seek (for
+            // example when the target lies outside the seekable ranges), in
+            // which case no `seeked` event may ever fire. Fall back to the
+            // media's own current time after a safety delay unless the user is
+            // actively interacting (the interaction end clears the state).
+            if (!interacting) {
+                fallbackTimer = setTimeout(() => {
+                    if (generation !== seekGeneration) return;
+                    fallbackTimer = undefined;
+                    currentTimeStore.forceSync?.();
+                    clearPending();
+                }, 1000);
+            }
+            notify();
+        },
+        beginInteraction() {
+            interacting = true;
+            clearFallbackTimer();
+        },
+        endInteraction() {
+            if (!interacting) return;
+            interacting = false;
+            // Re-align the display with the media element's actual current
+            // time immediately, honouring any rejection or clamping. Do not
+            // wait for a `seeked` event: a clamped or rejected seek may never
+            // emit one, and intermediate seeks while interacting were
+            // deliberately ignored above.
+            currentTimeStore.forceSync?.();
+            clearPending();
+        },
+        subscribe(callback) {
+            listeners.add(callback);
+            return () => {
+                listeners.delete(callback);
+            }
+        }
     }
 }
 
@@ -828,21 +973,47 @@ export function createMediaStore(): MediaStore {
 
     function withMediaSnapshot<T>(store: StateStore<T>): StateStore<T> {
         const snapshot = store.getState();
-        return {
+        // Keep a dedicated listener set so imperative methods exposed on the
+        // wrapped store notify the same callbacks React subscribes through.
+        // Forwarding directly to the underlying store's `forceSync` would
+        // notify its own listeners, which the wrapped subscribe path does not
+        // share.
+        const listeners = new Set<StoreListener>();
+        const wrapped: StateStore<T> = {
             ...store,
             getServerSnapshot: () => snapshot,
             subscribe(callback) {
+                listeners.add(callback);
                 const unsubscribeStore = store.subscribe(callback);
                 const unsubscribeElement = mediaElement.subscribe(callback);
                 return () => {
+                    listeners.delete(callback);
                     unsubscribeStore();
                     unsubscribeElement();
                 };
             },
         };
+        if (store.forceSync) {
+            wrapped.forceSync = () => {
+                store.forceSync?.();
+                listeners.forEach(listener => listener());
+            };
+        }
+        return wrapped;
+    }
+
+    function withPendingSeekSnapshot(store: PendingSeekStore): PendingSeekStore {
+        return {
+            ...withMediaSnapshot(store),
+            beginInteraction: store.beginInteraction,
+            endInteraction: store.endInteraction,
+        } as PendingSeekStore;
     }
 
     const opaqueStores = new Map<string, StateStore<unknown>>();
+
+    const currentTimeStore = withMediaSnapshot(createMediaCurrentTimeStore(mediaElement));
+    const pendingSeekStore = withPendingSeekSnapshot(createMediaPendingSeekStore(mediaElement, currentTimeStore));
 
     return {
         mediaElement,
@@ -871,7 +1042,8 @@ export function createMediaStore(): MediaStore {
         volume: withMediaSnapshot(createMediaVolumeStore(mediaElement)),
         playbackRate: withMediaSnapshot(createMediaPlaybackRateStore(mediaElement)),
         duration: withMediaSnapshot(createMediaDurationStore(mediaElement)),
-        currentTime: withMediaSnapshot(createMediaCurrentTimeStore(mediaElement)),
+        currentTime: currentTimeStore,
+        pendingSeek: pendingSeekStore,
         fullscreen: withMediaSnapshot(createMediaFullscreenStore(mediaElement)),
         opaque: (key: string) => {
             if (opaqueStores.has(key)) 
@@ -1011,26 +1183,59 @@ export function useMediaDuration() {
 
 export function useMediaCurrentTime() {
     const store = useMediaStore();
-    return useStateStore(store.currentTime);
+    const currentTime = useStateStoreValue(store.currentTime);
+    const pendingSeek = useStateStoreValue(store.pendingSeek);
+    const seek = useCallback((time: number) => {
+        store.pendingSeek.setState(time);
+        store.currentTime.setState(time);
+    }, [store]);
+    return [pendingSeek ?? currentTime, seek] as const;
+}
+
+export function useMediaPendingSeek() {
+    const store = useMediaStore();
+    const pendingSeek = useStateStoreValue(store.pendingSeek);
+    return [
+        pendingSeek,
+        store.pendingSeek.setState,
+        {
+            beginInteraction: store.pendingSeek.beginInteraction,
+            endInteraction: store.pendingSeek.endInteraction,
+        },
+    ] as const;
+}
+
+/**
+ * The time that playback UI should display. While a seek initiated by the user
+ * is in flight, the user's target time is shown instead of the media element's
+ * live `currentTime`, so `timeupdate` events cannot drag the UI backwards
+ * mid-drag. Once the seek settles (or is rejected/clamped by the media element)
+ * the display falls back to the media element's actual `currentTime`.
+ */
+export function useMediaDisplayCurrentTime() {
+    const store = useMediaStore();
+    const currentTime = useStateStoreValue(store.currentTime);
+    const pendingSeek = useStateStoreValue(store.pendingSeek);
+    return pendingSeek ?? currentTime;
 }
 
 export function useMediaCurrentTimeFine() {
     const store = useMediaStore();
     const element = useMediaElement();
-    const [currentTime, setCurrentTime] = useState(0);
+    const pendingSeek = useStateStoreValue(store.pendingSeek);
+    const currentTime = useStateStoreValue(store.currentTime);
 
     useEffect(() => {
         if (!element) return;
         const media = element;
         let handle: number | undefined;
 
-        function updateTime() {
-            if (Number.isFinite(media.currentTime))
-                setCurrentTime(media.currentTime);
-        }
-
+        // The rAF loop keeps the store's cached current time advancing while
+        // playback is running; the actual rendered value comes from the store
+        // via useSyncExternalStore above, so paused seeks and forced re-syncs
+        // are reflected immediately without depending on this loop.
         function tick() {
-            updateTime();
+            store.currentTime.forceSync?.();
             handle = undefined;
             if (!media.paused && !media.ended)
                 handle = requestAnimationFrame(tick);
@@ -1041,23 +1246,22 @@ export function useMediaCurrentTimeFine() {
             tick();
         }
 
-        function handleTimeChange() {
-            if (media.paused) updateTime();
-        }
-
         const events = ['play', 'pause', 'ended'];
         events.forEach(event => media.addEventListener(event, handlePlaybackChange));
-        const unsubscribe = store.currentTime.subscribe(handleTimeChange);
         handlePlaybackChange();
 
         return () => {
             if (handle !== undefined) cancelAnimationFrame(handle);
-            unsubscribe();
             events.forEach(event => media.removeEventListener(event, handlePlaybackChange));
         }
     }, [element, store]);
 
-    return [currentTime, store.currentTime.setState] as const;
+    const seek = useCallback((time: number) => {
+        store.pendingSeek.setState(time);
+        store.currentTime.setState(time);
+    }, [store]);
+
+    return [pendingSeek ?? currentTime, seek] as const;
 }
 
 export function useMediaFullscreen() {
