@@ -6,9 +6,15 @@ export class PitchShiftNodeUI extends DSPNode {
         this.type = 'pitch-shifter';
         this.width = 200;
 
+        // Base (user / preset) values and the last values actually applied.
+        // Effective values track modulation so automation never overwrites the
+        // values that get saved into snapshots and presets.
         this.semitones = 0;
+        this.effectiveSemitones = 0;
         this.cents = 0;
+        this.effectiveCents = 0;
         this.mix = 1;
+        this.effectiveMix = 1;
         this.pitchRatio = 1;
 
         this.context = null;
@@ -20,7 +26,12 @@ export class PitchShiftNodeUI extends DSPNode {
         this.bypassGain = null;
         this.workletNode = null;
         this.deferredInit = false;
+        // Estimated compensation latency (samples) used until the worklet
+        // reports the real value measured inside the processing thread.
         this.latencySamples = 0;
+        // False until a latency report from the *current* worklet arrives, so
+        // stale messages from an old context can never poison a new node.
+        this.latencyConfirmed = false;
         this._bypassCleanupTimer = null;
 
         this.fftSize = PitchShiftNodeUI.defaultFFTSize;
@@ -28,7 +39,16 @@ export class PitchShiftNodeUI extends DSPNode {
     }
 
     initAudio(ctx) {
+        // Re-initialisation must start from a clean slate: any latency, gain
+        // or worklet state left over from a previous context cannot survive.
         this.context = ctx;
+        this.workletNode = null;
+        this.deferredInit = false;
+        this.latencyConfirmed = false;
+        if (this._bypassCleanupTimer) {
+            clearTimeout(this._bypassCleanupTimer);
+            this._bypassCleanupTimer = null;
+        }
 
         this.inputGain = ctx.createGain();
         this.outputGain = ctx.createGain();
@@ -57,7 +77,7 @@ export class PitchShiftNodeUI extends DSPNode {
                 min: -24,
                 max: 24,
                 scale: 'linear',
-                onChange: (v) => this.setSemitones(v, ctx)
+                onChange: (v, meta) => this.setSemitones(v, ctx, meta)
             },
             {
                 label: 'Fine (cents)',
@@ -66,7 +86,7 @@ export class PitchShiftNodeUI extends DSPNode {
                 min: -100,
                 max: 100,
                 scale: 'linear',
-                onChange: (v) => this.setFine(v, ctx)
+                onChange: (v, meta) => this.setFine(v, ctx, meta)
             },
             {
                 label: 'Mix',
@@ -75,56 +95,132 @@ export class PitchShiftNodeUI extends DSPNode {
                 min: 0,
                 max: 1,
                 scale: 'linear',
-                onChange: (v) => this.setMix(v, ctx)
+                onChange: (v, meta) => this.setMix(v, ctx, meta)
             }
         ];
 
         this.initializeParams();
         this.computeHeight();
 
+        // Fallback estimate until the worklet reports the measured latency.
         this.latencySamples = this.estimateLatency(this.fftSize, this.overlap);
+        this.latencyConfirmed = false;
         this.updateDryDelay(ctx);
         this.updateMix(ctx);
 
         this.prepareWorklet(ctx);
     }
 
+    // Keep these in lock-step with the worklet's sanitisers so the fallback
+    // estimate agrees with the latency the processing thread will measure.
+    static sanitizeFFTSize(size) {
+        let value = 512;
+        while (value < size) {
+            value <<= 1;
+        }
+        if (value > 8192) value = 8192;
+        return value;
+    }
+
+    static sanitizeOverlap(overlap, fftSize) {
+        let value = Math.max(2, Math.floor(overlap));
+        if (value > fftSize) value = fftSize;
+        while (fftSize % value !== 0 && value > 2) {
+            value--;
+        }
+        if (fftSize % value !== 0) {
+            value = 2;
+        }
+        return value;
+    }
+
     estimateLatency(fftSize, overlap) {
-        const slices = Math.max(2, Math.floor(overlap));
-        const hop = Math.max(1, Math.floor(fftSize / slices));
-        return Math.max(0, fftSize - hop);
+        const size = PitchShiftNodeUI.sanitizeFFTSize(fftSize);
+        const slices = PitchShiftNodeUI.sanitizeOverlap(overlap, size);
+        const hop = Math.max(1, Math.floor(size / slices));
+        return Math.max(0, size - hop);
     }
 
-    setSemitones(value, ctx) {
-        this.semitones = typeof value === 'number' ? value : 0;
+    static _isAutomation(meta) {
+        return !!(meta && meta.fromAutomation === true);
+    }
+
+    setSemitones(value, ctx, meta) {
+        const next = Number.isFinite(value)
+            ? Math.max(-24, Math.min(24, value))
+            : this.semitones;
+        this.effectiveSemitones = next;
+        if (!PitchShiftNodeUI._isAutomation(meta)) {
+            // User / preset edit: persist into the value used for snapshots.
+            this.semitones = next;
+            const param = this.params && this.params[0];
+            if (param) {
+                param.value = next;
+                param.effectiveValue = next;
+            }
+        } else {
+            const param = this.params && this.params[0];
+            if (param) param.effectiveValue = next;
+        }
         this.updatePitchParam(ctx);
     }
 
-    setFine(value, ctx) {
-        this.cents = typeof value === 'number' ? value : 0;
+    setFine(value, ctx, meta) {
+        const next = Number.isFinite(value)
+            ? Math.max(-100, Math.min(100, value))
+            : this.cents;
+        this.effectiveCents = next;
+        if (!PitchShiftNodeUI._isAutomation(meta)) {
+            this.cents = next;
+            const param = this.params && this.params[1];
+            if (param) {
+                param.value = next;
+                param.effectiveValue = next;
+            }
+        } else {
+            const param = this.params && this.params[1];
+            if (param) param.effectiveValue = next;
+        }
         this.updatePitchParam(ctx);
     }
 
-    setMix(value, ctx) {
-        this.mix = Math.max(0, Math.min(1, value));
+    setMix(value, ctx, meta) {
+        const next = Math.max(0, Math.min(1, Number.isFinite(value) ? value : this.mix));
+        this.effectiveMix = next;
+        if (!PitchShiftNodeUI._isAutomation(meta)) {
+            this.mix = next;
+            const param = this.params && this.params[2];
+            if (param) {
+                param.value = next;
+                param.effectiveValue = next;
+            }
+        } else {
+            const param = this.params && this.params[2];
+            if (param) param.effectiveValue = next;
+        }
         this.updateMix(ctx);
     }
 
     updateMix(ctx) {
         if (!this.dryGain || !this.wetGain) return;
         const context = ctx || this.context;
+        // Complementary gains: dry + wet is exactly 1 at every instant.
+        const wet = this.effectiveMix;
+        const dry = 1 - wet;
         if (context) {
             const now = context.currentTime;
-            this.dryGain.gain.setTargetAtTime(1 - this.mix, now, 0.02);
-            this.wetGain.gain.setTargetAtTime(this.mix, now, 0.02);
+            this.dryGain.gain.setTargetAtTime(dry, now, 0.02);
+            this.wetGain.gain.setTargetAtTime(wet, now, 0.02);
         } else {
-            this.dryGain.gain.value = 1 - this.mix;
-            this.wetGain.gain.value = this.mix;
+            this.dryGain.gain.value = dry;
+            this.wetGain.gain.value = wet;
         }
     }
 
     computePitchRatio() {
-        const total = this.semitones + (this.cents / 100);
+        // Drive the ratio from the modulated (effective) values, but always
+        // clamp it into the same 0.25–4 range enforced inside the worklet.
+        const total = this.effectiveSemitones + (this.effectiveCents / 100);
         const ratio = Math.pow(2, total / 12);
         return Math.min(4, Math.max(0.25, ratio));
     }
@@ -136,6 +232,8 @@ export class PitchShiftNodeUI extends DSPNode {
             const param = this.workletNode.parameters.get('ratio');
             if (param) {
                 if (context) {
+                    // setTargetAtTime ramps the change instead of jumping; the
+                    // worklet smooths per-block as a second line of defence.
                     param.setTargetAtTime(this.pitchRatio, context.currentTime, 0.01);
                 } else {
                     param.value = this.pitchRatio;
@@ -148,8 +246,28 @@ export class PitchShiftNodeUI extends DSPNode {
         if (!this.dryDelay) return;
         const context = ctx || this.context;
         if (!context) return;
+        // Latency comes from the worklet once reported; before then the
+        // estimated fallback is used so the path is never silent/uncompensated.
         const seconds = Math.min(0.9, Math.max(0, this.latencySamples / context.sampleRate));
         this.dryDelay.delayTime.setTargetAtTime(seconds, context.currentTime, 0.02);
+    }
+
+    // Apply a new frame configuration at runtime. The worklet re-measures its
+    // latency after reconfiguring and posts it back; until that arrives the
+    // refreshed estimate keeps the dry path aligned.
+    reconfigureWorklet(fftSize, overlap) {
+        if (typeof fftSize === 'number' && Number.isFinite(fftSize)) {
+            this.fftSize = fftSize;
+        }
+        if (typeof overlap === 'number' && Number.isFinite(overlap)) {
+            this.overlap = overlap;
+        }
+        this.latencyConfirmed = false;
+        this.latencySamples = this.estimateLatency(this.fftSize, this.overlap);
+        this.updateDryDelay();
+        if (this.workletNode) {
+            this.sendConfiguration();
+        }
     }
 
     prepareWorklet(ctx) {
@@ -207,6 +325,13 @@ export class PitchShiftNodeUI extends DSPNode {
             return;
         }
 
+        // A fresh worklet means any earlier confirmation is stale; fall back
+        // to the estimate until this worklet's first latency report arrives.
+        this.latencyConfirmed = false;
+        this.latencySamples = this.estimateLatency(this.fftSize, this.overlap);
+        this.updateDryDelay(ctx);
+
+        const workletNode = this.workletNode;
         this.inputGain.connect(this.workletNode);
         this.workletNode.connect(this.wetGain);
 
@@ -229,6 +354,8 @@ export class PitchShiftNodeUI extends DSPNode {
         this.sendConfiguration();
 
         this.workletNode.port.onmessage = (event) => {
+            // Ignore reports from a worklet/context this node no longer owns.
+            if (this.workletNode !== workletNode || !this.context || this.context !== ctx) return;
             this.handleWorkletMessage(event.data);
         };
     }
@@ -246,8 +373,11 @@ export class PitchShiftNodeUI extends DSPNode {
         if (!data || typeof data !== 'object') return;
         if (data.type === 'latency') {
             const samples = Number(data.samples);
-            if (Number.isFinite(samples)) {
+            // The worker thread's measured latency is authoritative once it
+            // reports; guard against malformed or stale payloads.
+            if (Number.isFinite(samples) && samples >= 0 && this.context && this.dryDelay) {
                 this.latencySamples = samples;
+                this.latencyConfirmed = true;
                 this.updateDryDelay();
             }
         }
@@ -295,6 +425,15 @@ export class PitchShiftNodeUI extends DSPNode {
         this.dryGain = null;
         this.wetGain = null;
         this.context = null;
+
+        // Drop every piece of derived state so a later re-add / new context
+        // re-initialises from the estimate instead of stale latency/gains.
+        this.latencySamples = 0;
+        this.latencyConfirmed = false;
+        this.pitchRatio = 1;
+        this.effectiveSemitones = this.semitones;
+        this.effectiveCents = this.cents;
+        this.effectiveMix = this.mix;
     }
 }
 
