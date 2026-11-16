@@ -10,10 +10,19 @@
  */
 
 import * as THREE from 'three';
-import { damp, clamp } from '../core/util';
+import { damp, clamp, forEachSubstep } from '../core/util';
 import type { CarSim } from '../sim/car';
 import type { Terrain } from '../sim/terrain';
 import type { Track } from '../sim/track';
+
+/**
+ * Damping is sliced at 60 Hz. The exponential damp itself is
+ * framerate-independent, but the terrain floor is only respected if it is
+ * enforced along the path: one 50 ms leap can carry the camera through a
+ * ridgeline between two samples. At 60 fps a frame is one slice, so
+ * normal-frame behaviour is unchanged.
+ */
+const MAX_STEP = 1 / 60;
 
 export class ChaseCam {
   private readonly cam: THREE.PerspectiveCamera;
@@ -44,18 +53,27 @@ export class ChaseCam {
     const desired = new THREE.Vector3(car.pos.x - fwd.x * dist, car.pos.y + height, car.pos.z - fwd.z * dist);
     const ground = terrain.sampleHeight(desired.x, desired.z) + 1.4;
     if (desired.y < ground) desired.y = ground;
-    this.pos.x = damp(this.pos.x, desired.x, 5.5, dt);
-    this.pos.y = damp(this.pos.y, desired.y, 4.0, dt);
-    this.pos.z = damp(this.pos.z, desired.z, 5.5, dt);
 
     const lookTarget = new THREE.Vector3(
       car.pos.x + fwd.x * (9 + sp * 0.1),
       car.pos.y + 1.3 + clamp(car.vel.y * 0.06, -1.5, 3),
       car.pos.z + fwd.z * (9 + sp * 0.1),
     );
-    this.look.x = damp(this.look.x, lookTarget.x, 7, dt);
-    this.look.y = damp(this.look.y, lookTarget.y, 6, dt);
-    this.look.z = damp(this.look.z, lookTarget.z, 7, dt);
+
+    // Slice long frames: the damped position must respect the terrain floor
+    // along the whole path, not just at the frame endpoints, or a hard crest
+    // at low fps puts the camera under the surface for a visible moment.
+    forEachSubstep(dt, MAX_STEP, (h) => {
+      this.pos.x = damp(this.pos.x, desired.x, 5.5, h);
+      this.pos.y = damp(this.pos.y, desired.y, 4.0, h);
+      this.pos.z = damp(this.pos.z, desired.z, 5.5, h);
+      const floor = terrain.sampleHeight(this.pos.x, this.pos.z) + 1.4;
+      if (this.pos.y < floor) this.pos.y = floor;
+
+      this.look.x = damp(this.look.x, lookTarget.x, 7, h);
+      this.look.y = damp(this.look.y, lookTarget.y, 6, h);
+      this.look.z = damp(this.look.z, lookTarget.z, 7, h);
+    });
 
     this.shake = Math.max(car.impact * 0.5, this.shake - dt * 1.5);
     const sh = this.shake * this.shake;

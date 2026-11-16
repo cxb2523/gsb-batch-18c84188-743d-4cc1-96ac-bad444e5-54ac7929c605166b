@@ -8,12 +8,19 @@
  */
 
 import * as THREE from 'three';
-import { clamp01 } from '../core/util';
+import { clamp01, forEachSubstep } from '../core/util';
 import type { CarSim } from '../sim/car';
 import type { Terrain } from '../sim/terrain';
 
 const MAX = 3200;
 const G = 2.6;
+/**
+ * Ballistics are sliced at 60 Hz. A long frame on a slow device is otherwise
+ * a single coarse leap: grains visibly teleport and a fast one can clear a
+ * ridge or skip the landing check entirely. At 60 fps a frame is one slice,
+ * so normal-frame behaviour is bit-for-bit what it was.
+ */
+const MAX_STEP = 1 / 60;
 
 export class Dust {
   private readonly pos = new Float32Array(MAX * 3);
@@ -129,11 +136,19 @@ export class Dust {
         continue;
       }
       // Vacuum: no drag, just gravity, so grains land where they were thrown.
-      this.vel[i * 3 + 1] -= G * dt;
-      this.pos[i * 3] += this.vel[i * 3] * dt;
-      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
-      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
-      if (this.pos[i * 3 + 1] < terrain.sampleHeight(this.pos[i * 3], this.pos[i * 3 + 2])) {
+      // Sliced so a long frame flies the same parabola as several short ones
+      // and the landing check sees every point along it.
+      const i3 = i * 3;
+      let landed = false;
+      forEachSubstep(dt, MAX_STEP, (h) => {
+        if (landed) return;
+        this.vel[i3 + 1] -= G * h;
+        this.pos[i3] += this.vel[i3] * h;
+        this.pos[i3 + 1] += this.vel[i3 + 1] * h;
+        this.pos[i3 + 2] += this.vel[i3 + 2] * h;
+        if (this.pos[i3 + 1] < terrain.sampleHeight(this.pos[i3], this.pos[i3 + 2])) landed = true;
+      });
+      if (landed) {
         this.life[i] = 0;
         this.size[i] = 0;
       }

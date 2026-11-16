@@ -66,6 +66,25 @@ export const smoothstep = (a: number, b: number, v: number): number => {
 export const damp = (a: number, b: number, lambda: number, dt: number): number =>
   lerp(a, b, 1 - Math.exp(-lambda * dt));
 
+/**
+ * Run `fn` over `dt` in slices of at most `maxStep` seconds.
+ *
+ * Presentation systems (dust ballistics, camera damping) integrate against
+ * the frame dt, which the main loop caps at 50 ms. On a slow device one frame
+ * can therefore be three 60 Hz steps wide, and a single coarse slice would
+ * let a dust grain tunnel through a ridge or a camera path cut through a
+ * hillside. Slicing keeps the long-frame path continuous with the short-frame
+ * one; at 60 fps this is exactly one slice, i.e. identical to before.
+ */
+export function forEachSubstep(dt: number, maxStep: number, fn: (h: number) => void): void {
+  let left = dt;
+  while (left > 1e-9) {
+    const h = left > maxStep ? maxStep : left;
+    fn(h);
+    left -= h;
+  }
+}
+
 /** Wrap an angle into (-PI, PI]. */
 export function angleWrap(a: number): number {
   let x = a;
