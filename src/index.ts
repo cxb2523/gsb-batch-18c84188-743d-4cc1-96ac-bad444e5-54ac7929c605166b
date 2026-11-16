@@ -173,19 +173,48 @@ export class GodraysPass extends Pass implements Disposable {
   private lastParams: GodraysPassParams;
   private lastWidth = 1;
   private lastHeight = 1;
+  /**
+   * The dimensions/`resolutionScale` that the render targets were last allocated for.  Start at
+   * `-1` so that the first `setSize` call (including the one from the constructor) always runs
+   * even when the configured `resolutionScale` equals the default value (`0.5`).
+   */
+  private lastAppliedResolutionScale = -1;
+  private lastAppliedWidth = -1;
+  private lastAppliedHeight = -1;
 
-  private godraysRenderTarget = new THREE.WebGLRenderTarget(1, 1, {
-    minFilter: THREE.NearestFilter,
-    magFilter: THREE.NearestFilter,
-    format: THREE.RGBAFormat,
-    type: THREE.HalfFloatType,
-    generateMipmaps: false,
-  });
+  private godraysRenderTarget = GodraysPass.createGodraysRenderTarget(1, 1);
   private illumPass: GodraysIllumPass;
   private enableBlurPass = true;
   private blurPass: BilateralFilterPass | null = null;
   private blurRenderTarget: THREE.WebGLRenderTarget | null = null;
   private compositorPass: GodraysCompositorPass;
+
+  private static createGodraysRenderTarget(width: number, height: number): THREE.WebGLRenderTarget {
+    return new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      generateMipmaps: false,
+    });
+  }
+
+  private static createBlurRenderTarget(
+    godraysWidth: number,
+    godraysHeight: number
+  ): THREE.WebGLRenderTarget {
+    return new THREE.WebGLRenderTarget(
+      Math.ceil(godraysWidth * GODRAYS_BLUR_RESOLUTION_SCALE),
+      Math.ceil(godraysHeight * GODRAYS_BLUR_RESOLUTION_SCALE),
+      {
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        generateMipmaps: false,
+      }
+    );
+  }
 
   /**
    * Constructs a new GodraysPass.  Casts godrays from a point light source.  Add to your scene's composer like this:
@@ -243,6 +272,20 @@ export class GodraysPass extends Pass implements Disposable {
     // Indicate to the composer that this pass needs depth information from the previous pass
     this.needsDepthTexture = true;
 
+    this.enableBlurPass = !!params.blur;
+
+    // Explicitly size every buffer/uniform for the current `resolutionScale`.  Relying on
+    // `setParams` to trigger this via a scale change is broken when the configured scale equals
+    // the default (`0.5`): the comparison against the previous scale then sees no difference and
+    // the targets stay at their 1x1 placeholder size until the first composer resize.
+    this.setSize(this.lastWidth, this.lastHeight);
+
+    if (this.enableBlurPass) {
+      this.maybeInitBlur(
+        this.godraysRenderTarget.texture as THREE.Texture<{ width: number; height: number }>
+      );
+    }
+
     this.setParams(partialParams);
   }
 
@@ -250,7 +293,7 @@ export class GodraysPass extends Pass implements Disposable {
    * Updates the parameters used for the godrays effect.  Will use default values for any parameters not specified.
    */
   public setParams(partialParams: Partial<GodraysPassParams>): void {
-    const oldScale = this.lastParams.resolutionScale;
+    const previousScale = this.lastParams.resolutionScale;
     const params = populateParams(partialParams);
     this.lastParams = params;
     this.illumPass.updateUniforms(this.props, params);
@@ -258,23 +301,31 @@ export class GodraysPass extends Pass implements Disposable {
     this.compositorPass.updateUpsampleQuality(params.upsampleQuality);
     this.compositorPass.updateDebugSteps(!!params.debugSteps);
 
-    if (params.resolutionScale !== oldScale) {
+    if (params.resolutionScale !== previousScale) {
       this.setSize(this.lastWidth, this.lastHeight);
     }
 
     this.enableBlurPass = !!params.blur;
-    if (params.blur && this.blurPass) {
+    if (params.blur) {
+      // Eagerly (re)create the blur pass and its render target at the *current* godrays
+      // resolution.  This also covers the first time blur is switched back on after being
+      // disabled: the target is allocated fresh at the current size instead of retaining a
+      // stale allocation from an older resolution.
+      this.maybeInitBlur(
+        this.godraysRenderTarget.texture as THREE.Texture<{ width: number; height: number }>
+      );
+
       const blurParams = populateGodraysBlurParams(params.blur);
 
-      if (this.blurPass.material.defines.KSIZE_ENUM !== blurParams.kernelSize) {
-        this.blurPass.dispose();
+      if (this.blurPass!.material.defines.KSIZE_ENUM !== blurParams.kernelSize) {
+        this.blurPass!.dispose();
         this.maybeInitBlur(
           this.godraysRenderTarget.texture as THREE.Texture<{ width: number; height: number }>
         );
       }
 
-      this.blurPass.updateUniforms(blurParams);
-      this.blurPass.updateDebugSteps(!!params.debugSteps);
+      this.blurPass!.updateUniforms(blurParams);
+      this.blurPass!.updateDebugSteps(!!params.debugSteps);
     }
   }
 
@@ -284,21 +335,26 @@ export class GodraysPass extends Pass implements Disposable {
       const blurParams = populateGodraysBlurParams(this.lastParams.blur);
       this.blurPass.updateUniforms(blurParams);
       this.blurPass.updateDebugSteps(!!this.lastParams.debugSteps);
+      this.blurPass.setSize(this.godraysRenderTarget.width, this.godraysRenderTarget.height);
       if (this.depthTexture) {
         this.blurPass.setDepthTexture(this.depthTexture, this.depthPacking ?? undefined);
       }
     }
-    if (!this.blurRenderTarget) {
-      this.blurRenderTarget = new THREE.WebGLRenderTarget(
-        Math.ceil(this.godraysRenderTarget.width * GODRAYS_BLUR_RESOLUTION_SCALE),
-        Math.ceil(this.godraysRenderTarget.height * GODRAYS_BLUR_RESOLUTION_SCALE),
-        {
-          minFilter: THREE.NearestFilter,
-          magFilter: THREE.NearestFilter,
-          format: THREE.RGBAFormat,
-          type: THREE.HalfFloatType,
-          generateMipmaps: false,
-        }
+    const expectedBlurWidth = Math.ceil(
+      this.godraysRenderTarget.width * GODRAYS_BLUR_RESOLUTION_SCALE
+    );
+    const expectedBlurHeight = Math.ceil(
+      this.godraysRenderTarget.height * GODRAYS_BLUR_RESOLUTION_SCALE
+    );
+    if (
+      !this.blurRenderTarget ||
+      this.blurRenderTarget.width !== expectedBlurWidth ||
+      this.blurRenderTarget.height !== expectedBlurHeight
+    ) {
+      this.blurRenderTarget?.dispose();
+      this.blurRenderTarget = GodraysPass.createBlurRenderTarget(
+        this.godraysRenderTarget.width,
+        this.godraysRenderTarget.height
       );
     }
   }
@@ -342,18 +398,46 @@ export class GodraysPass extends Pass implements Disposable {
     this.lastWidth = width;
     this.lastHeight = height;
     const scale = this.lastParams.resolutionScale;
+
+    // Idempotency guard: repeated calls with the same dimensions and scale must not rebuild the
+    // render targets or re-emit size updates.  `WebGLRenderTarget.setSize` already no-ops for
+    // unchanged dimensions, but the passes below would still reassign uniform values, and a
+    // scale-only change must still be handled even when width/height are unchanged.
+    if (
+      width === this.lastAppliedWidth &&
+      height === this.lastAppliedHeight &&
+      scale === this.lastAppliedResolutionScale
+    ) {
+      return;
+    }
+    this.lastAppliedWidth = width;
+    this.lastAppliedHeight = height;
+    this.lastAppliedResolutionScale = scale;
+
     const godraysWidth = Math.ceil(width * scale);
     const godraysHeight = Math.ceil(height * scale);
+    const blurWidth = Math.ceil(godraysWidth * GODRAYS_BLUR_RESOLUTION_SCALE);
+    const blurHeight = Math.ceil(godraysHeight * GODRAYS_BLUR_RESOLUTION_SCALE);
 
     this.godraysRenderTarget.setSize(godraysWidth, godraysHeight);
     this.illumPass.setSize(godraysWidth, godraysHeight);
     this.compositorPass.setSize(width, height);
     this.compositorPass.setGodraysResolution(godraysWidth, godraysHeight);
     this.blurPass?.setSize(godraysWidth, godraysHeight);
-    this.blurRenderTarget?.setSize(
-      Math.ceil(godraysWidth * GODRAYS_BLUR_RESOLUTION_SCALE),
-      Math.ceil(godraysHeight * GODRAYS_BLUR_RESOLUTION_SCALE)
-    );
+
+    // Keep the blur target in sync (and release any stale allocation) when the godrays buffer
+    // changes size, regardless of whether blur is currently enabled.
+    if (this.blurRenderTarget) {
+      if (
+        this.blurRenderTarget.width !== blurWidth ||
+        this.blurRenderTarget.height !== blurHeight
+      ) {
+        this.blurRenderTarget.dispose();
+        this.blurRenderTarget = GodraysPass.createBlurRenderTarget(godraysWidth, godraysHeight);
+      }
+    } else if (this.blurPass) {
+      this.blurRenderTarget = GodraysPass.createBlurRenderTarget(godraysWidth, godraysHeight);
+    }
   }
 
   override dispose(): void {
@@ -361,6 +445,7 @@ export class GodraysPass extends Pass implements Disposable {
     this.illumPass.dispose();
     this.compositorPass.dispose();
     this.blurPass?.dispose();
+    this.blurRenderTarget?.dispose();
     super.dispose();
   }
 }
