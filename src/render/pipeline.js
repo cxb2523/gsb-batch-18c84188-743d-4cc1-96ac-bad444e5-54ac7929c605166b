@@ -42,10 +42,17 @@ const _prevCamQuat = new THREE.Quaternion();
 
 // Quality presets. AA and grade are never disabled (jaggies auto-fail; grade
 // carries the colour). GTAO is the first thing to shed on weak GPUs.
+//
+// The CONTACT term is declared INDEPENDENTLY of the broad AO: `contact` is its
+// own on/off and `contactSamples` its own sample count — neither is derived
+// from `gtao`/`gtaoSamples`. Medium sheds the broad pass but KEEPS the contact
+// term (at cheap 4 samples): the tight wall-foot / prop-base shadowing is what
+// stops objects reading as "pasted onto the floor", and it costs a fraction of
+// the broad pass because the radius is tiny.
 const PRESETS = {
-  ultra:  { gtao: true,  aoScale: 0.5,  gtaoSamples: 16 },
-  high:   { gtao: true,  aoScale: 0.5,  gtaoSamples: 9  },
-  medium: { gtao: false, aoScale: 0.5,  gtaoSamples: 9  },
+  ultra:  { gtao: true,  aoScale: 0.5,  gtaoSamples: 16, contact: true, contactSamples: 16 },
+  high:   { gtao: true,  aoScale: 0.5,  gtaoSamples: 9,  contact: true, contactSamples: 8  },
+  medium: { gtao: false, aoScale: 0.5,  gtaoSamples: 9,  contact: true, contactSamples: 4  },
 };
 
 // --- Contact-AO term -------------------------------------------------------
@@ -100,6 +107,10 @@ let aaMode = 'smaa';          // 'smaa' | 'taa'
 let quality = 'ultra';
 let camStill = false;
 let initialised = false;
+// Manual contact-AO override: null = follow the quality preset's `contact`
+// default; true/false = the user's last explicit setContactAO() call, which
+// WINS over any later setQuality() until cleared with setContactAO('auto').
+let contactOverride = null;
 
 /** Effective backing-store size (logical px * pixelRatio). */
 function effectiveSize() {
@@ -119,15 +130,43 @@ function resizeGtao(effW, effH) {
   gtaoPass.setSize(w, h);
   if (contactPass) {
     contactPass.setSize(w, h);
-    if (CONTACT.share) shareGBuffer();
+    syncContactGBuffer();
   }
 }
 
-/** Point the contact pass at the broad pass's depth+normal g-buffer so it skips
- *  its own scene render. Safe to call repeatedly (after any broad-pass resize). */
-function shareGBuffer() {
+/** Resolve the contact pass's effective on/off + sample count for the current
+ *  quality preset, honouring the manual override, and apply both. Called by
+ *  setQuality() and setContactAO() so tier switches and manual toggles can
+ *  never drift apart. */
+function applyContactState() {
+  if (!contactPass) return;
+  const p = PRESETS[quality];
+  contactPass.enabled = contactOverride !== null ? contactOverride : p.contact;
+  const samples = p.contactSamples;
+  if (contactPass.gtaoMaterial.defines.SAMPLES !== samples) {
+    contactPass.updateGtaoMaterial({ samples });
+  }
+  syncContactGBuffer();
+}
+
+/** G-buffer wiring for the contact pass. Two modes:
+ *  - broad pass ENABLED  -> share its depth+normal textures: NO second scene
+ *    render, added cost is only the AO shader + denoise + blend at half-res.
+ *  - broad pass DISABLED -> the shared textures would never be rendered (the
+ *    composer skips disabled passes), so the contact pass renders its OWN
+ *    g-buffer. One scene render total either way — never two, never zero.
+ *  Safe to call repeatedly (after any resize or enable change). */
+function syncContactGBuffer() {
   if (!gtaoPass || !contactPass) return;
-  contactPass.setGBuffer(gtaoPass.depthTexture, gtaoPass.normalTexture);
+  const canShare = CONTACT.share && gtaoPass.enabled && contactPass.enabled;
+  if (canShare) {
+    contactPass.setGBuffer(gtaoPass.depthTexture, gtaoPass.normalTexture);
+  } else if (!contactPass._renderGBuffer) {
+    // was sharing; fall back to an own g-buffer (dispose the stale internal
+    // target first — setGBuffer() allocates a fresh one at the current size)
+    contactPass.normalRenderTarget?.dispose();
+    contactPass.setGBuffer();
+  }
 }
 
 /**
@@ -189,20 +228,17 @@ const api = {
     resizeGtao(effW, effH);
   },
 
-  /** Switch quality tier: sheds GTAO first, keeps AA + grade always on. */
+  /** Switch quality tier: sheds the broad GTAO pass first, keeps AA + grade
+   *  always on. The contact term follows the preset's OWN `contact`/
+   *  `contactSamples` fields (decoupled from the broad AO) unless the user
+   *  has manually overridden it — a manual setContactAO() always wins. */
   setQuality(level) {
     const p = PRESETS[level] || PRESETS.ultra;
     quality = PRESETS[level] ? level : 'ultra';
     QUALITY.level = quality;
     aoScale = p.aoScale;
     gtaoPass.enabled = p.gtao;
-    // Contact term sheds WITH the broad AO on weak GPUs, and tracks its sample count.
-    if (contactPass) {
-      contactPass.enabled = p.gtao && CONTACT.enabled;
-      if (contactPass.gtaoMaterial.defines.SAMPLES !== p.gtaoSamples) {
-        contactPass.updateGtaoMaterial({ samples: p.gtaoSamples });
-      }
-    }
+    applyContactState();
     if (gtaoPass.gtaoMaterial.defines.SAMPLES !== p.gtaoSamples) {
       gtaoPass.updateGtaoMaterial({ samples: p.gtaoSamples });
     }
@@ -246,17 +282,29 @@ const api = {
     return renderer.toneMappingExposure;
   },
 
-  /** Contact-AO term on/off — for same-tree A/B (toggle MY change, capture, revert)
-   *  and for the quality/critique loop. Returns effective enabled state. */
+  /** Contact-AO term on/off — fully independent of the broad AO pass.
+   *    setContactAO(true/false)  -> manual override: later setQuality() calls
+   *                                 keep this state instead of the tier default.
+   *    setContactAO('auto')      -> clear the override: the term follows the
+   *                                 quality preset's `contact` default again.
+   *  Returns the effective enabled state. */
   setContactAO(on) {
-    CONTACT.enabled = !!on;
-    if (contactPass) contactPass.enabled = CONTACT.enabled && gtaoPass.enabled;
+    if (on === 'auto' || on === null || on === undefined) {
+      contactOverride = null;
+    } else {
+      contactOverride = !!on;
+    }
+    CONTACT.enabled = contactOverride !== null ? contactOverride : PRESETS[quality].contact;
+    applyContactState();
     return contactPass ? contactPass.enabled : CONTACT.enabled;
   },
 
-  /** Broad-AO blend knob — for A/B against the contact term without a rebuild. */
+  /** Broad-AO blend knob — for A/B against the contact term without a rebuild.
+   *  Independent of the contact term: toggling this never enables/disables it,
+   *  only re-wires which g-buffer the contact pass reads. */
   setBroadAO(on) {
     if (gtaoPass) gtaoPass.enabled = !!on;
+    syncContactGBuffer();
     return gtaoPass ? gtaoPass.enabled : false;
   },
 
@@ -289,8 +337,20 @@ const api = {
   get contactAO() {
     return {
       enabled: contactPass ? contactPass.enabled : false,
+      // manual override state: null = following the quality preset's default,
+      // true/false = the user's last explicit setContactAO() call (wins over
+      // tier switches until setContactAO('auto')).
+      manualOverride: contactOverride,
+      presetDefault: PRESETS[quality].contact,
+      samples: contactPass ? contactPass.gtaoMaterial.defines.SAMPLES : CONTACT.samples,
       broadEnabled: gtaoPass ? gtaoPass.enabled : false,
+      broadSamples: gtaoPass ? gtaoPass.gtaoMaterial.defines.SAMPLES : null,
       share: CONTACT.share,
+      // true while the contact pass reads the broad pass's depth+normal
+      // g-buffer (i.e. NO second scene render); false = own g-buffer.
+      sharingGBuffer: contactPass ? !contactPass._renderGBuffer : false,
+      size: contactPass ? { w: contactPass.width, h: contactPass.height } : null,
+      broadSize: gtaoPass ? { w: gtaoPass.width, h: gtaoPass.height } : null,
       radius: CONTACT.radius, scale: CONTACT.scale, thickness: CONTACT.thickness,
       distanceExponent: CONTACT.distanceExponent, blend: CONTACT.blend,
       broadBlend: gtaoPass ? gtaoPass.blendIntensity : null,

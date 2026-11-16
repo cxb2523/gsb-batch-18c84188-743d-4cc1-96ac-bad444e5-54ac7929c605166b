@@ -82,3 +82,6 @@ engine.boot().then(() => {
 });
 
 window.__ENGINE = engine;
+// Console/debug access to the shared blackboard — acceptance and tuning scripts
+// drive quality tiers and AO terms via `World.pipeline` in the browser console.
+window.World = World;
