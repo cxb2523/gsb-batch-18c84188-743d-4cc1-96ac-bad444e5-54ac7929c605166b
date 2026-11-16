@@ -1,0 +1,34 @@
+{
+  "spec": "rigc-rig/1",
+  "name": "clipmove",
+  "images": "parts",
+  "skeleton": { "x": -160, "y": -160, "width": 320, "height": 320 },
+
+  "bones": [
+    { "name": "root" },
+    { "name": "clipbone", "parent": "root" },
+    { "name": "artbone", "parent": "root" }
+  ],
+
+  "slots": [
+    { "name": "clip", "bone": "clipbone", "attachment": null },
+    { "name": "art_a", "bone": "artbone", "attachment": "base" },
+    { "name": "art_b", "bone": "artbone", "attachment": "ink" }
+  ],
+
+  "skins": {
+    "default": {
+      "clip": {
+        "window": {
+          "type": "clipping",
+          "vertexCount": 4,
+          "vertices": [-40, -40, 40, -40, 40, 40, -40, 40],
+          "end": "art_b",
+          "convex": true
+        }
+      },
+      "art_a": { "base": { "image": "base.png" } },
+      "art_b": { "ink": { "image": "ink.png" } }
+    }
+  }
+}

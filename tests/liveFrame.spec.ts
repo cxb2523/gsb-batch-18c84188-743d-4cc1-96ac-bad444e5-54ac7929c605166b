@@ -69,6 +69,36 @@ for (const rig of ['walk', 'flex', 'squash', 'portrait', 'nod', 'look', 'ride', 
   });
 }
 
+test('live clip polygons follow the pose, share one object and keep lease semantics', async ({ page }) => {
+  await page.goto('/tests/harness.html');
+  await page.waitForFunction(() => Boolean(window.rigPlayHarness));
+  const result = await page.evaluate(() => window.rigPlayHarness.liveFrameClipProbe());
+  expect(result.poser).toBe('runtime');
+  expect(result.moved).toBe(true);
+  expect(result.rows.length).toBeGreaterThan(1);
+  for (const row of result.rows) {
+    // The borrowed clip polygon equals the snapshot and the oracle, number for number.
+    expect(row.matchesSnapshot, `t=${row.time} live vs snapshot`).toBe(true);
+    expect(row.matchesOracle, `t=${row.time} snapshot vs oracle`).toBe(true);
+    // Both covered slots share one clip object (and its polygon facade) for the
+    // whole-frame-vs-local distinction.
+    expect(row.sharedClip, `t=${row.time} shared clip`).toBe(true);
+    expect(row.sharedPolygon, `t=${row.time} shared polygon facade`).toBe(true);
+    expect(row.inverse).toBe(false);
+    expect(row.convex).toBe(true);
+  }
+  // Production keeps the same frame and clip object across pose advances.
+  expect(result.frameReused).toBe(true);
+  expect(result.clipObjectReused).toBe(true);
+  // Within a development lease the polygon facade is a stable identity.
+  expect(result.facadeStable).toBe(true);
+  // A deep development lease fails stale on the frame and on the nested clip.
+  expect(result.leaseChecks.frameStale).toBe(true);
+  expect(result.leaseChecks.nestedStale).toBe(true);
+  expect(result.leaseChecks.readonly).toBe(true);
+  expect(result.leaseChecks.bufferReadonly).toBe(true);
+});
+
 test('runtime composition fallback keeps time and invalidates old views', async ({ page }) => {
   await page.goto('/tests/harness.html');
   await page.waitForFunction(() => Boolean(window.rigPlayHarness));

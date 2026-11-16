@@ -236,3 +236,128 @@ export async function liveFrameNullIdentity(plantOldCheck = false) {
     return rows;
   } finally { runtime.dispose(); oracle.dispose(); assets.dispose(); roots.forEach(root => root.remove()); }
 }
+
+export interface LiveClipProbeRow {
+  time: number;
+  /** Every live clip polygon, flat, per covered slot. */
+  livePolygons: number[][];
+  /** The snapshot frame's clip polygons for the same slots. */
+  snapshotPolygons: number[][];
+  /** The oracle poser's snapshot polygons — the independent reference. */
+  oraclePolygons: number[][];
+  /** Live equals the runtime snapshot, number for number. */
+  matchesSnapshot: boolean;
+  /** Runtime snapshot equals the oracle snapshot, number for number. */
+  matchesOracle: boolean;
+  /** Every covered slot in the live view borrowed one shared clip object. */
+  sharedClip: boolean;
+  /** Within one lease, every covered slot also shares the polygon facade. */
+  sharedPolygon: boolean;
+  /** Flags travel with the clip. */
+  inverse: boolean;
+  convex: boolean;
+}
+
+/**
+ * The clipmove rig's only motion is its clipping bone: the art never moves, so
+ * any live/snapshot clip difference is the clip polygon failing to follow the
+ * pose. Drives both posers plus a production (unchecked) player for the reuse
+ * guarantees, and a checked player for the lease semantics.
+ */
+export async function liveFrameClipProbe() {
+  const assets = await loadModel({ modelUrl: '/rigs/clipmove/skeleton.model.json' });
+  const roots = [document.createElement('div'), document.createElement('div'), document.createElement('div')];
+  roots.forEach(root => document.body.append(root));
+  const checked = new RigPlayer(roots[0], assets, { liveFrameChecks: true });
+  const oracle = new RigPlayer(roots[1], assets, { poser: 'oracle' });
+  const production = new RigPlayer(roots[2], assets, { liveFrameChecks: false });
+  const times = [0, 0.25, 0.5, 0.75];
+  const rows: LiveClipProbeRow[] = [];
+  const leaseChecks = { nestedStale: false, frameStale: false, readonly: false, bufferReadonly: false };
+  let frameReused = true;
+  let clipObjectReused = true;
+  try {
+    checked.play('move', { loop: false });
+    oracle.play('move', { loop: false });
+    production.play('move', { loop: false });
+    if (checked.poser !== 'runtime') throw new Error(`clipmove must pose on the runtime, got ${checked.poser}`);
+
+    // Hold a deep lease across the first advance: every field, the clip object
+    // and its nested polygon included, must read as stale afterwards.
+    const held = checked.liveFrame();
+    const heldClip = held.attachments[held.drawOrder[0]].clip!;
+    const heldPolygon = heldClip.polygon;
+
+    let previousProductionFrame: object | null = null;
+    let previousProductionClip: object | null = null;
+    let previous = 0;
+    const same = (a: number[][], b: number[][]) => a.length === b.length
+      && a.every((polygon, i) => polygon.length === b[i].length && polygon.every((value, k) => Object.is(value, b[i][k])));
+    for (const time of times) {
+      if (time > previous) {
+        checked.advance(time - previous);
+        oracle.advance(time - previous);
+        production.advance(time - previous);
+      }
+      previous = time;
+
+      const live = checked.liveFrame();
+      const snapshot = checked.posedFrame();
+      const oracleFrame = oracle.posedFrame();
+      const livePolygons: number[][] = [];
+      const snapshotPolygons: number[][] = [];
+      const oraclePolygons: number[][] = [];
+      const seenClips = new Set<unknown>();
+      const seenPolygons = new Set<unknown>();
+      let inverse = false, convex = false;
+      for (let i = 0; i < live.count; i++) {
+        const attachment = live.attachments[live.drawOrder[i]];
+        if (!attachment.clip) continue;
+        seenClips.add(attachment.clip);
+        seenPolygons.add(attachment.clip.polygon);
+        inverse = attachment.clip.inverse;
+        convex = attachment.clip.convex;
+        livePolygons.push(Array.from(attachment.clip.polygon));
+      }
+      for (const slot of snapshot.order) if (slot.clip) snapshotPolygons.push(Array.from(slot.clip.polygon));
+      for (const slot of oracleFrame.order) if (slot.clip) oraclePolygons.push(Array.from(slot.clip.polygon));
+      rows.push({
+        time, livePolygons, snapshotPolygons, oraclePolygons,
+        matchesSnapshot: same(livePolygons, snapshotPolygons),
+        matchesOracle: same(snapshotPolygons, oraclePolygons),
+        sharedClip: seenClips.size === 1 && livePolygons.length > 1,
+        sharedPolygon: seenPolygons.size === 1 && livePolygons.length > 1,
+        inverse, convex,
+      });
+
+      const productionFrame = production.liveFrame();
+      const productionClip = productionFrame.attachments[productionFrame.drawOrder[0]].clip;
+      if (previousProductionFrame !== null && productionFrame !== previousProductionFrame) frameReused = false;
+      if (previousProductionClip !== null && productionClip !== previousProductionClip) clipObjectReused = false;
+      previousProductionFrame = productionFrame;
+      previousProductionClip = productionClip;
+    }
+
+    checked.advance(0.2);
+    try { void held.count; } catch (error) { leaseChecks.frameStale = String(error).includes('LIVE_FRAME_STALE'); }
+    try { void heldPolygon[0]; } catch (error) { leaseChecks.nestedStale = String(error).includes('LIVE_FRAME_STALE'); }
+    try { void heldClip.inverse; } catch (error) { leaseChecks.nestedStale &&= String(error).includes('LIVE_FRAME_STALE'); }
+
+    const fresh = checked.liveFrame();
+    const freshClip = fresh.attachments[fresh.drawOrder[0]].clip!;
+    // Within one lease the polygon facade is the same object on every read.
+    const facadeStable = freshClip.polygon === freshClip.polygon
+      && fresh.attachments[fresh.drawOrder[1]].clip!.polygon === freshClip.polygon;
+    const freshPolygon = freshClip.polygon;
+    try { Reflect.set(freshPolygon, '0', 123); } catch (error) { leaseChecks.readonly = String(error).includes('LIVE_FRAME_READONLY'); }
+    try { Reflect.get(freshPolygon, 'buffer'); } catch (error) { leaseChecks.bufferReadonly = String(error).includes('LIVE_FRAME_READONLY'); }
+
+    // The moving polygon really moved: every sampled row differs from the setup row.
+    const moved = rows.slice(1).some(row => !same(row.livePolygons, rows[0].livePolygons));
+    return { rows, leaseChecks, frameReused, clipObjectReused, facadeStable, moved, rig: 'clipmove', poser: checked.poser };
+  } finally {
+    checked.dispose(); oracle.dispose(); production.dispose();
+    roots.forEach(root => root.remove());
+    assets.dispose();
+  }
+}

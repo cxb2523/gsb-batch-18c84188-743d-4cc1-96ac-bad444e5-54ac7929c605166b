@@ -1,0 +1,38 @@
+{
+  "spec": "rigc-motion/1",
+  "archetype": "clipmove",
+  "cut": "test-clipmove",
+  "easings": {},
+  "animations": {
+    "move": {
+      "duration": 1,
+      "loop": false,
+      "note": "The clipping attachment's own bone translates and rotates while the art bones hold still, so the clip polygon must follow the pose without any artwork moving.",
+      "tracks": [
+        {
+          "slot": "clip",
+          "property": "attachment",
+          "keys": [{ "t": 0, "v": "window" }, { "t": 1, "v": "window" }]
+        },
+        {
+          "bone": "clipbone",
+          "property": "translate",
+          "keys": [
+            { "t": 0, "v": [0, 0] },
+            { "t": 0.5, "v": [60, 40] },
+            { "t": 1, "v": [120, 0] }
+          ]
+        },
+        {
+          "bone": "clipbone",
+          "property": "rotate",
+          "keys": [
+            { "t": 0, "v": [0] },
+            { "t": 0.5, "v": [45] },
+            { "t": 1, "v": [90] }
+          ]
+        }
+      ]
+    }
+  }
+}
