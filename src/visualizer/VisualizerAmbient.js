@@ -94,6 +94,13 @@ export default class VisualizerAmbient extends AnalyserVideo {
     #renderLoop;
 
     /**
+     * Flag indicating whether the component has been destroyed.
+     * Destroyed instances must ignore any further lifecycle calls and event callbacks.
+     * @type {boolean}
+     */
+    #destroyed = false;
+
+    /**
      * Creates an instance of the VisualizerAmbient component.
      * @param  {module:src/core/Player}     player            Reference to the media player instance.
      * @param  {module:src/util/AudioChain} parent            Reference to the parent instance.
@@ -205,6 +212,9 @@ export default class VisualizerAmbient extends AnalyserVideo {
 
     /**
      * Starts the ambient visualizer render loop.
+     * Only runs while the component is enabled, not destroyed and the media is playing,
+     * so external events (e.g. "chromecast/stop" while fullscreen is active) cannot
+     * restart rendering while the analyser is disabled.
      * @override
      * @listens module:src/casting/ChromeCast#chromecast/stop
      * @listens module:src/casting/AirPlay#airplay/stop
@@ -212,7 +222,7 @@ export default class VisualizerAmbient extends AnalyserVideo {
      */
     startLoop() {
 
-        if (this.#player.getState('media.paused') /* || !this.#enabled */) return;
+        if (this.#destroyed || !this.isEnabled() || this.#player.getState('media.paused')) return;
 
         super.startLoop();
         this.#renderLoop.start();
@@ -228,8 +238,10 @@ export default class VisualizerAmbient extends AnalyserVideo {
      */
     stopLoop() {
 
+        if (this.#destroyed) return;
+
         super.stopLoop();
-        this.#renderLoop.stop();
+        this.#renderLoop?.stop();
 
     }
 
@@ -251,6 +263,7 @@ export default class VisualizerAmbient extends AnalyserVideo {
      */
     refresh() {
 
+        if (this.#destroyed) return;
         if (this.#player.getConfig('visualizerAmbient.opacity') === 0 || !this.#player.getState('media.paused')) return;
 
         this.#pixelData = super.refresh();
@@ -308,9 +321,15 @@ export default class VisualizerAmbient extends AnalyserVideo {
      */
     enable() {
 
+        if (this.#destroyed || this.isEnabled()) return;
+
         this.#dom.wrapper.classList.add('is-visible');
         this.#menu?.mount();
         super.enable();
+        // super.enable() already dispatches to this startLoop() polymorphically, but call it
+        // explicitly as well to keep the ambient render-loop resume self-contained in this class;
+        // Looper.start() is a no-op while the loop is already running
+        if (!this.#player.getState('media.paused')) this.startLoop();
 
     }
 
@@ -318,6 +337,8 @@ export default class VisualizerAmbient extends AnalyserVideo {
      * Disables the analyser.
      */
     disable() {
+
+        if (this.#destroyed || !this.isEnabled()) return;
 
         this.#dom?.wrapper?.classList.remove('is-visible');
         this.#menu?.unmount();
@@ -331,9 +352,13 @@ export default class VisualizerAmbient extends AnalyserVideo {
      */
     destroy() {
 
+        if (this.#destroyed) return;
+        this.#destroyed = true;
+
         this.#player.unsubscribe(this.#subscriptions);
         this.#renderLoop.destroy();
         this.#menu?.destroy();
+        this.#dom?.wrapper?.classList.remove('is-visible');
         this.#dom?.destroy();
         super.destroy();
         this.#player = this.#dom = this.#menu = this.#scaleCtx = this.#scaleCanvas = this.#renderCtx = this.#renderCanvas = this.#renderLoop = null;

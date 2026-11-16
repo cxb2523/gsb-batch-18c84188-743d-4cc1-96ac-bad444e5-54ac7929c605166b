@@ -63,6 +63,13 @@ export default class AnalyserVideo {
     #enabled = false;
 
     /**
+     * Flag indicating whether the analyser has been destroyed.
+     * Destroyed instances must ignore any further lifecycle calls and event callbacks.
+     * @type {boolean}
+     */
+    #destroyed = false;
+
+    /**
      * Canvas element for processing video frames.
      * @type {HTMLCanvasElement|OffscreenCanvas}
      */
@@ -202,11 +209,12 @@ export default class AnalyserVideo {
 
     /**
      * Starts the analysis loop by initiating the first iteration.
+     * Does nothing while the analyser is disabled or destroyed.
      * @listens module:src/core/Media#media/play
      */
     startLoop() {
 
-        if (this.#enabled) this.#analyseLoop.start();
+        if (this.#enabled && !this.#destroyed) this.#analyseLoop.start();
 
     }
 
@@ -216,7 +224,18 @@ export default class AnalyserVideo {
      */
     stopLoop() {
 
-        this.#analyseLoop.stop();
+        this.#analyseLoop?.stop();
+
+    }
+
+    /**
+     * Returns whether the analyser is currently enabled.
+     * Allows subclasses to gate their own render loops on the base analyser state.
+     * @returns {boolean} True if the analyser is enabled, false otherwise.
+     */
+    isEnabled() {
+
+        return this.#enabled;
 
     }
 
@@ -335,7 +354,7 @@ export default class AnalyserVideo {
      */
     enable() {
 
-        if (this.#enabled) return;
+        if (this.#destroyed || this.#enabled) return;
         this.#enabled = true;
 
         this.#player.unsubscribe(this.#subscriptions);
@@ -348,7 +367,12 @@ export default class AnalyserVideo {
             this.#player.subscribe('media/canplay', this.#refreshBounce.bind(this))
         ];
 
-        if (this.#canvas) return;
+        if (this.#canvas) {
+            // re-enabling an existing analyser (e.g. after leaving fullscreen):
+            // resume the loop right away if the media is currently playing
+            if (!this.#player.getState('media.paused')) this.startLoop();
+            return;
+        }
 
         const scale = this.#config.gridSize * this.#config.gridScale;
 
@@ -362,6 +386,9 @@ export default class AnalyserVideo {
         this.#pixelData = new Uint8ClampedArray(this.#config.gridSize * this.#config.gridSize * 4);
         this.#pixelData.fill(0);
 
+        // first enable: resume the loop right away if playback is already ongoing
+        if (!this.#player.getState('media.paused')) this.startLoop();
+
     }
 
     /**
@@ -369,6 +396,8 @@ export default class AnalyserVideo {
      * @listens module:src/core/Player#player/engine/set
      */
     disable() {
+
+        if (this.#destroyed) return;
 
         this.#enabled = false;
 
@@ -382,9 +411,15 @@ export default class AnalyserVideo {
      */
     destroy() {
 
+        if (this.#destroyed) return;
+        this.#destroyed = true;
+
         if (this.#config.debug) this.#debug.destroy();
         clearTimeout(this.#refreshDelayId);
-        this.disable();
+        this.#enabled = false;
+        this.stopLoop();
+        // disable() now early-returns on destroyed instances, so unsubscribe explicitly here
+        this.#player.unsubscribe(this.#subscriptions);
         this.#analyseLoop.destroy();
         this.#player.unsubscribe(this.#subsEngine);
         this.#player = this.#canvas = this.#apiKey = this.#analyseLoop = null;
