@@ -13,8 +13,10 @@
 - 分片并发下载（默认 8 线程）+ 单分片重试；下载完成按序号**有序提交**，
   直接追加写入目标文件（不留整目录临时分片）
 - 断点续传：进度记在 ``dest_dir/.{out_name}.hlsmeta.json``（分片指纹 +
-  已提交数+字节数），全部完成后自动删除；指纹（分片 URI/密钥 URI）变化
-  或目标文件被污染时自动全量重下
+  已连续提交数 + 目标文件实际字节数），全部完成后自动删除。任何失败路径
+  都会把「连续提交的分片数 / 实际写盘字节数」落盘，未连续提交的中间分片
+  绝不记录；指纹（分片 URI/BYTERANGE/密钥 URI/密钥内容摘要）变化、或记录
+  的分片数超出文件实际容量时自动全量重下
 - 不支持：SAMPLE-AES 等其它加密方式、加密分片的 BYTERANGE 变体、
   直播流（无 #EXT-X-ENDLIST 且数量无限），报明确错误而不是卡死
 
@@ -34,6 +36,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 from urllib.parse import urlparse
 
 _M3U8_EXTS = (".m3u8", ".m3u")
@@ -49,8 +52,8 @@ _KEY_CACHE_TTL = 6 * 3600  # 6 小时
 _KEY_CACHE_MAX = 128       # 最多缓存 128 个密钥，防进程内无限膨胀
 _KEY_CACHE_LOCK = threading.Lock()
 
-_META_VERSION = 2
-_META_BATCH = 16  # 每提交 N 片落盘一次断点进度
+_META_VERSION = 3  # v3：附带每片字节数 seg_bytes，可与目标文件逐字节对账
+_META_BATCH = 16   # 正常提交时每 N 片落盘一次断点进度（失败/中止时必落盘）
 
 
 def is_hls(url: str, content_type: str = "") -> bool:
@@ -188,18 +191,25 @@ def _parse_segments(playlist: bytes, playlist_url: str) -> list[dict]:
     return segs
 
 
-def _fetch_key(key_uri: str) -> bytes:
-    """获取 AES-128 密钥（按 URI 缓存复用，TTL/条数双限；失败抛 _HlsError）。"""
+def _fetch_key(key_uri: str, fresh: bool = False) -> bytes:
+    """获取 AES-128 密钥（按 URI 缓存复用，TTL/条数双限；失败抛 _HlsError）。
+
+    ``fresh=True`` 绕过缓存直接回源（用于计算播放列表指纹）：同一个 URI
+    下 CDN 轮换密钥内容时，必须看到**当前**内容才能判定指纹失效；回源结果
+    同时写回缓存并刷新时间戳，后续解密继续复用这份新密钥。
+    """
     if not key_uri:
         raise _HlsError("缺少密钥 URI")
     now = time.time()
-    with _KEY_CACHE_LOCK:
-        hit = _KEY_CACHE.get(key_uri)
-        if hit and now - hit[1] < _KEY_CACHE_TTL:
-            return hit[0]
+    if not fresh:
+        with _KEY_CACHE_LOCK:
+            hit = _KEY_CACHE.get(key_uri)
+            if hit and now - hit[1] < _KEY_CACHE_TTL:
+                return hit[0]
     key = _fetch(key_uri, referer="", timeout=20)
     if len(key) not in (16, 24, 32):
         raise _HlsError(f"密钥长度非法（{len(key)} 字节）")
+    now = time.time()
     with _KEY_CACHE_LOCK:
         _KEY_CACHE[key_uri] = (key, now)
         # 超出条数上限：淘汰最旧（按时间戳），只保留最新一半
@@ -289,71 +299,182 @@ def _download_segment(url: str, referer: str, offset: int, length: int,
 
 
 # ---------------------------------------------------------------------------
-# 断点续传：进度 meta 文件（fingerprint + 已提交数 + 字节数）
+# 断点续传：进度 meta 文件（fingerprint + 连续提交数 + 每片字节数）
+#
+# 核心不变式：meta 里的 done 必须是「从第 0 片起连续提交」的分片数，
+# bytes 必须等于目标文件当时的实际大小，seg_bytes 之和必须等于 bytes。
+# 任何失败路径先落盘再返回；读取时任一不变式不成立即全量重下。
 # ---------------------------------------------------------------------------
 
 def _meta_path(dest_dir: str, out_name: str) -> str:
     return os.path.join(dest_dir, f".{out_name}.hlsmeta.json")
 
 
-def _fingerprint(segs: list[dict]) -> str:
-    """分片/密钥 URI 指纹：任一变化即判定播放列表不同，全量重下。"""
+def _key_digests(segs: list[dict[str, Any]]) -> dict[str, str]:
+    """回源读取每个密钥 URI 的**当前**内容摘要（sha256 前 16 位）。
+
+    CDN 轮换：同一 URI 下密钥内容变化时旧密钥解不了新分片。指纹纳入内容
+    摘要后，密钥一变指纹即失效 → 自动全量重下。``fresh=True`` 绕过进程内
+    缓存，确保看到的是当前内容（同时把新密钥写回缓存供解密复用）。
+    """
+    out: dict[str, str] = {}
+    for s in segs:
+        key: dict[str, Any] = s.get("key") or {}
+        uri = key.get("uri") or ""
+        if uri and uri not in out:
+            out[uri] = hashlib.sha256(_fetch_key(uri, fresh=True)).hexdigest()[:16]
+    return out
+
+
+def _fingerprint(segs: list[dict[str, Any]],
+                 key_digests: dict[str, str] | None = None) -> str:
+    """播放列表指纹：分片 URI/偏移长度 + 密钥 URI + 密钥内容摘要。
+
+    任一变化（含同 URI 下密钥内容轮换）即判定播放列表不同，全量重下。
+    ``key_digests`` 省略时自动回源取当前密钥摘要（下载主流程会预先取好，
+    既避免重复请求，也让密钥失败在真正开始下载前暴露）。
+    """
+    if key_digests is None:
+        key_digests = _key_digests(segs)
     h = hashlib.sha1()
     for i, s in enumerate(segs):
-        h.update(f"{i}:{s['uri']}:{(s.get('key') or {}).get('uri', '')}:".encode())
+        key: dict[str, Any] = s.get("key") or {}
+        key_uri = key.get("uri") or ""
+        h.update(f"{i}:{s['uri']}:{s.get('len', 0)}:{s.get('offset', 0)}:"
+                 f"{key_uri}:{key_digests.get(key_uri, '')}:".encode())
     return h.hexdigest()[:16]
 
 
-def _read_meta(path: str, total: int, fingerprint: str, dest: str) -> int:
-    """读取续传进度；不可用（版本/指纹/长度不一致）返回 0 全量重下。"""
+def _read_meta(path: str, total: int, fingerprint: str,
+               dest: str) -> tuple[int, list[int], Any]:
+    """读取续传进度；不可信（版本/指纹/容量/字节/摘要不一致）返回 (0, [], None)。
+
+    可信条件：
+    - 版本、指纹匹配，0 <= done <= total；
+    - seg_bytes 长度恰为 done 且每片 > 0（分片响应为空视为失败，不会提交）；
+    - done 不超过文件可容纳容量（每片至少 1 字节），防「记录数多于文件」；
+    - 目标文件存在，大小 >= bytes == sum(seg_bytes)；
+    - 文件前 bytes 字节的 sha256 与 meta 记录一致（防篡改/截断）。
+
+    进程被强杀时文件可能比 meta 多出「已提交但未赶上批次落盘」的尾部：
+    只要记录前缀的摘要仍匹配，就把尾部截断后按 done 续传（不重下已提交
+    分片）；一旦记录本身与文件对不上（done 超出容量/摘要不符）则判不可信，
+    返回 (0, [], None) 全量重下。第三个返回值是已覆盖前缀的 hashlib 对象，
+    供提交器继续滚动摘要（避免再次全量读文件）。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             m = json.load(f)
         if m.get("version") != _META_VERSION:
-            return 0
+            return 0, [], None
         if m.get("fingerprint") != fingerprint:
-            return 0
-        done, bytes_done = int(m.get("done", 0)), int(m.get("bytes", 0))
+            return 0, [], None
+        done = int(m.get("done", 0))
+        bytes_done = int(m.get("bytes", 0))
+        seg_bytes = [int(x) for x in (m.get("seg_bytes") or [])]
         if done < 0 or done > total:
-            return 0
-        if os.path.exists(dest) and os.path.getsize(dest) != bytes_done:
-            return 0  # 目标文件被污染/被覆盖，从头来
-        return done
+            return 0, [], None
+        if len(seg_bytes) != done or any(b <= 0 for b in seg_bytes):
+            return 0, [], None
+        if done == 0:
+            # 无任何可信进度：文件里若有残留字节也不能认，交给全量重下清空
+            return 0, [], None
+        if not os.path.exists(dest):
+            return 0, [], None
+        size = os.path.getsize(dest)
+        if size < done:
+            # 每片至少 1 字节：记录的分片数超出文件容量 → 进度不可信
+            return 0, [], None
+        if size < bytes_done or sum(seg_bytes) != bytes_done:
+            return 0, [], None
+        hasher = _hash_file(dest, bytes_done)
+        if hasher.hexdigest() != m.get("sha256"):
+            return 0, [], None  # meta 与目标文件内容对不上（篡改/写盘中断）
+        if size > bytes_done:
+            # 尾部是未及落盘的已提交分片（或半截），截掉以保证严格对应
+            try:
+                with open(dest, "r+b") as f:
+                    f.truncate(bytes_done)
+            except OSError:
+                return 0, [], None
+        return done, seg_bytes, hasher
     except (OSError, ValueError, TypeError):
-        return 0
+        return 0, [], None
+
+
+def _hash_file(path: str, limit: int | None = None) -> Any:
+    """文件内容 sha256（分块读，可只算前 limit 字节，避免整文件进内存）。
+
+    返回 hashlib 对象（调用方可取 hexdigest，也可继续 update 续算）。
+    """
+    h = hashlib.sha256()
+    remaining = limit
+    with open(path, "rb") as f:
+        while True:
+            n = 1 << 20 if remaining is None else min(1 << 20, remaining)
+            if n <= 0:
+                break
+            chunk = f.read(n)
+            if not chunk:
+                break
+            h.update(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
+    return h
 
 
 def _write_meta(path: str, fingerprint: str, total: int, done: int,
-                bytes_done: int) -> None:
-    """落盘断点进度（失败静默——不影响主流程，最多丢一点进度）。"""
+                seg_bytes: list[int], bytes_done: int, digest: str) -> None:
+    """原子落盘断点进度（临时文件 + replace，避免半截 JSON）。
+
+    失败静默——不影响主流程，最多丢一点进度。``bytes_done`` 必须是目标
+    文件的**实际**大小，``digest`` 必须是该文件内容的 sha256；
+    ``seg_bytes`` 只含从 0 起连续提交的分片。
+    """
+    payload = {"version": _META_VERSION, "fingerprint": fingerprint,
+               "total": total, "done": done, "bytes": bytes_done,
+               "seg_bytes": list(seg_bytes), "sha256": digest}
+    tmp = path + ".tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": _META_VERSION, "fingerprint": fingerprint,
-                       "total": total, "done": done, "bytes": bytes_done}, f)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+        os.replace(tmp, path)
     except OSError:
-        pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 class _OrderedCommitter:
     """有序提交器：并发下载、按分片序号顺序追加写入目标文件。
 
-    worker i 下载完成后等待前 i-1 片都已写盘再追加，保证文件内分片顺序；
-    写盘计数按批落盘到 meta 文件实现断点（中断后重跑跳过已完成分片）。
+    worker i 下载完成后等待前 i-1 片都已写盘再追加，保证文件内分片顺序且
+    已落盘分片永远是 0 起的连续序列。进度以目标文件实际大小为准，正常时
+    每 ``_META_BATCH`` 片落盘一次；失败/中止时由 ``flush_meta`` 立即落盘。
     """
 
     def __init__(self, path: str, meta_path: str, fingerprint: str,
-                 total: int, start: int):
+                 total: int, start: int, start_seg_bytes: list[int] | None = None,
+                 start_hasher: Any = None):
         self._path = path
         self._meta_path = meta_path
         self._fingerprint = fingerprint
         self._total = total
         self._lock = threading.Condition()
-        self._done = start          # 已提交（写盘）分片数
-        self._bytes = 0             # 已写字节数
+        self._done = start                       # 已连续提交（写盘）分片数
+        self._seg_bytes = list(start_seg_bytes or [])[:start]
+        self._bytes = 0                          # 目标文件实际字节数
         self._aborted = False
         self._meta_lock = threading.Lock()
+        self._meta_done = -1                     # 最近一次落盘的分片数
+        # 已连续提交内容的滚动摘要（续传优先复用读取阶段算好的前缀摘要）
+        self._hasher = start_hasher or hashlib.sha256()
         if start:
             self._bytes = os.path.getsize(path) if os.path.exists(path) else 0
+            if self._bytes and start_hasher is None:
+                self._hasher = _hash_file(path)
 
     def acquire_turn(self, idx: int) -> None:
         """等待轮到自己写盘（idx 之前的分片均已提交）。
@@ -376,19 +497,67 @@ class _OrderedCommitter:
             self._lock.notify_all()
 
     def commit(self, data: bytes) -> None:
-        """追加一段数据并推进进度；每批落盘一次 meta。"""
+        """追加一段数据并推进进度；每批落盘一次 meta。
+
+        写盘失败（磁盘满/IO 错误）时把文件回滚到上一段已记录长度，保证
+        ``meta.bytes`` 与文件实际大小始终一致；回滚也失败则由续传读取时
+        的大小校验兜底（判定不可信 → 全量重下）。
+        """
         with self._lock:
-            with open(self._path, "ab") as f:
-                f.write(data)
-                f.flush()
+            try:
+                with open(self._path, "ab") as f:
+                    f.write(data)
+                    f.flush()  # 交给内核后 fstat 即可反映实际字节数
+                    actual = os.fstat(f.fileno()).st_size
+            except Exception:
+                self._rollback()
+                raise
             self._done += 1
-            self._bytes += len(data)
-            need_flush = self._done % _META_BATCH == 0 or self._done == self._total
+            self._seg_bytes.append(len(data))
+            self._bytes = actual
+            self._hasher.update(data)
+            need_flush = (self._done % _META_BATCH == 0
+                          or self._done == self._total)
             self._lock.notify_all()
         if need_flush:
-            with self._meta_lock:
-                _write_meta(self._meta_path, self._fingerprint, self._total,
-                            self._done, self._bytes)
+            self.flush_meta()
+
+    def _rollback(self) -> None:
+        """把目标文件截断回最后一个已记录字节数（调用方持有条件锁）。
+
+        回滚后按已提交分片重算摘要，保持「文件内容 = meta.sha256」不变式。
+        """
+        try:
+            with open(self._path, "r+b") as f:
+                f.truncate(self._bytes)
+        except OSError:
+            return
+        try:
+            h = hashlib.sha256()
+            with open(self._path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            self._hasher = h
+        except OSError:
+            pass
+
+    def flush_meta(self) -> None:
+        """把当前「连续提交数 + 实际字节数 + 每片长度」落盘。
+
+        在条件锁内取快照，meta 锁内按 done 单调递增写盘，避免旧快照覆盖
+        新快照（原实现两个字段分两次读，可能拼出 done 与 bytes 不一致）。
+        """
+        with self._lock:
+            done = self._done
+            seg_bytes = list(self._seg_bytes)
+            bytes_done = self._bytes
+            digest = self._hasher.hexdigest()
+        with self._meta_lock:
+            if done < self._meta_done:
+                return
+            _write_meta(self._meta_path, self._fingerprint, self._total,
+                        done, seg_bytes, bytes_done, digest)
+            self._meta_done = done
 
     @property
     def done(self) -> int:
@@ -406,11 +575,11 @@ def download_hls(url: str, dest_dir: str, out_name: str = "stream",
     - 分片并发下载，完成即按序追加写入目标文件（不留临时分片目录）；
       单分片失败即整体失败（调用方可回退直链）
     - 断点续传：进度记在 .out_name.hlsmeta.json，中断后重跑同 URL 续传；
-      成功后清理；播放列表/目标文件变化时自动全量重下
+      成功后清理；播放列表/密钥内容/目标文件变化时自动全量重下
     """
     dest: str | None = None
     committer: _OrderedCommitter | None = None
-    meta = ""
+    ok = False
     try:
         os.makedirs(dest_dir, exist_ok=True)
         master = _fetch(url, referer=referer)
@@ -421,30 +590,35 @@ def download_hls(url: str, dest_dir: str, out_name: str = "stream",
         if len(segs) > max_segments:
             raise _HlsError(
                 f"分片过多({len(segs)}>{max_segments})，疑似直播流，跳过")
+        total = len(segs)
         dest = os.path.join(dest_dir, out_name + ".ts")
         meta = _meta_path(dest_dir, out_name)
-        fingerprint = _fingerprint(segs)
+        # 指纹含密钥内容摘要：需先回源取密钥（同时预热缓存，失败即整体失败）
+        fingerprint = _fingerprint(segs, _key_digests(segs))
 
         start = 0
+        start_seg_bytes: list[int] = []
+        start_hasher = None
         if resume:
-            start = _read_meta(meta, len(segs), fingerprint, dest)
+            start, start_seg_bytes, start_hasher = _read_meta(
+                meta, total, fingerprint, dest)
             if start:
-                print(f"[HLS] 断点续传：跳过已完成的 {start}/{len(segs)} 个分片")
-        if not start and os.path.exists(dest):
+                print(f"[HLS] 断点续传：跳过已完成的 {start}/{total} 个分片")
+        if not start:
+            # 全量重下：清掉旧的半截/污染文件，并从空文件重新开始
+            start_seg_bytes = []
+            start_hasher = None
             try:
-                os.remove(dest)  # 全量重下：清掉旧的半截/污染文件
+                os.remove(dest)
             except OSError:
                 pass
-
-        if start:
-            existing = os.path.getsize(dest) if os.path.exists(dest) else 0
-        else:
-            existing = 0
             with open(dest, "wb") as f:
                 f.truncate(0)
-        _write_meta(meta, fingerprint, len(segs), start, existing)
 
-        committer = _OrderedCommitter(dest, meta, fingerprint, len(segs), start)
+        committer = _OrderedCommitter(dest, meta, fingerprint, total, start,
+                                      start_seg_bytes, start_hasher)
+        committer.flush_meta()  # 开局即校正 meta（旧进度失效时立即归零）
+
         fail_reason: list[str] = []
         lock = threading.Lock()
         thread_sessions = _ThreadSessions()
@@ -488,16 +662,27 @@ def download_hls(url: str, dest_dir: str, out_name: str = "stream",
             os.remove(meta)
         except OSError:
             pass
+        ok = True
         return dest
     except _HlsError as exc:
         print(f"[HLS] {exc.reason}")
-        if committer is not None and meta:
-            _write_meta(meta, fingerprint, len(segs), committer.done,
-                        committer._bytes)
         return None
     except Exception as exc:
         print(f"[HLS] {exc}")
-        if committer is not None and meta:
-            _write_meta(meta, fingerprint, len(segs), committer.done,
-                        committer._bytes)
         return None
+    finally:
+        # 任何退出路径（含 KeyboardInterrupt 等 BaseException）都落盘进度；
+        # 成功后 meta 已删，flush 会重新写回来，所以只在未成功时写。
+        if not ok and committer is not None:
+            _flush_progress(committer)
+
+
+def _flush_progress(committer: _OrderedCommitter | None) -> None:
+    """失败/中止收尾：把「连续提交数 + 实际字节数」立即落盘。
+
+    只写 committer 维护的连续前缀，绝不把已下载但未轮到写盘的中间分片
+    计入；bytes 取自目标文件实际大小（commit 时 fstat 得到）。
+    """
+    if committer is None:
+        return
+    committer.flush_meta()
