@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Matrix, TextureSource } from "../src/backend.js";
 import { Draw } from "../src/draw.js";
 import { blur, filter } from "../src/filters.js";
@@ -512,6 +512,176 @@ describe("WebGL2Backend", () => {
       draw.dispose();
       // Objects from before the loss died with that context; everything made since is freed.
       expect(created.slice(restoredFrom).filter((o) => !o.deleted)).toEqual([]);
+    });
+
+    it("resets the drawing target to the canvas when the context is lost inside a render target", () => {
+      const { gl, calls, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      draw.begin("#000", 100, 50, 1);
+      const target = draw.createTarget(12, 9);
+      // Start a pass into the target, then lose the context before the pass ends.
+      backend.setTarget(target, 0, 12, 9);
+      const fbosBeforeLoss = count("createFramebuffer");
+      const oldFbo = calls.findLast((c) => c.name === "bindFramebuffer")?.args[1];
+      fire("webglcontextlost");
+      // Restore must not throw, and must leave drawing aimed at the canvas, not the dead framebuffer.
+      expect(() => fire("webglcontextrestored")).not.toThrow();
+      expect(backend.contextLost).toBe(false);
+      const restoreBind = calls.findLast((c) => c.name === "bindFramebuffer");
+      expect(restoreBind?.args).toEqual(["FRAMEBUFFER", null]);
+      const restoreViewport = calls.findLast((c) => c.name === "viewport");
+      expect(restoreViewport?.args).toEqual([0, 0, 100, 50]);
+      // The dead framebuffer is never bound again; a draw before the next begin() lands on the canvas.
+      const restoreIndex = restoreBind ? calls.lastIndexOf(restoreBind) : -1;
+      draw.rect(0, 0, 4, 4, "#fff");
+      draw.end();
+      const afterRestore = calls.slice(restoreIndex + 1);
+      expect(afterRestore.map((c) => (c.name === "bindFramebuffer" ? c.args[1] : undefined))).not.toContain(oldFbo);
+      expect(calls.findLast((c) => c.name === "bindFramebuffer")?.args[1]).toBeNull();
+      // Reusing the target rebuilds its framebuffer and texture on demand, blank as before.
+      draw.begin("#000", 100, 50, 1);
+      const beforeReuse = calls.length;
+      draw.into(target, () => draw.rect(0, 0, 2, 2, "#fff"));
+      expect(count("createFramebuffer")).toBe(fbosBeforeLoss + 1);
+      const targetBinds = calls.slice(beforeReuse).filter((c) => c.name === "bindFramebuffer");
+      // First the freshly built framebuffer, then back to the canvas when into() ends.
+      expect((targetBinds.at(0)?.args[1] as { kind: string }).kind).toBe("Framebuffer");
+      expect(targetBinds.at(-1)?.args[1]).toBeNull();
+      draw.end();
+    });
+  });
+
+  describe("context restore", () => {
+    /** SPRITE flag (16) plus texture unit 0: a smooth sprite instance on the first unit. */
+    const SPRITE = 16;
+    /** SPRITE + PLACED (32) on unit 0: an unrotated pixel-art sprite whose position was rounded on the CPU. */
+    const PLACED_SPRITE = 48;
+
+    /** The flags word of sprite instance `i` from the last instanced batch's uploaded data. */
+    const spriteFlags = (calls: { name: string; args: unknown[] }[], i = 0) => {
+      const f = calls.findLast((c) => c.name === "bufferSubData")?.args[2] as Float32Array;
+      return f[i * 14 + 12] as number;
+    };
+
+    it("drops a sprite batch pending at the loss and continues batching sprites after restore", () => {
+      const { gl, calls, created, fire } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      const img = image();
+      draw.begin("#000", 100, 50, 1);
+      // Two sprites open an armed sprite batch with a unit and a batch transform; lose before end() flushes.
+      draw.sprite(img, 5, 5);
+      draw.sprite(img, 20, 5);
+      const deadTextures = created.filter((o) => o.kind === "Texture");
+
+      fire("webglcontextlost");
+      expect(backend.contextLost).toBe(true);
+      fire("webglcontextrestored");
+      expect(backend.contextLost).toBe(false);
+
+      // A new frame: the pending instances are gone, so this batch holds only the two sprites drawn now.
+      calls.length = 0;
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(img, 7, 9);
+      draw.sprite(img, 30, 9);
+      draw.end();
+      const sub = calls.filter((c) => c.name === "bufferSubData");
+      expect(sub).toHaveLength(1);
+      const uploaded = sub[0]?.args[2] as Float32Array;
+      const instances = (sub[0]?.args[4] as number) / 14;
+      expect(instances).toBe(2);
+      // Both are real sprites on unit 0 of the fresh context; the first is a whole-pixel placed one.
+      expect(spriteFlags(calls, 0)).toBe(PLACED_SPRITE);
+      expect(spriteFlags(calls, 1)).toBe(PLACED_SPRITE);
+      expect(uploaded[0]).toBe(-1); // 7 - 16/2, rounded on the CPU
+      // The batch transform the shader receives is the identity the new frame started with,
+      // not any matrix the lost batch had staged.
+      const linear = calls.find((c) => c.name === "uniform4f" && (c.args as unknown[]).slice(1).join(",") === "1,0,0,1");
+      expect(linear).toBeDefined();
+      const mt = calls.find((c) => c.name === "uniform2f" && (c.args as unknown[]).slice(1).join(",") === "0,0");
+      expect(mt).toBeDefined();
+      // The sprites sample textures made after the restore: no dead WebGLTexture is ever bound.
+      const bound = calls.filter((c) => c.name === "bindTexture").map((c) => c.args[1]);
+      expect(bound.length).toBeGreaterThan(0);
+      for (const tex of bound) expect(deadTextures).not.toContain(tex);
+    });
+
+    it("clears the armed short path and texture units, so a continued sprite finds a fresh unit", () => {
+      const { gl, calls, created, fire } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, true);
+      const img = image();
+      draw.begin("#000", 100, 50, 1);
+      draw.sprite(img, 5, 5);
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      const madeAfterRestore = created.length;
+      draw.begin("#000", 100, 50, 1);
+      // First sprite after restore goes the full path (armed was cleared) and uploads a fresh texture.
+      draw.sprite(img, 5, 5);
+      expect(created.slice(madeAfterRestore).some((o) => o.kind === "Texture")).toBe(true);
+      // The second takes the short path against the *new* unit, still unit 0 with a live texture.
+      draw.sprite(img, 25, 5);
+      draw.end();
+      expect(spriteFlags(calls, 1)).toBe(SPRITE);
+      // Only texture objects (the white texture and the fresh upload) get bound; every one is post-restore.
+      const bound = calls.filter((c) => c.name === "bindTexture").map((c) => c.args[1]);
+      expect(bound.every((t) => t && typeof t === "object" && (t as { kind: string }).kind === "Texture")).toBe(true);
+      expect(created.slice(madeAfterRestore).some((o) => bound.includes(o))).toBe(true);
+    });
+
+    it("discards shape geometry staged before the loss and rebuilds the shape pipeline on demand", () => {
+      const { gl, calls, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const draw = new Draw(backend, false);
+      draw.begin("#000", 100, 50, 1);
+      roundRect(draw, 2, 2, 10, 10, 3, "#fff");
+      expect(backend.drawCalls).toBe(1);
+      fire("webglcontextlost");
+      fire("webglcontextrestored");
+      // Nothing from the lost frame is submitted: no drawElements happened for the discarded geometry.
+      draw.begin("#000", 100, 50, 1);
+      expect(count("drawElements")).toBe(0);
+      // A shape after restore builds a fresh pipeline and draws normally.
+      roundRect(draw, 4, 4, 8, 8, 2, "#fff");
+      draw.end();
+      expect(count("drawElements")).toBe(1);
+      const upload = calls.findLast((c) => c.name === "bufferData")?.args[1] as Float32Array;
+      expect(upload.length).toBeGreaterThan(0);
+    });
+
+    it("never throws out of the restore event even when rebuilding a GPU object fails, and retries next time", () => {
+      const { gl, fire, count } = fakeGL();
+      const backend = new WebGL2Backend(gl);
+      const original = gl.createTexture;
+      let failOnce = true;
+      (gl as unknown as { createTexture: () => WebGLTexture | null }).createTexture = () => {
+        if (failOnce) {
+          failOnce = false;
+          return null;
+        }
+        return original();
+      };
+      const onError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        fire("webglcontextlost");
+        expect(() => fire("webglcontextrestored")).not.toThrow();
+        expect(onError).toHaveBeenCalledOnce();
+        // The failed rebuild keeps the backend behaving as lost: drawing no-ops instead of touching dead state.
+        expect(backend.contextLost).toBe(true);
+        // A later restore retries the rebuild and succeeds.
+        fire("webglcontextlost");
+        fire("webglcontextrestored");
+        expect(backend.contextLost).toBe(false);
+        const draw = new Draw(backend, false);
+        draw.begin("#000", 100, 50, 1);
+        draw.rect(0, 0, 4, 4, "#fff");
+        draw.end();
+        expect(count("drawArraysInstanced")).toBe(1);
+      } finally {
+        onError.mockRestore();
+      }
     });
   });
 });

@@ -391,25 +391,67 @@ export class WebGL2Backend implements Backend {
     this.armed = false;
   };
   protected readonly onRestored = () => {
-    // Every GPU object died with the context. Sources are still in memory, so textures re-upload lazily.
-    // Render targets come back blank. Custom shaders recompile on next use.
+    // Every GPU object died with the context. Drop all software staging first: pending batch instances, the
+    // texture units they referenced (the WebGLTexture handles are dead), the batch transform and shape
+    // geometry all belong to the lost context, so nothing queued before the loss may survive into a draw.
     const shader = this.shader;
-    this.customs.clear();
-    this.eachCustoms.clear();
-    this.layers = new WeakMap();
-    this.textures.clear();
-    this.targets.clear();
-    this.target = null;
-    this.lastSrc = null;
-    this.last = undefined;
+    try {
+      this.customs.clear();
+      this.eachCustoms.clear();
+      this.layers = new WeakMap();
+      this.textures.clear();
+      this.targets.clear();
+      this.target = null;
+      this.resetBatch();
+      this.setup();
+      // If the loss happened while drawing into a render target, its framebuffer is gone: bind the canvas
+      // now so any drawing before the next begin() lands there instead of a stale framebuffer binding.
+      this.bindRestoredOutput();
+      this.lost = false;
+      if (shader) this.setShader(shader);
+    } catch (e) {
+      // A failed rebuild must not throw out of the browser's restore event and break the app: stay marked
+      // lost so drawing keeps no-opping until another restore (or begin(), on the shared backend) retries.
+      console.error("spryte: rebuilding GPU resources after context restore failed", e);
+    }
+  };
+
+  /**
+   * Clear every piece of staging the batch machinery holds: pending instances, texture units and their
+   * sources, the sprite batch's transform and armed marker, and shape geometry awaiting its draw call.
+   * Called on context restore so no handle or transform from the lost context can leak into a new batch.
+   */
+  private resetBatch(): void {
     this.count = 0;
     this.unitCount = 0;
+    this.lastUnit = 0;
+    this.lastSmooth = false;
+    this.lastSrc = null;
+    this.last = undefined;
+    this.units.fill(null);
+    this.unitSmooth.fill(false);
+    this.unitInfo.fill(undefined);
+    this.unitSrc.fill(null);
     this.sprites = false;
     this.armed = false;
-    this.setup();
-    this.lost = false;
-    if (shader) this.setShader(shader);
-  };
+    this.bver = -1;
+    this.bm[0] = 1;
+    this.bm[1] = 0;
+    this.bm[2] = 0;
+    this.bm[3] = 1;
+    this.bm[4] = 0;
+    this.bm[5] = 0;
+    if (this.shapes) {
+      this.shapes.count = 0;
+      this.shapes.icount = 0;
+    }
+    this.submitted = 0;
+  }
+
+  /** Bind the canvas (the frame's normal destination) and size the viewport, after a context restore. */
+  protected bindRestoredOutput(): void {
+    this.bindOutput();
+  }
   private readonly units: (WebGLTexture | null)[] = new Array(UNITS).fill(null);
   private readonly unitSmooth: boolean[] = new Array(UNITS).fill(false);
   private unitCount = 0;

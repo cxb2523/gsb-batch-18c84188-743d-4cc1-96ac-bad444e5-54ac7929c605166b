@@ -131,6 +131,17 @@ class SharedBackend extends WebGL2Backend {
     return this.fb;
   }
 
+  /**
+   * A restore (or the first begin() after one) lands drawing back on the host's framebuffer. The host's
+   * scissor box is only read in begin(), so here just rebind the framebuffer and viewport without it.
+   */
+  protected override bindRestoredOutput(): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.viewport(0, 0, this.fbW, this.fbH);
+    this.outH = this.fbH;
+  }
+
   protected override bindOutput(): void {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
