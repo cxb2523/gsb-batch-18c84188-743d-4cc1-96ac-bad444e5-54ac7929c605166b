@@ -9,15 +9,22 @@ const vendorAlias = {
   },
 }
 
+// PLAYWRIGHT_EXECUTABLE_PATH allows pointing the launcher at a system-installed
+// Chromium/Chrome when the Playwright browser download is unavailable.
+const launchOptions = {
+  args: ['--no-sandbox', '--disable-setuid-sandbox'],
+}
+if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) {
+  launchOptions.executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
+}
+
 export default {
   files: 'test/**/*.test.js',
   nodeResolve: true,
   browsers: [
     playwrightLauncher({
       product: 'chromium',
-      launchOptions: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      },
+      launchOptions,
     }),
   ],
   plugins: [vendorAlias],

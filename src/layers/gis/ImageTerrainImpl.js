@@ -96,7 +96,7 @@ function buildTerrainTileMesh(tileBbox, dtmTileCrs, plotCrs, satTileCrs, N) {
   }
 
   return {
-    positions, satPositions, vertexCount,
+    positions, satPositions, vertexCount, validVertex,
     satCrsBbox: { minX: mnSX, maxX: mxSX, minY: mnSY, maxY: mxSY },
   }
 }
@@ -149,6 +149,7 @@ class DtmTileManager {
     this.accessOrder = []
     this._neededKeys = new Set()
     this._neededSpecs = []
+    this._renderItems = []
     this._lastXDomain = null
     this._lastYDomain = null
     this._lastViewport = null
@@ -322,14 +323,45 @@ class DtmTileManager {
   requestSatTiles(viewport) {
     const satCache = this._satCacheRef.cache
     if (!satCache) return
-    for (const [key, tile] of this.tiles.entries()) {
-      if (tile.status !== 'loaded') continue
-      // For WMS/COG, only request sat tiles for the current needed tile(s).
-      // Old tiles accumulate in the cache (different bbox per pan position)
-      // and would otherwise trigger sat tile requests for stale positions every frame.
-      if ((this.source.type === 'wms' || this.source.type === 'cog') && !this._neededKeys.has(key)) continue
-      satCache.requestForBbox(tile.slot.satCrsBbox, viewport)
+    // Request imagery against each render item's actual sat-CRS footprint. Fallback
+    // sub-meshes cover only a sub-region of their ancestor tile, so requesting from
+    // the ancestor's full satCrsBbox could fetch imagery whose coverage is wrong for
+    // the region actually drawn. renderItems are rebuilt by _rebuildArrays each sync.
+    for (const item of this._renderItems) {
+      satCache.requestForBbox(item.satBbox, viewport)
     }
+  }
+
+  // Sat-CRS footprint of an ancestor sub-mesh: walk only the quads inside the DTM
+  // UV range and the corresponding expanded output vertices (same order as
+  // buildTerrainTileMesh). Works for any dtm/sat CRS combination because
+  // satXArr/satYArr already hold the projected coordinates; degenerate (non-finite)
+  // vertices are skipped via the slot's validVertex mask.
+  _subMeshSatBbox(slot, range) {
+    const [u0, v0, u1, v1] = range
+    if (u0 === 0 && v0 === 0 && u1 === 1 && v1 === 1) return slot.satCrsBbox
+    const N = this.tessellation
+    const i0 = Math.max(0, Math.floor(u0 * N))
+    const i1 = Math.min(N - 1, Math.ceil(u1 * N) - 1)
+    const j0 = Math.max(0, Math.floor(v0 * N))
+    const j1 = Math.min(N - 1, Math.ceil(v1 * N) - 1)
+    let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const outBase = (j * N + i) * 6
+        for (let k = 0; k < 6; k++) {
+          const out = outBase + k
+          if (!slot.validVertex[out]) continue
+          const sx = slot.satXArr[out], sy = slot.satYArr[out]
+          if (sx < mnX) mnX = sx
+          if (sx > mxX) mxX = sx
+          if (sy < mnY) mnY = sy
+          if (sy > mxY) mxY = sy
+        }
+      }
+    }
+    if (!isFinite(mnX)) return slot.satCrsBbox
+    return { minX: mnX, maxX: mxX, minY: mnY, maxY: mxY }
   }
 
   _rebuildArrays() {
@@ -338,7 +370,7 @@ class DtmTileManager {
     for (const arr of [xTexFns, zTexFns, dtmTexFns,
                        satTexFns, satUvXTexFns, satUvYTexFns, dtmUvRangeFns]) arr.length = 0
 
-    const satCacheRef = this._satCacheRef
+    const satCache = this._satCacheRef.cache
     const maxFallback = 4
 
     // Build render items using Algorithm B (ancestor sub-mesh fallback).
@@ -386,15 +418,31 @@ class DtmTileManager {
       }
     }
 
-    // Push fn[] entries, computing sat UVs once per ancestor slot.
-    const computedSlots = new Set()
+    // Each render item's imagery is selected against its OWN sat-CRS footprint — a
+    // fallback sub-mesh must never inherit a tile picked for the ancestor's full bbox,
+    // since that tile may only cover part of the sub-region (misaligned UVs / holes).
+    const retainedKeys = new Set()
+    for (const item of renderItems) {
+      item.satBbox = this._subMeshSatBbox(item.slot, item.range)
+      const sat = satCache?.getBestAvailable(item.satBbox)
+      item.sat = sat
+      if (sat) retainedKeys.add(sat.key)
+    }
+    // Protect every texture referenced by the current frame's render closures from
+    // eviction (including evictions triggered by sat tiles finishing their async load
+    // before the next sync). Evicting one would leave satTexFns pointing at a destroyed
+    // texture for the rest of this frame.
+    satCache?.markKeysForRendering(retainedKeys)
+    this._renderItems = renderItems
+
+    const clamp01 = v => v < 0 ? 0 : (v > 1 ? 1 : v)
 
     for (const item of renderItems) {
       const s = item.slot
-      const sat = satCacheRef.cache?.getBestAvailable(s.satCrsBbox)
+      const sat = item.sat
 
       if (!sat) {
-        // No sat tile yet — push nulls so the tile loop skips this render item.
+        // No covering sat tile yet — push nulls so the tile loop skips this render item.
         xTexFns.push(      () => null)
         zTexFns.push(      () => null)
         dtmTexFns.push(    () => null)
@@ -405,33 +453,42 @@ class DtmTileManager {
         continue
       }
 
-      // Compute sat UV textures once per slot (shared across multiple sub-mesh render items
-      // that reference the same ancestor tile). Recompute whenever the sat tile key changes.
-      if (!computedSlots.has(s) || s._lastSatKey !== sat.key) {
-        computedSlots.add(s)
-        s._lastSatKey = sat.key
+      // UV textures are per render item (per slot + sub-region). Two fallback items
+      // sharing one ancestor slot cover different regions, so they cannot share UVs.
+      // Recompute whenever the chosen sat tile key changes.
+      const rangeKey = item.range.join('/')
+      const uvEntry = s.uvCache.get(rangeKey)
+      if (!uvEntry || uvEntry.satKey !== sat.key) {
         const vCount = s.satXArr.length
         const uvXArr = new Float32Array(vCount)
         const uvYArr = new Float32Array(vCount)
         const bW = sat.bounds.maxX - sat.bounds.minX
         const bH = sat.bounds.maxY - sat.bounds.minY
         for (let i = 0; i < vCount; i++) {
-          uvXArr[i] = (s.satXArr[i] - sat.bounds.minX) / bW
-          uvYArr[i] = 1.0 - (s.satYArr[i] - sat.bounds.minY) / bH
+          // Clamp to [0,1]: coverage is guaranteed by getBestAvailable, so any
+          // overshoot is float32 rounding at the tile boundary rather than a real
+          // coverage gap (the fragment shader discards fragments outside [0,1]).
+          uvXArr[i] = clamp01((s.satXArr[i] - sat.bounds.minX) / bW)
+          uvYArr[i] = clamp01(1.0 - (s.satYArr[i] - sat.bounds.minY) / bH)
         }
-        s.satUvXTex?.destroy()
-        s.satUvYTex?.destroy()
-        s.satUvXTex = uploadToTexture(this.regl, uvXArr)
-        s.satUvYTex = uploadToTexture(this.regl, uvYArr)
+        uvEntry?.uvXTex?.destroy()
+        uvEntry?.uvYTex?.destroy()
+        s.uvCache.set(rangeKey, {
+          satKey: sat.key,
+          uvXTex: uploadToTexture(this.regl, uvXArr),
+          uvYTex: uploadToTexture(this.regl, uvYArr),
+        })
       }
+      const uv = s.uvCache.get(rangeKey)
 
       const range = item.range
+      const texture = sat.texture
       xTexFns.push(      () => s.xTex)
       zTexFns.push(      () => s.zTex)
       dtmTexFns.push(    () => s.dtmTex)
-      satTexFns.push(    () => sat.texture)
-      satUvXTexFns.push( () => s.satUvXTex)
-      satUvYTexFns.push( () => s.satUvYTex)
+      satTexFns.push(    () => texture)
+      satUvXTexFns.push( () => uv.uvXTex)
+      satUvYTexFns.push( () => uv.uvYTex)
       dtmUvRangeFns.push(() => range)
     }
   }
@@ -442,8 +499,10 @@ class DtmTileManager {
     tile.slot?.xTex?.destroy()
     tile.slot?.zTex?.destroy()
     tile.slot?.dtmTex?.destroy()
-    tile.slot?.satUvXTex?.destroy()
-    tile.slot?.satUvYTex?.destroy()
+    for (const uv of tile.slot?.uvCache?.values() ?? []) {
+      uv.uvXTex?.destroy()
+      uv.uvYTex?.destroy()
+    }
     this.tiles.delete(key)
     const i = this.accessOrder.indexOf(key)
     if (i >= 0) this.accessOrder.splice(i, 1)
@@ -482,7 +541,7 @@ class DtmTileManager {
         dtmTex = this.regl.texture({ data: img, flipY: false, min: 'nearest', mag: 'nearest', format: 'rgba', type: 'uint8' })
       }
 
-      const { positions, satPositions, vertexCount, satCrsBbox } =
+      const { positions, satPositions, vertexCount, validVertex, satCrsBbox } =
         buildTerrainTileMesh(spec.bbox, this.dtmTileCrs, this.plotCrs, this.satTileCrs, this.tessellation)
       console.log('[DtmTileManager] loaded tile', spec.key,
         '| spec.bbox', spec.bbox, '| dtmTileCrs', this.dtmTileCrs,
@@ -519,10 +578,10 @@ class DtmTileManager {
         }
       }
 
-      // satXArr/satYArr kept as CPU arrays; UV textures computed in _rebuildArrays.
+      // satXArr/satYArr kept as CPU arrays; UV textures computed per render item in _rebuildArrays.
       this.tiles.set(spec.key, {
         status: 'loaded',
-        slot: { dtmTex, xTex, zTex, satXArr, satYArr, satCrsBbox },
+        slot: { dtmTex, xTex, zTex, satXArr, satYArr, validVertex, satCrsBbox, uvCache: new Map() },
       })
       this._rebuildArrays()
       this.onLoad()
@@ -541,6 +600,8 @@ class DtmTileManager {
   }
 }
 
+export { DtmTileManager }
+
 // ─── SatTileCache ─────────────────────────────────────────────────────────────
 
 export class SatTileCache {
@@ -551,10 +612,35 @@ export class SatTileCache {
     this.onLoad = onLoad
     this.tiles = new Map()
     this.accessOrder = []
+    // Keys of sat textures referenced by the current frame's render items.
+    // Never evicted while retained, even when the cache exceeds MAX_TILE_CACHE.
+    this._retainedKeys = new Set()
   }
 
-  // Returns { texture, bounds, key } for the best available sat tile covering satCrsBbox,
-  // or null if no tile is loaded yet. The key allows callers to detect sat tile changes.
+  // Slack for coverage tests. Mesh sat positions are quantised to float32, so a
+  // bbox edge can round a few float32 ULP beyond the exact tile edge even when the
+  // tile genuinely covers it (at z~9 mercator coordinates are ~1e7, where float32
+  // resolution is ~1-2 m). Real coverage gaps are tile-sized (~4e5 m at that zoom),
+  // so a ~10 m tolerance accepts float32 overshoot while rejecting genuine gaps.
+  static _coverageSlack(bounds) {
+    const span = Math.max(
+      Math.abs(bounds.minX), Math.abs(bounds.maxX),
+      Math.abs(bounds.minY), Math.abs(bounds.maxY), 1
+    )
+    return Math.max(span * Number.EPSILON * 64, 8)
+  }
+
+  _tileCoversBbox(bounds, satCrsBbox) {
+    const slack = SatTileCache._coverageSlack(bounds)
+    return bounds.minX <= satCrsBbox.minX + slack &&
+           bounds.maxX >= satCrsBbox.maxX - slack &&
+           bounds.minY <= satCrsBbox.minY + slack &&
+           bounds.maxY >= satCrsBbox.maxY - slack
+  }
+
+  // Returns { texture, bounds, key } for the highest-resolution loaded sat tile
+  // whose footprint fully covers satCrsBbox, or null if no loaded tile covers it.
+  // The key allows callers to detect sat tile changes.
   getBestAvailable(satCrsBbox) {
     const source = this.source
     if (source.type === 'wms') {
@@ -567,9 +653,8 @@ export class SatTileCache {
     if (!isFinite(cx) || !isFinite(cy)) return null
     const minZoom = source.minZoom ?? 0
     const maxZoom = source.maxZoom ?? 19
-    // Start at the zoom level matching the DTM tile size. Starting higher risks finding
-    // a stale smaller sat tile that only covers part of the DTM tile, producing holes
-    // and wrong UV mapping.
+    // Start at the zoom level matching the DTM tile (or sub-mesh) size. Starting
+    // higher would only find smaller tiles that cannot cover the whole bbox anyway.
     const WORLD_SIZE = 2 * Math.PI * 6378137
     const bboxExtent = Math.min(satCrsBbox.maxX - satCrsBbox.minX, satCrsBbox.maxY - satCrsBbox.minY)
     const startZoom = Math.min(maxZoom, Math.round(Math.log2(WORLD_SIZE / bboxExtent)))
@@ -577,11 +662,28 @@ export class SatTileCache {
       const [tx, ty] = mercToTileXY(cx, cy, z)
       const key  = `${z}/${tx}/${ty}`
       const tile = this.tiles.get(key)
-      if (tile?.status === 'loaded') return { texture: tile.texture, bounds: tileToMercBbox(tx, ty, z), key }
+      if (tile?.status !== 'loaded') continue
+      // A tile containing the bbox center is only usable if it covers the FULL
+      // footprint; otherwise its UVs would leave [0,1] (discarded fragments / holes).
+      const bounds = tileToMercBbox(tx, ty, z)
+      if (this._tileCoversBbox(bounds, satCrsBbox)) {
+        return { texture: tile.texture, bounds, key }
+      }
     }
     return null
   }
 
+  // Mark the sat tile keys referenced by the current frame's render items as
+  // retained. Retained textures are never evicted, so render closures captured in
+  // the fn[] arrays never end up referencing a destroyed texture mid-frame.
+  markKeysForRendering(keys) {
+    this._retainedKeys = new Set(keys)
+  }
+
+  // Ensure imagery covering satCrsBbox is requested. For XYZ/WMTS a single tile may
+  // not cover the full footprint (bbox straddling a tile boundary, or a fallback
+  // sub-mesh whose only cached candidates are too small), so request every tile in
+  // the covering tile range rather than reusing a partially-covering cached tile.
   requestForBbox(satCrsBbox, viewport) {
     const source = this.source
     if (source.type === 'wms') {
@@ -592,37 +694,49 @@ export class SatTileCache {
       }
       return
     }
-    // Request only the single tile containing the center of satCrsBbox at the optimal zoom.
-    // This gives one sat tile per DTM tile (at the same zoom level, bounds match almost exactly),
-    // avoiding O(N²) tile requests that overflow the cache and cause an evict-reload loop.
-    //
-    // Cap sat zoom to the inferred DTM tile zoom level. A higher sat zoom = smaller sat tile =
-    // UV coordinates outside [0,1] = terrain fragments discarded. Since satCrsBbox IS the DTM
-    // tile footprint in sat CRS (both 3857), we infer z_dtm from the bbox extent.
-    const cx = (satCrsBbox.minX + satCrsBbox.maxX) / 2
-    const cy = (satCrsBbox.minY + satCrsBbox.maxY) / 2
     const pixelSize = viewport ? Math.max(viewport.width, viewport.height) / 2 : 256
+    //
+    // Cap sat zoom to the inferred DTM tile zoom level. A higher sat zoom = smaller
+    // sat tile = UV coordinates outside [0,1] = terrain fragments discarded. Since
+    // satCrsBbox IS the DTM tile (or sub-mesh) footprint in sat CRS, infer the cap
+    // from its extent.
     const WORLD_SIZE = 2 * Math.PI * 6378137  // full Mercator world extent in metres
     const bboxExtent = Math.min(satCrsBbox.maxX - satCrsBbox.minX, satCrsBbox.maxY - satCrsBbox.minY)
     const dtmZoomGuess = Math.round(Math.log2(WORLD_SIZE / bboxExtent))
     const maxZ = Math.min(source.maxZoom ?? 19, dtmZoomGuess)
     const z = optimalZoom(satCrsBbox, pixelSize, pixelSize, source.minZoom ?? 0, maxZ)
-    const [tx, ty] = mercToTileXY(cx, cy, z)
+
+    // Full tile range covering the bbox at z — not just the tile containing its
+    // center. Each missing entry becomes its own request; already-loaded/loading
+    // entries are skipped via the tiles map.
+    const [xMin, yMax] = mercToTileXY(satCrsBbox.minX, satCrsBbox.minY, z)
+    const [xMax, yMin] = mercToTileXY(satCrsBbox.maxX, satCrsBbox.maxY, z)
+    const tc = Math.pow(2, z)
+    const txMin = Math.max(0, xMin), txMax = Math.min(tc - 1, xMax)
+    const tyMin = Math.max(0, yMin), tyMax = Math.min(tc - 1, yMax)
 
     // Guard: if satCrsBbox is degenerate (Infinity/NaN from an empty or mis-projected mesh),
-    // the tile coords will be invalid. Log and bail rather than requesting a nonsense URL.
-    const maxTile = Math.pow(2, z) - 1
-    if (!isFinite(tx) || !isFinite(ty) || tx < 0 || ty < 0 || tx > maxTile || ty > maxTile) {
+    // the tile coords will be invalid. Log and bail rather than requesting nonsense URLs.
+    if (![txMin, txMax, tyMin, tyMax].every(Number.isFinite)) {
       console.warn('[SatTileCache.requestForBbox] invalid tile coords — satCrsBbox likely degenerate',
-        { satCrsBbox, cx, cy, bboxExtent, dtmZoomGuess, maxZ, z, tx, ty })
+        { satCrsBbox, bboxExtent, dtmZoomGuess, maxZ, z, txMin, txMax, tyMin, tyMax })
+      return
+    }
+    const count = (txMax - txMin + 1) * (tyMax - tyMin + 1)
+    if (count > 16) {
+      console.warn('[SatTileCache.requestForBbox] covering tile range too large, skipping',
+        { z, txMin, txMax, tyMin, tyMax, count })
       return
     }
 
-    const key = `${z}/${tx}/${ty}`
-    if (!this.tiles.has(key)) {
-      const url    = source.type === 'wmts' ? buildWmtsUrl(source, z, tx, ty) : buildXyzUrl(source, z, tx, ty)
-      const bounds = tileToMercBbox(tx, ty, z)
-      this._loadTile({ key, url, bounds })
+    for (let ty = tyMin; ty <= tyMax; ty++) {
+      for (let tx = txMin; tx <= txMax; tx++) {
+        const key = `${z}/${tx}/${ty}`
+        if (this.tiles.has(key)) continue
+        const url    = source.type === 'wmts' ? buildWmtsUrl(source, z, tx, ty) : buildXyzUrl(source, z, tx, ty)
+        const bounds = tileToMercBbox(tx, ty, z)
+        this._loadTile({ key, url, bounds })
+      }
     }
   }
 
@@ -641,22 +755,27 @@ export class SatTileCache {
       const texture = this.regl.texture({ data: img, flipY: false, min: 'linear', mag: 'linear' })
       this.tiles.set(key, { status: 'loaded', texture, bounds })
       console.log('[Terrain] sat tile loaded', key, 'bounds', bounds, img.width, 'x', img.height)
-      if (this.tiles.size > MAX_TILE_CACHE) {
-        for (const k of this.accessOrder) {
-          if (k !== key && this.tiles.has(k)) {
-            this.tiles.get(k).texture?.destroy()
-            this.tiles.delete(k)
-            this.accessOrder.splice(this.accessOrder.indexOf(k), 1)
-            if (this.tiles.size <= MAX_TILE_CACHE) break
-          }
-        }
-      }
+      this._evictIfNeeded(key)
       this.onLoad()
     } catch (err) {
       this.tiles.delete(key)
       const i = this.accessOrder.indexOf(key)
       if (i >= 0) this.accessOrder.splice(i, 1)
       console.warn(`[TerrainTileLayer] ${err.message}`)
+    }
+  }
+
+  // LRU eviction down to MAX_TILE_CACHE. Tiles retained by the current frame's
+  // render items (and the just-loaded tile) are skipped; if everything is retained
+  // the cache temporarily stays over capacity rather than destroying a live texture.
+  _evictIfNeeded(justLoadedKey) {
+    if (this.tiles.size <= MAX_TILE_CACHE) return
+    for (const k of [...this.accessOrder]) {
+      if (this.tiles.size <= MAX_TILE_CACHE) break
+      if (k === justLoadedKey || this._retainedKeys.has(k) || !this.tiles.has(k)) continue
+      this.tiles.get(k).texture?.destroy()
+      this.tiles.delete(k)
+      this.accessOrder.splice(this.accessOrder.indexOf(k), 1)
     }
   }
 
@@ -667,6 +786,7 @@ export class SatTileCache {
   destroy() {
     for (const tile of this.tiles.values()) tile.texture?.destroy()
     this.tiles.clear()
+    this._retainedKeys.clear()
   }
 }
 

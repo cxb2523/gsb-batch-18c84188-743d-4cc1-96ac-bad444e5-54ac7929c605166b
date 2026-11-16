@@ -187,10 +187,17 @@ class QmTileManager {
     const satCache = this._satCacheRef.cache
     if (!satCache) return
 
+    // Retain every texture currently referenced by a drawable tile, including
+    // tiles whose sat tile didn't change this frame, so cache eviction can never
+    // destroy a texture still bound in a draw command.
+    const retainedKeys = new Set()
     for (const tile of this.tiles.values()) {
       if (tile.status !== 'loaded') continue
       const sat = satCache.getBestAvailable(tile.satCrsBbox)
-      if (!sat || sat.key === tile.lastSatKey) continue
+      if (!sat) continue
+      retainedKeys.add(sat.key)
+
+      if (sat.key === tile.lastSatKey) continue
 
       const n = tile.satXArr.length
       const uvXArr = new Float32Array(n)
@@ -208,6 +215,7 @@ class QmTileManager {
       tile.satTex    = sat.texture
       tile.lastSatKey = sat.key
     }
+    satCache.markKeysForRendering(retainedKeys)
   }
 
   // Returns all loaded tiles that have sat UV buffers ready to draw.
