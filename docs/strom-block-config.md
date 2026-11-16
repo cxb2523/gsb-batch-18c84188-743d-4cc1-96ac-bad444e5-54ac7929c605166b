@@ -36,6 +36,9 @@ Audio mixer with channel strips, aux buses, and groups.
 | `num_channels` | integer | Number of input channels (1-indexed pads `input_1` … `input_N`), **non-live** |
 | `num_aux_buses` | integer | Number of aux buses, **non-live** |
 | `num_groups` | integer | Number of group buses, **non-live** |
+| `ch{N}_aux{M}_pre` | bool | Pre-fader (`true`) vs post-fader (`false`) tee for channel N's send into aux M, **non-live** (issue #395) |
+| `ch{N}_aux{M}_level` | float | Live send gain (0 = closed, 1 = unity) for channel N into aux M |
+| `ch{N}_aux{M}_blocked` | bool | Persistent topology mask: channel N can never reach aux M while the flow runs, independent of mute/fader/level, **non-live**. Open Live sets it on a program-minus guest return's own channel so the guest cannot reappear in their own return after an unmute/fader restore |
 
 **Pads** (verified from live `GET /api/blocks` — authoritative):
 - Inputs: `input_1` … `input_{num_channels}` (1-indexed)

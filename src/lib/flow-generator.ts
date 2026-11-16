@@ -13,7 +13,7 @@ import { decryptStreamKey } from './rtmp-credentials-crypto.js';
 import { composeRtmpUrl } from './rtmp.js';
 import { safeFlowProjection } from './log-redact.js';
 import { VIRTUAL_SOURCES, assignAudioChannels } from './audio-channels.js';
-import { assignReturnBuses, returnSendMatrix } from './return-feeds.js';
+import { assignReturnBuses, returnSendMatrix, returnOwnChannelBlock } from './return-feeds.js';
 import { buildStromPropsFromStore } from './audio-processing.js';
 import { withGuestSlotStudioInputSuffix } from './mixer-input-map.js';
 import { PREVIEW_STREAM_TYPES } from './commentator-preview.js';
@@ -735,11 +735,19 @@ export async function activateStromFlow(
     // Guest return buses are post-fader (spec §"Return feed design": sends follow
     // the crew's faders and mutes) and start with their mode's send matrix so a
     // program-minus guest never hears their own channel from the very first frame.
+    // The send matrix alone is only an INITIAL live level: because the bus is
+    // post-fader, a later unmute/fader/send-level change could put the guest's
+    // own voice back into their own return. A program-minus return therefore also
+    // gets a build-time own-channel block (`ch{N}_aux{M}_blocked`, live:false) —
+    // a persistent mask Strom keeps enforcing regardless of mute/fader/level. It
+    // scopes to this one channel's send into this one return bus; other channels
+    // and the main program output are untouched.
     for (const rb of returnBuses) {
       for (let ch = 1; ch <= numChannels; ch++) {
         props[`ch${ch}_aux${rb.auxBus}_pre`] = false;
       }
       Object.assign(props, returnSendMatrix(rb.auxBus, rb.ownChannel, rb.mode, numChannels));
+      Object.assign(props, returnOwnChannelBlock(rb.auxBus, rb.ownChannel, rb.mode));
     }
     // Seed persisted audio processing (issue #527, OL-25) at flow BUILD time so
     // it survives deactivate/reactivate. This includes the construction-time

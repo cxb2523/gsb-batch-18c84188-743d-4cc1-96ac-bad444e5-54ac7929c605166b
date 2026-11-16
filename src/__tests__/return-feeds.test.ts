@@ -7,6 +7,8 @@ import { describe, it, expect } from 'vitest';
 import {
   assignReturnBuses,
   returnSendMatrix,
+  returnOwnChannelBlock,
+  returnOwnChannelBlockKey,
   mirrorToMainForPersistedReturns,
   RETURN_SEND_OPEN,
   RETURN_SEND_CLOSED,
@@ -70,6 +72,28 @@ describe('returnSendMatrix — send construction', () => {
     const m = returnSendMatrix(3, 1, 'program', 3, toMain);
     expect(m['ch3_aux3_level']).toBe(RETURN_SEND_CLOSED); // ch2 (0-based) off program
     expect(m['ch1_aux3_level']).toBe(RETURN_SEND_OPEN);
+  });
+});
+
+describe('returnOwnChannelBlock — persistent own-channel mask', () => {
+  it('blocks only the guest own channel on its own return bus in program-minus', () => {
+    // auxBus 3, ownChannel 1 (0-based) → 1-based ch2 on aux 3.
+    const block = returnOwnChannelBlock(3, 1, 'program-minus');
+    expect(block).toEqual({ ch2_aux3_blocked: true });
+    expect(returnOwnChannelBlockKey(1, 3)).toBe('ch2_aux3_blocked');
+  });
+
+  it('writes no block for a program return (the guest opts into hearing themselves)', () => {
+    expect(returnOwnChannelBlock(3, 1, 'program')).toEqual({});
+  });
+
+  it('scopes the block to the single (channel, bus) pair — no other keys emitted', () => {
+    const block = returnOwnChannelBlock(2, 0, 'program-minus');
+    expect(Object.keys(block)).toEqual(['ch1_aux2_blocked']);
+    // No main-output / to_main / other-bus properties ride along.
+    expect(block).not.toHaveProperty('ch1_to_main');
+    expect(block).not.toHaveProperty('ch1_aux1_blocked');
+    expect(block).not.toHaveProperty('ch2_aux2_blocked');
   });
 });
 

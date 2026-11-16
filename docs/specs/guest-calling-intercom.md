@@ -75,6 +75,16 @@ guests who only listen.
   audio channel. `program-minus` closes the guest's own send; `program` opens it. Send levels
   (`ch{N}_aux{M}_level`) are live, so the mode can change mid-show, and post-fader sends follow
   the crew's faders and mutes.
+- **Persistent own-channel block (program-minus).** A zero in the initial send matrix is only a
+  live send level, not a topology constraint: because the bus is post-fader, a runtime unmute or
+  fader/send-level restore could put the guest's own voice back into their own return. Each
+  program-minus return therefore also carries the build-time mask
+  `ch{N}_aux{M}_blocked = true` on its own channel (`live: false`, written by
+  `flow-generator.ts` via `returnOwnChannelBlock()` in `src/lib/return-feeds.ts`). Strom keeps
+  enforcing it for the life of the flow regardless of mute, fader or live level changes; it
+  scopes to that one channel's send into that one return bus, so other channels (including the
+  other guest) keep their normal post-fader sends and the main program output chain is never
+  touched. `program` returns get no block — hearing oneself is the mode's purpose.
 - **Mirror `to_main` into return sends.** Mute and audio-follow-video set `ch{N}_to_main`
   (`src/ws/controller.ts:1168,1206`), and Strom takes aux sends before that routing. Every
   `to_main` change must be copied into each return's sends in the same Strom update, or a

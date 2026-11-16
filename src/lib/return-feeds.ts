@@ -10,6 +10,18 @@ import { assignAudioChannels } from './audio-channels.js';
  * `program` opens it. Send levels (`ch{N}_aux{M}_level`) are live so the mode
  * can change mid-show.
  *
+ * PERSISTENT OWN-CHANNEL BLOCK: post-fader sends follow the channel fader, so a
+ * plain zero in the initial send matrix (`ch{N}_aux{M}_level = 0`) is not
+ * enough to keep a program-minus guest out of their own return — any runtime
+ * path that restores a send level (unmute/fader recovery) would put the guest's
+ * own voice back on the bus. Each program-minus return therefore also carries a
+ * build-time block on its own channel (`ch{N}_aux{M}_blocked = true`): a
+ * topology-level mask Strom enforces for the life of the flow regardless of
+ * mute, fader or live send-level changes. It touches only that one channel's
+ * send into that one return bus — other channels (including the other guest)
+ * keep their normal post-fader sends, and the main program output is never
+ * involved (no `to_main`/main-bus property is written).
+ *
  * BUS-NUMBERING INVARIANT: return buses are numbered *after* the crew aux buses
  * (aux `numCrewAuxBuses + 1` … `numCrewAuxBuses + numReturns`). Crew aux buses
  * are wired into every WHEP output; return buses must be EXCLUDED from that loop
@@ -23,6 +35,18 @@ export type ReturnMode = 'program' | 'program-minus';
 /** Send level for an open send (unity). A closed send is 0. */
 export const RETURN_SEND_OPEN = 1.0;
 export const RETURN_SEND_CLOSED = 0.0;
+
+/**
+ * Build-time mixer property that hard-blocks one channel's send into one aux
+ * bus (`ch{N}_aux{M}_blocked`, Strom `builtin.mixer`, `live: false`). Unlike the
+ * live `ch{N}_aux{M}_level` send gain, a block is topology: the channel can
+ * never reach that bus while the flow runs, no matter how its mute, fader or
+ * send level moves. Applied only at flow build (flow-generator); it is never
+ * written to a running pipeline.
+ */
+export function returnOwnChannelBlockKey(channel: number, auxBus: number): string {
+  return `ch${channel + 1}_aux${auxBus}_blocked`;
+}
 
 export interface ReturnBus<S> {
   /** The assignment (guest input) this return belongs to. */
@@ -102,6 +126,30 @@ export function returnSendMatrix(
     props[`ch${ch + 1}_aux${auxBus}_level`] = open ? RETURN_SEND_OPEN : RETURN_SEND_CLOSED;
   }
   return props;
+}
+
+/**
+ * Builds the persistent own-channel block for a single return bus: the
+ * build-time `ch{N}_aux{M}_blocked` property that keeps the guest's own channel
+ * off their own return for the whole life of the flow.
+ *
+ * Only `program-minus` returns are blocked — a `program` return's whole point is
+ * that the guest hears the full program including themselves, so it gets no
+ * block and returns `{}` (its send matrix already opens every channel). The
+ * block is per (channel, bus): nothing here affects any other channel, any
+ * other return bus, or the main program output.
+ *
+ * @param auxBus     1-based aux bus index of this return
+ * @param ownChannel 0-based own channel that must never enter this return
+ * @param mode       program | program-minus
+ */
+export function returnOwnChannelBlock(
+  auxBus: number,
+  ownChannel: number,
+  mode: ReturnMode,
+): Record<string, boolean> {
+  if (mode !== 'program-minus') return {};
+  return { [returnOwnChannelBlockKey(ownChannel, auxBus)]: true };
 }
 
 /**
