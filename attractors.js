@@ -61,6 +61,13 @@ const ATTRACTOR_RADIUS_MAX = 16 * ATTRACTOR_RADIUS_MIN;
 /** Length of the segments a no go zone is subdivised into. Decrease to subdivise more. */
 const SUBDIVISE_NOGO = 16;
 
+/**
+ * How many times a particle position is re-rolled to avoid a no go zone before giving
+ * up. Guards against a no go zone covering (almost) the whole canvas, which would
+ * otherwise reject every candidate forever.
+ */
+const NO_GO_SEED_MAX_TRIES = 100;
+
 const FONT = 'fonts/CamBam/1CamBam_Stick_2.ttf';
 
 /** Draws a closed outline through the given `[x, y]` points. */
@@ -405,7 +412,7 @@ export class Attractors {
     config.noGoImpactDistance ??= DEFAULT_IMPACT_DISTANCE;
     config.textGaussianImpactDistance ??= DEFAULT_IMPACT_DISTANCE;
 
-    this.#pixelRatio = config.pixelratio || globalThis.devicePixelRatio || 1;
+    this.#pixelRatio = this.#readPixelRatio();
 
     this.#canvas = document.getElementById(config.id);
     if (!this.#canvas) {
@@ -418,21 +425,194 @@ export class Attractors {
     this.#paintBackground();
 
     this.#initAttractors(config.nb_attractors, ATTRACTOR_RADIUS_MIN, ATTRACTOR_RADIUS_MAX);
+    this.#initSpecialAttractors();
+    // Seeds the remaining particles. Runs last, as it needs the no go zones to avoid them.
+    this.#initPoints(config.particule_density);
+
+    this.#resetParticleState();
+    this.#svgPaths = config.svg ? new Array(this.#pointsX.length).fill('') : [];
+  }
+
+  /** Pixel ratio used for the rendering: the configured one, or the screen's. */
+  #readPixelRatio() {
+    return this.config.pixelratio || globalThis.devicePixelRatio || 1;
+  }
+
+  /**
+   * Builds the special attractors derived from the config: the text outline and the
+   * no go zones.
+   * @param {boolean} seedTextPoints Whether to seed particles along the text outline.
+   *   Only the first initialization does it: a resize keeps the existing particles.
+   */
+  #initSpecialAttractors(seedTextPoints = true) {
+    const config = this.config;
     if (config.text) {
-      this.#initTextSpecialAttractors();
+      this.#initTextSpecialAttractors(seedTextPoints);
     }
     if (config.nogo_zone) {
       this.#initNoGoZoneSpecialAttractors();
       this.#initNoGoCirclesSpecialAttractors();
     }
-    // Seeds the remaining particles. Runs last, as it needs the no go zones to avoid them.
-    this.#initPoints(config.particule_density);
+  }
 
+  /** Recomputes the per-particle arrays and the line width after the particle set changes. */
+  #resetParticleState() {
     this.#drawShadowAtPoint = new Array(this.#pointsX.length).fill(true);
     this.#colorSize = Math.ceil(this.#pointsX.length / this.#colors.length);
-    this.#ctx.lineWidth = config.line_width * this.#pixelRatio;
+    this.#ctx.lineWidth = this.config.line_width * this.#pixelRatio;
+  }
 
-    this.#svgPaths = config.svg ? new Array(this.#pointsX.length).fill('') : [];
+  /**
+   * Adapts the render in place to a new canvas size or pixel ratio, continuing the
+   * current piece instead of starting a new one:
+   *
+   * - the existing attractors are kept, their position is mapped proportionally to the
+   *   new width and height, their weight is untouched and their radius keeps the same
+   *   relative strength;
+   * - the particles keep their relative position, are re-spread at the new size and the
+   *   ones landing in a no go zone are re-seeded outside of it;
+   * - the text and the no go zones are rebuilt from the config at the new size;
+   * - the recorded SVG paths, if any, are transformed into the new viewBox.
+   *
+   * Does nothing when the canvas size and the pixel ratio are unchanged. Safe to call
+   * before the first `start()`.
+   */
+  resize() {
+    // Nothing to move before the first start(), and a zero-sized canvas cannot be mapped:
+    // wait for the next, real resize rather than collapsing every position onto (0, 0).
+    if (!this.#canvas || this.#width === 0 || this.#height === 0) {
+      return;
+    }
+
+    const newPixelRatio = this.#readPixelRatio();
+    const newScreenWidth = this.#canvas.clientWidth;
+    const newScreenHeight = this.#canvas.clientHeight;
+    const newWidth = newScreenWidth * newPixelRatio;
+    const newHeight = newScreenHeight * newPixelRatio;
+    if (newWidth === 0 || newHeight === 0) {
+      return;
+    }
+    if (
+      newWidth === this.#width &&
+      newHeight === this.#height &&
+      newPixelRatio === this.#pixelRatio
+    ) {
+      return;
+    }
+
+    const oldWidth = this.#width;
+    const oldHeight = this.#height;
+    const oldD = this.#d;
+    const oldScreenWidth = this.#screenWidth;
+    const oldScreenHeight = this.#screenHeight;
+    const scaleX = newWidth / oldWidth;
+    const scaleY = newHeight / oldHeight;
+    // Ratios between the old and new CSS sizes: the no go rectangle is expressed in
+    // CSS pixels relative to the canvas, so it is remapped with these to keep its
+    // relative position and size, like the text.
+    const screenScaleX = newScreenWidth / oldScreenWidth;
+    const screenScaleY = newScreenHeight / oldScreenHeight;
+
+    // Keep the existing attractors. The radius is expressed against the characteristic
+    // distance `d`, so it scales with it to keep the relative relationship.
+    const scaleD = Math.max(newWidth, newHeight) / oldD;
+    for (const attractor of this.#attractors) {
+      attractor.x *= scaleX;
+      attractor.y *= scaleY;
+      attractor.radius *= scaleD;
+    }
+
+    this.#pixelRatio = newPixelRatio;
+    this.#resizeCanvas();
+    this.#d = Math.max(this.#width, this.#height);
+    this.#paintBackground();
+
+    // The text and the no go zones follow the config, so they are recomputed at the new
+    // size. No particles are seeded along the text: the existing ones are preserved.
+    const { nogoParam } = this.config;
+    if (nogoParam) {
+      nogoParam.x *= screenScaleX;
+      nogoParam.y *= screenScaleY;
+      nogoParam.width *= screenScaleX;
+      nogoParam.height *= screenScaleY;
+    }
+    this.#specialAttractors = [];
+    this.#specialAttractorBoxes = [];
+    this.#noGoBoxes = [];
+    this.#initSpecialAttractors(false);
+
+    // Preserve the relative position of every particle, then re-spread the ones now
+    // inside a no go zone, and adjust the count to the density of the new size.
+    for (let i = 0; i < this.#pointsX.length; i++) {
+      this.#pointsX[i] *= scaleX;
+      this.#pointsY[i] *= scaleY;
+    }
+    this.#reseedNoGoPoints();
+    this.#adjustPointCount();
+
+    this.#resetParticleState();
+    this.#transformSvgPaths(scaleX, scaleY);
+  }
+
+  /** Re-seeds the particles that ended up inside a no go zone after the resize. */
+  #reseedNoGoPoints() {
+    for (let i = 0; i < this.#pointsX.length; i++) {
+      if (this.#isInNoGoZone(this.#pointsX[i], this.#pointsY[i])) {
+        [this.#pointsX[i], this.#pointsY[i]] = this.#getSeedPosition(normalRand);
+      }
+    }
+  }
+
+  /**
+   * Adds or removes particles so their count matches the configured density for the
+   * current size. New particles are seeded outside of the no go zones.
+   */
+  #adjustPointCount() {
+    const targetCount = Math.floor(
+      (this.#pixelRatio *
+        this.config.particule_density *
+        this.#screenWidth *
+        this.#screenHeight) /
+        1000000,
+    );
+    while (this.#pointsX.length < targetCount) {
+      this.#addPoint(...this.#getSeedPosition(normalRand, this.config.init_scale));
+    }
+    if (this.#pointsX.length > targetCount) {
+      this.#pointsX.length = targetCount;
+      this.#pointsY.length = targetCount;
+    }
+  }
+
+  /**
+   * Keeps the recorded SVG paths consistent with the new canvas size: the coordinates
+   * already recorded are mapped by the same ratios as the particles and clamped inside
+   * the new width and height, and the array length follows the new number of particles.
+   * The recording is discarded when SVG export is disabled.
+   */
+  #transformSvgPaths(scaleX, scaleY) {
+    if (!this.config.svg) {
+      this.#svgPaths = [];
+      return;
+    }
+
+    const transformPath = (path) =>
+      path.replace(
+        /L(-?[\d.]+(?:e[-+]?\d+)?) (-?[\d.]+(?:e[-+]?\d+)?)/gi,
+        (_match, x, y) => {
+          const newX = Math.min(Math.max(parseFloat(x) * scaleX, 0), this.#width);
+          const newY = Math.min(Math.max(parseFloat(y) * scaleY, 0), this.#height);
+          return `L${newX} ${newY}`;
+        },
+      );
+
+    const transformed = this.#svgPaths
+      .slice(0, Math.min(this.#svgPaths.length, this.#pointsX.length))
+      .map(transformPath);
+    while (transformed.length < this.#pointsX.length) {
+      transformed.push('');
+    }
+    this.#svgPaths = transformed;
   }
 
   #resizeCanvas() {
@@ -663,10 +843,12 @@ export class Attractors {
    * @param {number} [sizeRatio] Scaling factor outside of which nothing will be used.
    */
   #getSeedPosition(random, sizeRatio = 1) {
-    for (;;) {
+    // A no go zone covering (almost) the whole canvas would otherwise reject every
+    // candidate forever: after enough tries, give up and use the last candidate.
+    for (let tries = 0; ; tries++) {
       const x = random() * this.#width * sizeRatio + (this.#width * (1 - sizeRatio)) / 2;
       const y = random() * this.#height * sizeRatio + (this.#height * (1 - sizeRatio)) / 2;
-      if (!this.#isInNoGoZone(x, y)) {
+      if (!this.#isInNoGoZone(x, y) || tries >= NO_GO_SEED_MAX_TRIES) {
         return [x, y];
       }
     }
@@ -735,8 +917,12 @@ export class Attractors {
     }
   }
 
-  /** Turns the text's outline into special attractors, and seeds particles along it. */
-  #initTextSpecialAttractors() {
+  /**
+   * Turns the text's outline into special attractors, and seeds particles along it.
+   * @param {boolean} seedPoints Whether to seed particles on and near the text. On a
+   *   resize, it is false: the existing particles are preserved instead.
+   */
+  #initTextSpecialAttractors(seedPoints = true) {
     const config = this.config;
     const impactDistance = config.textGaussianImpactDistance * this.#pixelRatio;
     const fontSize = this.#width / config.text_width_ratio;
@@ -793,7 +979,7 @@ export class Attractors {
       }
 
       // Add points near the text.
-      if (Math.random() < probabilityPointAppearsNearText) {
+      if (seedPoints && Math.random() < probabilityPointAppearsNearText) {
         this.#addPoint(
           textX + from.x + Math.random() - 0.5,
           textY + from.y + Math.random() - 0.5,
@@ -810,7 +996,7 @@ export class Attractors {
             impactDistance,
           );
           // If this is a real line, and not a flattened curve, seed a particle on it.
-          if (to.type === 'L') {
+          if (seedPoints && to.type === 'L') {
             this.#addPoint(
               textX + from.x + Math.random() - 0.5,
               textY + from.y + Math.random() - 0.5,

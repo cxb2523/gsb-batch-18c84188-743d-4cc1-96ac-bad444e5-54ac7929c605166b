@@ -80,9 +80,18 @@ function onKeyDown(event) {
   textController.updateDisplay();
 }
 
+/**
+ * Adapts the current render to a new window size without rebuilding it: the attractors
+ * and the particles continue the same piece, and the URL is left untouched. The
+ * instance itself no-ops when the size and the pixel ratio are unchanged.
+ */
+function onResize() {
+  attractors?.resize();
+}
+
 document.body.addEventListener('keydown', onKeyDown);
 canvas.addEventListener('click', reload);
-window.addEventListener('resize', reload);
+window.addEventListener('resize', onResize);
 
 // Control panel.
 const gui = new GUI({ title: 'Attractors' });
