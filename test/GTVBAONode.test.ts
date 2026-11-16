@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { LinearFilter, PerspectiveCamera, RedFormat, RGBAFormat } from "three";
+import { Color, LinearFilter, PerspectiveCamera, RedFormat, RGBAFormat, Vector2 } from "three";
 import type { ComputeNode } from "three/webgpu";
 import { uniform } from "three/tsl";
 import { test } from "vitest";
@@ -155,6 +155,96 @@ test("GTVBAONode only upsamples by depth at reduced resolution with depth MIPs",
   node.dispose();
 });
 
+test("GTVBAONode latches both upsample uniforms from the depth-aware upsample predicates", () => {
+  const cases = [
+    { label: "active", options: { upsampleJitter: 2 }, scale: 0.5, active: true, jitterActive: true, enabled: 1, jitter: 2, level0: [160, 90] },
+    { label: "zero jitter keeps the upsample but not the jitter", options: {}, scale: 0.5, active: true, jitterActive: false, enabled: 1, jitter: 0, level0: [160, 90] },
+    { label: "temporal filtering off keeps the upsample but not the jitter", options: { upsampleJitter: 2, useTemporalFiltering: false }, scale: 0.5, active: true, jitterActive: false, enabled: 1, jitter: 0, level0: [160, 90] },
+    { label: "depth MIPs off", options: { upsampleJitter: 2, useDepthMips: false }, scale: 0.5, active: false, jitterActive: false, enabled: 0, jitter: 0, level0: [1, 1] },
+    { label: "full resolution", options: { upsampleJitter: 2 }, scale: 1, active: false, jitterActive: false, enabled: 0, jitter: 0, level0: [320, 180] },
+  ];
+  for (const { label, options, scale, active, jitterActive, enabled, jitter, level0 } of cases) {
+    const node = new GTVBAONode(uniform(1) as never, null, new PerspectiveCamera(), { resolutionScale: scale, ...options });
+    const internals = node as unknown as { _upsampleEnabled: { value: number }; _upsampleJitter: { value: number } };
+
+    assert.equal(node.isDepthAwareUpsampleActive(), active, label);
+    assert.equal(node.isUpsampleJitterActive(), jitterActive, label);
+
+    // Stale uniform values from a previous quality tier must not survive the frame.
+    internals._upsampleEnabled.value = 99;
+    internals._upsampleJitter.value = 99;
+    runUpdateBefore(node, createFakeRenderer(), 0);
+
+    assert.equal(internals._upsampleEnabled.value, enabled, label);
+    assert.equal(internals._upsampleJitter.value, jitter, label);
+    assert.deepEqual(depthMipLevel0Size(node), level0, label);
+
+    node.dispose();
+  }
+});
+
+test("GTVBAONode computes the depth MIP chain before enabling the upsample and releases it on fallback", () => {
+  const node = new GTVBAONode(uniform(1) as never, null, new PerspectiveCamera(), { upsampleJitter: 2 });
+  const internals = node as unknown as {
+    _depthPrefilter: { compute(renderer: unknown): void };
+    _upsampleEnabled: { value: number };
+    _upsampleJitter: { value: number };
+  };
+  const renderer = createFakeRenderer();
+  // Probe the prefilter: at compute time the chain must already be allocated at
+  // the current AO size while the upsample uniforms still hold last frame's values.
+  const computeStates: { enabled: number; level0: number[] }[] = [];
+  const originalCompute = internals._depthPrefilter.compute.bind(internals._depthPrefilter);
+  internals._depthPrefilter.compute = (rendererArg: unknown) => {
+    computeStates.push({ enabled: internals._upsampleEnabled.value, level0: depthMipLevel0Size(node) });
+    originalCompute(rendererArg);
+  };
+
+  // Full resolution with depth MIPs off: bilinear fallback, no MIP chain.
+  node.useDepthMips.value = false;
+  runUpdateBefore(node, renderer, 0);
+  assert.equal(internals._upsampleEnabled.value, 0);
+  assert.equal(internals._upsampleJitter.value, 0);
+  assert.deepEqual(depthMipLevel0Size(node), [1, 1]);
+  assert.equal(computeStates.length, 0);
+
+  // Turning depth MIPs on and dropping below full resolution allocates and
+  // computes the chain before the uniforms enable the upsample in the same frame.
+  node.useDepthMips.value = true;
+  node.resolutionScale = 0.5;
+  runUpdateBefore(node, renderer, 1);
+  assert.deepEqual(computeStates, [{ enabled: 0, level0: [160, 90] }]);
+  assert.equal(internals._upsampleEnabled.value, 1);
+  assert.equal(internals._upsampleJitter.value, 2);
+  assert.deepEqual(depthMipLevel0Size(node), [160, 90]);
+
+  // Back to full resolution: the upsample is off in the same frame, while the
+  // chain stays allocated at the new AO size for the AO shader itself.
+  node.resolutionScale = 1;
+  runUpdateBefore(node, renderer, 2);
+  assert.deepEqual(computeStates[1], { enabled: 1, level0: [320, 180] });
+  assert.equal(internals._upsampleEnabled.value, 0);
+  assert.equal(internals._upsampleJitter.value, 0);
+
+  // Dropping below full resolution again finds the chain already allocated.
+  node.resolutionScale = 0.5;
+  runUpdateBefore(node, renderer, 3);
+  assert.deepEqual(computeStates[2], { enabled: 0, level0: [160, 90] });
+  assert.equal(internals._upsampleEnabled.value, 1);
+  assert.equal(internals._upsampleJitter.value, 2);
+
+  // Turning depth MIPs off releases the chain and falls back to bilinear in the
+  // same frame; nothing reads the released textures afterwards.
+  node.useDepthMips.value = false;
+  runUpdateBefore(node, renderer, 4);
+  assert.equal(computeStates.length, 3);
+  assert.equal(internals._upsampleEnabled.value, 0);
+  assert.equal(internals._upsampleJitter.value, 0);
+  assert.deepEqual(depthMipLevel0Size(node), [1, 1]);
+
+  node.dispose();
+});
+
 test("GTVBAONode switches compact AO and debug render targets", () => {
   const node = createTestGtvbaoNode();
   const internals = getGtvbaoRenderTargetInternals(node);
@@ -228,6 +318,45 @@ test("GTVBAONode releases depth kernels on depth-mode changes and disposal", () 
 
 function createTestGtvbaoNode() {
   return new GTVBAONode(uniform(1) as never, null, new PerspectiveCamera());
+}
+
+function runUpdateBefore(node: GTVBAONode, renderer: unknown, frameId: number) {
+  (node as unknown as { updateBefore(frame: unknown): void }).updateBefore({ frameId, renderer });
+}
+
+function depthMipLevel0Size(node: GTVBAONode) {
+  const { image } = (node.getDepthMipNodes()[0] as unknown as { value: { image: { width: number; height: number } } }).value;
+  return [image.width, image.height];
+}
+
+function createFakeRenderer() {
+  let renderTarget: unknown = null;
+  return {
+    autoClear: true,
+    outputColorSpace: "",
+    toneMapping: 0,
+    toneMappingExposure: 1,
+    compute: () => {},
+    getActiveCubeFace: () => 0,
+    getActiveMipmapLevel: () => 0,
+    getClearAlpha: () => 1,
+    getClearColor: (target = new Color()) => target.set(0),
+    getDrawingBufferSize: (target: Vector2) => target.set(320, 180),
+    getMRT: () => null,
+    getPixelRatio: () => 1,
+    getRenderObjectFunction: () => null,
+    getRenderTarget: () => renderTarget,
+    getScissorTest: () => false,
+    render: () => {},
+    setClearColor: () => {},
+    setMRT: () => {},
+    setPixelRatio: () => {},
+    setRenderObjectFunction: () => {},
+    setRenderTarget: (target: unknown) => {
+      renderTarget = target;
+    },
+    setScissorTest: () => {},
+  };
 }
 
 function getInternalMaterial(node: GTVBAONode) {

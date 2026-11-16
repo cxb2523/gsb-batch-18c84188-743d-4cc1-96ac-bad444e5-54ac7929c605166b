@@ -203,6 +203,13 @@ class GTVBAONode extends GTVBAONodeBase {
 	isDepthAwareUpsampleActive() {
 		return this.useDepthAwareUpsample && this.useDepthMips.value && this.resolutionScale < 1;
 	}
+	// The jitter widens the upsample footprint only while a temporal resolve can
+	// integrate it, so it requires useTemporalFiltering on top of an active
+	// depth-aware upsample. A zero width is never active: a quality-tier switch
+	// flipping the other conditions must not read as jitter being enabled.
+	isUpsampleJitterActive() {
+		return this.isDepthAwareUpsampleActive() && this.useTemporalFiltering === true && this.upsampleJitter > 0;
+	}
 	setSize( width, height ) {
 		const renderTarget = this._getActiveRenderTarget();
 		const targetIsDebug = renderTarget === this._debugRenderTarget;
@@ -232,6 +239,10 @@ class GTVBAONode extends GTVBAONodeBase {
 		const { renderer } = frame;
 		_rendererState = RendererUtils.resetRendererState( renderer, _rendererState );
 		const size = renderer.getDrawingBufferSize( _size );
+		// Allocate or release the depth MIP chain first: switching useDepthMips on
+		// or dropping resolutionScale below 1 must leave level 0 allocated and
+		// computed below before any consumer reads it this frame, and switching
+		// off must release the textures while the upsample falls back to bilinear.
 		this.setSize( size.width, size.height );
 		if ( this.useTemporalFiltering === true ) {
 			const frameId = frame.frameId;
@@ -242,9 +253,13 @@ class GTVBAONode extends GTVBAONodeBase {
 			this._temporalOffset.value = 1;
 		}
 		if ( this.useDepthMips.value ) this._depthPrefilter.compute( renderer );
+		// Both uniforms latch from the same predicates, so a quality-tier switch
+		// can never leave the upsample path and the available depth data out of
+		// sync: the MIP chain above is allocated and computed before the upsample
+		// is enabled here, and a released chain is never read because the uniform
+		// drops to 0 in the same frame.
 		this._upsampleEnabled.value = this.isDepthAwareUpsampleActive() ? 1 : 0;
-		const jitterActive = this.useTemporalFiltering === true && this.isDepthAwareUpsampleActive();
-		this._upsampleJitter.value = jitterActive ? this.upsampleJitter : 0;
+		this._upsampleJitter.value = this.isUpsampleJitterActive() ? this.upsampleJitter : 0;
 		setGtvbaoUpsampleJitterPhase( this._upsampleJitterPhase.value, frame.frameId );
 		_quadMesh.material = this._material;
 		const renderTarget = this._getActiveRenderTarget();

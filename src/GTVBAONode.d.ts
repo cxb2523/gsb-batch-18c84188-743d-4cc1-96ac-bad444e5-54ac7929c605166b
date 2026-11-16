@@ -82,6 +82,7 @@ export default class GTVBAONode extends Node<"vec4"> {
     screenUv: Node
   ): Node<"float">;
   isDepthAwareUpsampleActive(): boolean;
+  isUpsampleJitterActive(): boolean;
   setSize(width: number, height: number): void;
   dispose(): void;
 }

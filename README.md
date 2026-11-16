@@ -172,6 +172,7 @@ and `uniform` / `variant` properties through `.value`. Variant changes can rebui
 | `createDepthAwareAoFromBuffers(aoTexture, depthTexture, normalTexture, screenUv)` | Equivalent for a full-screen pass, reconstructing the surface from buffers. |
 | `getDepthMipNodes()` | Five linear-depth textures; level 0 is at AO resolution. Updated only while depth MIPs are enabled. |
 | `isDepthAwareUpsampleActive()` | Whether reduced resolution and the current settings enable depth-aware upsampling. |
+| `isUpsampleJitterActive()` | Whether the upsample footprint jitter participates this frame: the upsample is active, `useTemporalFiltering` is on and `upsampleJitter` is above 0. |
 | `setVariantChangeCallback(fn)` | Register the pipeline update callback shown above. |
 | `batchVariantChanges(fn)` | Apply multiple variant changes with one rebuild. |
 | `setSize(width, height)` | Called automatically with the drawing buffer size. |

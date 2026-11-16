@@ -172,6 +172,7 @@ pipeline.outputNode = scenePass;
 | `createDepthAwareAoFromBuffers(aoTexture, depthTexture, normalTexture, screenUv)` | 全画面パス向けの同等処理。バッファから表面を再構成する。 |
 | `getDepthMipNodes()` | 線形深度テクスチャ 5 枚。レベル 0 は AO 解像度。深度 MIP 有効時だけ更新される。 |
 | `isDepthAwareUpsampleActive()` | 低解像度と現在の設定により深度考慮アップサンプルが有効かを返す。 |
+| `isUpsampleJitterActive()` | アップサンプルが有効で `useTemporalFiltering` がオン、`upsampleJitter` が 0 より大きいときに限り、フットプリントのジッターが有効かを返す。 |
 | `setVariantChangeCallback(fn)` | 上記のパイプライン更新コールバックを登録する。 |
 | `batchVariantChanges(fn)` | 複数の変種変更を 1 回の再構築にまとめる。 |
 | `setSize(width, height)` | 描画バッファサイズで自動的に呼ばれる。 |
