@@ -69,7 +69,16 @@
   var curI = -1, doneT = 0;                       // stroke under the brush, how much of it is laid
   var dx0 = 1e9, dy0 = 1e9, dx1 = -1, dy1 = -1;   // dirty rect
   var rect = { left: 0, top: 0, k: 1 }, compactNow = false;
-
+  // Bumped every time the panel is retargeted (seek, replay, rebuild). The
+  // loupe, the record and the palette watch it, so none of them can keep
+  // showing a stroke from a position that is no longer on screen.
+  var epoch = 0;
+  function retarget() {                        // the one place a jump becomes visible
+    epoch++;
+    loupeInvalidate();                         // synchronous: no stale sharp, no stale job
+    hudEpoch = -1;                             // record redraws for the new stroke
+  }
+  var hudEpoch = 0;                            // last epoch the readouts were drawn for
   function layout() {
     var vw = innerWidth, vh = innerHeight, compact = vw / vh < 1.3;
     document.body.classList.toggle('compact', compact); compactNow = compact;
@@ -98,6 +107,7 @@
     for (var i = 0, n = PW * PH * 3; i < n; i += 3) { C[i] = GESSO[0]; C[i + 1] = GESSO[1]; C[i + 2] = GESSO[2]; }
     Hb.fill(0);
     pos = 0; curI = -1; doneT = 0; dx0 = 0; dy0 = 0; dx1 = PW; dy1 = PH;
+    retarget();
   }
   // float canvas -> screen. With raking light on, the paint's relief is lit
   // from the upper left; the colours underneath are never changed by it.
@@ -214,8 +224,14 @@
   // cannot: it throws the pixels away and repaints that spot from the stroke
   // list at the loupe's own scale.
   var LP = 0, limg, lpx, Bz, Cz;
-  var lp = { cx: 300, cy: 240, zi: 6, key: '', keyT: 0, job: null, sharp: false, cap: '' };
+  var lp = { cx: 300, cy: 240, zi: 6, key: '', keyT: 0, job: null, sharp: false, used: 0, cap: '', epoch: -1 };
   var mouse = { on: false, wx: 0, wy: 0 };
+  // Void the loupe's cache and any half-finished repaint. Called by retarget()
+  // as well as whenever the panel is shown live, so a job started for an old
+  // position can never publish its pixels or its stroke count.
+  function loupeInvalidate() {
+    lp.key = ''; lp.job = null; lp.sharp = false; lp.used = 0; lp.epoch = -1;
+  }
   function loupeBilinear(cx, cy, half) {
     var step = 2 * half / LP, x0w = cx - half, y0w = cy - half, k = 0;
     for (var iy = 0; iy < LP; iy++) {
@@ -237,12 +253,19 @@
     var Sz = LP / (2 * half), ox = Math.round((cx - half) * Sz), oy = Math.round((cy - half) * Sz);
     Bz.view(Sz, ox, oy);
     for (var i = 0, n = LP * LP * 3; i < n; i += 3) { Cz[i] = GESSO[0]; Cz[i + 1] = GESSO[1]; Cz[i + 2] = GESSO[2]; }
-    lp.job = { i: 0, upto: Math.min(N, Math.floor(pos)), part: curI === Math.floor(pos) ? doneT : 0, Sz: Sz, ox: ox, oy: oy,
-               x0: cx - half, y0: cy - half, x1: cx + half, y1: cy + half, used: 0 };
+    var upto = Math.min(N, Math.floor(pos));
+    lp.job = { i: 0, upto: upto, part: curI === upto ? doneT : 0, Sz: Sz, ox: ox, oy: oy,
+               x0: cx - half, y0: cy - half, x1: cx + half, y1: cy + half, used: 0, epoch: epoch, pos: pos };
   }
   function jobPaint(i, tB) { Bz.paint(Cz, SX[i], SY[i], SA[i], SL[i], SW[i], SB[i], SO[i], i, SC[i * 3], SC[i * 3 + 1], SC[i * 3 + 2], 0, tB); }
+  // One step of the current repaint. Returns true only when the job has fully
+  // finished against the position still on screen; false means keep going;
+  // a job that no longer matches is dropped here rather than have its pixels
+  // or its count written back over a newer position.
   function jobStep(budget) {
     var j = lp.job, t0 = performance.now(), n = 0;
+    if (!j) return false;
+    if (j.epoch !== epoch || j.pos !== pos) { lp.job = null; return false; }
     for (; j.i < j.upto; j.i++) {
       var i = j.i, r = SL[i] * 0.68 + SW[i] * 0.5 + 3;
       if (SX[i] + r < j.x0 || SX[i] - r > j.x1 || SY[i] + r < j.y0 || SY[i] - r > j.y1) continue;
@@ -258,13 +281,16 @@
         else { lpx[k] = Cz[q]; lpx[k + 1] = Cz[q + 1]; lpx[k + 2] = Cz[q + 2]; }
       }
     }
+    // Work only reaches the loupe if the panel is still where the job began;
+    // otherwise drop it, so no pixel of the old position is ever shown.
+    if (j.epoch !== epoch || j.pos !== pos) { lp.job = null; return false; }
     lg.putImageData(limg, 0, 0);
     return true;
   }
   var capEl = $('loupeCap');
   function loupeFrame(dt, still, now) {
     if (compactNow) return;                    // the loupe is not on screen
-    var inspect = mouse.on, zoom = inspect ? lp.zi : 4, used = 0;
+    var inspect = mouse.on, zoom = inspect ? lp.zi : 4;
     if (inspect) { lp.cx = mouse.wx; lp.cy = mouse.wy; }
     else {
       var gx = pos >= N ? 268 : bv.wx, gy = pos >= N ? 238 : bv.wy, e = 1 - Math.exp(-dt * (pos >= N ? 2.5 : 7));
@@ -273,15 +299,18 @@
     var half = 296 / zoom / DISP / 2, cap;
     var zs = '×' + (zoom >= 10 ? zoom.toFixed(0) : zoom.toFixed(1).replace('.0', ''));
     if (!still) {
-      lp.key = ''; lp.job = null; lp.sharp = false;
+      loupeInvalidate();                       // live pixels; no job may survive
       loupeBilinear(lp.cx, lp.cy, half);
       cap = inspect ? zs + ' · live pixels — pause to repaint this spot from the strokes' : zs + ' · following the brush';
     } else {
-      var key = Math.round(lp.cx * 8) + ',' + Math.round(lp.cy * 8) + ',' + zoom.toFixed(2) + ',' + pos.toFixed(3) + ',' + S.toFixed(3) + ',' + LP;
-      if (key !== lp.key) { lp.key = key; lp.keyT = now; lp.job = null; lp.sharp = false; loupeBilinear(lp.cx, lp.cy, half); }
-      else if (!lp.sharp) {
+      var key = Math.round(lp.cx * 8) + ',' + Math.round(lp.cy * 8) + ',' + zoom.toFixed(2) + ',' + pos.toFixed(3) + ',' + S.toFixed(3) + ',' + LP + ',' + epoch;
+      if (key !== lp.key || lp.epoch !== epoch) {
+        // New spot, zoom, scale or position: the old cache and the old job are void.
+        lp.key = key; lp.keyT = now; lp.job = null; lp.sharp = false; lp.used = 0; lp.epoch = epoch;
+        loupeBilinear(lp.cx, lp.cy, half);
+      } else if (!lp.sharp) {
         if (!lp.job && (SYNC || now - lp.keyT > 90)) jobStart(lp.cx, lp.cy, half);
-        if (lp.job) { used = lp.job.used; if (jobStep(SYNC ? 1e9 : 9)) { lp.sharp = true; lp.used = lp.job.used; lp.job = null; } }
+        if (lp.job && jobStep(SYNC ? 1e9 : 9)) { lp.sharp = true; lp.used = lp.job.used; lp.job = null; }
       }
       cap = lp.sharp ? zs + ' · repainted from ' + fmt(lp.used) + ' strokes, not enlarged pixels' : zs + ' · repainting from the strokes…';
     }
@@ -332,7 +361,7 @@
     return out;
   })(9);
   var pal0 = $('pal0'), pal1 = $('pal1'), pg0 = pal0.getContext('2d'), pg1 = pal1.getContext('2d'), PS = 0;
-  var mix = { slots: [], n: 0, last: [-99, -99, -99], lastT: 0, active: -1, dirty: true, col: null };
+  var mix = { slots: [], n: 0, last: [-99, -99, -99], lastT: 0, active: -1, dirty: true, col: null, stroke: -1, epoch: -1 };
   function blob(g, x, y, r, seed) {
     var n = 11, pts = [], i;
     for (i = 0; i < n; i++) { var a = i / n * 6.2832, rr = r * (0.84 + 0.3 * hsh(seed * 31 + i)); pts.push([x + Math.cos(a) * rr, y + Math.sin(a) * rr]); }
@@ -395,26 +424,41 @@
   var chip = $('chip'), capText = document.createTextNode('');
   $('palCap').appendChild(capText);
   function paletteFrame(now) {
-    if (pos >= N) {                             // brush is down: nothing is "on the brush" any more
-      if (mix.active >= 0) { mix.active = -1; mix.last = [-99, -99, -99]; mix.dirty = true; chip.style.display = 'none'; capText.nodeValue = PAL.length + ' pigments, ' + fmt(N) + ' strokes'; }
+    // The brush on the palette belongs to the stroke under the brush at the
+    // current position. While the panel is paused (or a seek is still being
+    // caught up) it must show exactly that stroke, even when its colour is
+    // close to the outgoing one and no time has passed; while the painting
+    // plays, the old gradual mixing is kept.
+    var retargeted = mix.epoch !== epoch;
+    if (retargeted) mix.epoch = epoch;
+    if (pos >= N && seekTo < 0) {               // brush is down: nothing is "on the brush" any more
+      if (mix.active >= 0 || retargeted) { mix.active = -1; mix.last = [-99, -99, -99]; mix.dirty = true; chip.style.display = 'none'; capText.nodeValue = PAL.length + ' pigments, ' + fmt(N) + ' strokes'; }
       if (mix.dirty) { mix.dirty = false; paletteDynamic(); }
       return;
     }
-    if (curI >= 0) {
-      var r = SC[curI * 3], g = SC[curI * 3 + 1], b = SC[curI * 3 + 2], l = mix.last;
+    var shown = shownStroke();
+    if (shown >= 0) {
+      var r = SC[shown * 3], g = SC[shown * 3 + 1], b = SC[shown * 3 + 2], l = mix.last;
       var d = (r - l[0]) * (r - l[0]) + (g - l[1]) * (g - l[1]) + (b - l[2]) * (b - l[2]);
-      if (d > 500 && now - mix.lastT > 130) {
-        mix.last = [r, g, b]; mix.lastT = now;
-        var n = mix.n++, slot = n % 8;
-        mix.slots[slot] = { c: [r, g, b], x: 318 + (hsh(n * 5 + 1) - 0.5) * 120, y: 130 + (hsh(n * 5 + 2) - 0.5) * 44, a: (hsh(n * 5 + 3) - 0.5) * 0.9, r: 13 + 8 * hsh(n * 5 + 4), s: n };
+      // While paused the palette describes exactly the stroke the viewer is
+      // looking at (the seek target once one is pending), however close its
+      // colour is to the last one. While playing, the gradual mixing is kept.
+      var follow = mix.stroke !== shown && (!playing || retargeted);
+      if (follow || (d > 500 && now - mix.lastT > 130)) {
+        var smear = mix.n === 0 || d > 500;
+        mix.stroke = shown; mix.last = [r, g, b]; mix.lastT = now;
+        if (smear) {
+          var n = mix.n++, slot = n % 8;
+          mix.slots[slot] = { c: [r, g, b], x: 318 + (hsh(n * 5 + 1) - 0.5) * 120, y: 130 + (hsh(n * 5 + 2) - 0.5) * 44, a: (hsh(n * 5 + 3) - 0.5) * 0.9, r: 13 + 8 * hsh(n * 5 + 4), s: n };
+        }
         var best = 0, bd = 1e9;
         PAL.forEach(function (p, k) { var e = (p.r - r) * (p.r - r) + (p.g - g) * (p.g - g) + (p.b - b) * (p.b - b); if (e < bd) { bd = e; best = k; } });
         mix.active = best; mix.dirty = true;
-        drawRow(phaseOf(pos), [r, g, b]);       // the brush in the rack shows the colour it is carrying
+        drawRow(phaseOf(shown), [r, g, b]);     // the brush in the rack shows the colour it is carrying
         chip.style.backgroundColor = hex(r, g, b); chip.style.display = 'inline-block';
         capText.nodeValue = 'on the brush ' + hex(r, g, b) + ' \u00b7 nearest pigment: ' + pigment(r, g, b);
       }
-    } else if (mix.slots.length || mix.active >= 0) { mix.slots = []; mix.n = 0; mix.active = -1; mix.last = [-99, -99, -99]; mix.dirty = true; chip.style.display = 'none'; capText.nodeValue = PAL.length + ' pigments found in the strokes'; }
+    } else if (mix.slots.length || mix.active >= 0 || mix.stroke !== -1) { mix.slots = []; mix.n = 0; mix.active = -1; mix.stroke = -1; mix.last = [-99, -99, -99]; mix.dirty = true; chip.style.display = 'none'; capText.nodeValue = PAL.length + ' pigments found in the strokes'; }
     if (mix.dirty) { mix.dirty = false; paletteDynamic(); }
   }
 
@@ -451,7 +495,7 @@
       LP = n; lc.width = lc.height = n; limg = lg.createImageData(n, n); lpx = limg.data;
       for (var i = 3; i < lpx.length; i += 4) lpx[i] = 255;
       Bz = Brush(W, H, 1, { x: 0, y: 0, w: n, h: n }); Cz = new Float32Array(n * n * 3);
-      lp.key = ''; lp.job = null; lp.sharp = false;
+      loupeInvalidate();                       // the cached image was sized for the old LP
     }
     var ps = clamp(U * dpr, 0.5, 3);
     if (ps !== PS) {
@@ -503,17 +547,27 @@
              play: $('bPlay'), speed: $('bSpeed'), end: $('bEnd'), light: $('bLight'), img: $('lImg'), req: $('lReq'), ext: $('lExt') };
   var txt = {}, rateS = 0, lastPos = 0, frameN = 0, doneShown = false, recI = -2, rec1 = $('rec1'), rec2 = $('rec2');
   function set(k, v) { if (txt[k] !== v) { txt[k] = v; el[k].textContent = v; } }
+  // Which stroke the record and the palette describe. While paused with a seek
+  // still being caught up, that is the stroke at the seek target, the position
+  // the viewer asked for, not whichever stroke the catch-up happens to lay.
+  function shownStroke() {
+    if (!playing && seekTo >= 0) {
+      var s = Math.ceil(seekTo) - 1;
+      return s < 0 ? -1 : s > N - 1 ? N - 1 : s;
+    }
+    return curI;
+  }
   function hud(dt) {
-    var done = pos >= N, k = phaseOf(pos), ph = PHS[k];
+    var done = pos >= N, k = phaseOf(pos), ph = PHS[k], shown = shownStroke();
     if (doneShown !== done) { doneShown = done; document.body.classList.toggle('done', done); }   // the picture light warms up
-    if (recI !== curI) {                        // the record being painted right now: 12 bytes, and what they mean
-      recI = curI;
-      if (curI < 0) { rec1.textContent = '\u2014'; rec2.textContent = 'x, y, heading, length, width, bend, r, g, b, opacity'; }
+    if (recI !== shown || hudEpoch !== epoch) {  // the record being painted right now: 12 bytes, and what they mean
+      recI = shown; hudEpoch = epoch;
+      if (shown < 0) { rec1.textContent = '\u2014'; rec2.textContent = 'x, y, heading, length, width, bend, r, g, b, opacity'; }
       else {
-        for (var hx = '', j = 0; j < 12; j++) hx += (j ? ' ' : '') + (256 + RAW[curI * 12 + j]).toString(16).slice(1);
+        for (var hx = '', j = 0; j < 12; j++) hx += (j ? ' ' : '') + (256 + RAW[shown * 12 + j]).toString(16).slice(1);
         rec1.textContent = hx;
-        rec2.textContent = 'x ' + SX[curI].toFixed(1) + '  y ' + SY[curI].toFixed(1) + '  ' + Math.round(SA[curI] * 57.2958) + '\u00b0  ' + SL[curI].toFixed(1) + ' \u00d7 ' + SW[curI].toFixed(1) +
-          '  ' + hex(SC[curI * 3], SC[curI * 3 + 1], SC[curI * 3 + 2]) + '  ' + Math.round(SO[curI] * 100) + '%';
+        rec2.textContent = 'x ' + SX[shown].toFixed(1) + '  y ' + SY[shown].toFixed(1) + '  ' + Math.round(SA[shown] * 57.2958) + '\u00b0  ' + SL[shown].toFixed(1) + ' \u00d7 ' + SW[shown].toFixed(1) +
+          '  ' + hex(SC[shown * 3], SC[shown * 3 + 1], SC[shown * 3 + 2]) + '  ' + Math.round(SO[shown] * 100) + '%';
       }
     }
     var inst = dt > 0 ? Math.max(0, pos - lastPos) / dt : 0; lastPos = pos;
@@ -568,7 +622,8 @@
   function seek(p) {
     if (!(p >= 0)) return;
     p = clamp(p, 0, N);
-    if (p < pos) wipe();
+    if (p < pos) wipe();                        // wipe() retargets as well
+    else retarget();                            // the loupe, the record and the palette follow
     if (p <= 0) { seekTo = -1; clock = 0; } else seekTo = p;
   }
   function replay() { wipe(); seekTo = -1; clock = -0.9; playing = true; bv.wx = W * 0.92; bv.wy = H + 150; bv.lift = 1; }
