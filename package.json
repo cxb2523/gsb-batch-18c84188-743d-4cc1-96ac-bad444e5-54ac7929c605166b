@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc",
+    "test": "node --test \"tests/*.test.ts\"",
     "deploy": "pnpm build && wrangler deploy --env preview",
     "deploy:prod": "pnpm build && wrangler deploy"
   },
@@ -13,6 +14,7 @@
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "@types/three": "^0.187.0",
     "sharp": "^0.35.5",
     "typescript": "^7.0.2",

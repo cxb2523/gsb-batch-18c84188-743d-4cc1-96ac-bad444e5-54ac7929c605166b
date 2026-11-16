@@ -11,6 +11,7 @@ import { Dabs, MARKS, Under, clamp, dabMaterial, hex, lerp, mulberry, smooth, to
 import type { DabKind, RGB, RampName, Vec3 } from './paint.ts'
 import { paintSolid } from './things.ts'
 import type { Canvas, SolidStyle } from './things.ts'
+import { inSwordArc } from './sword.ts'
 import { groundHeight, pushOut } from './world.ts'
 import type { Collider } from './world.ts'
 
@@ -612,24 +613,28 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
       return { damage, events }
     },
     /**
-     * The sword comes down: every creature within reach and inside the arc before the eye is struck.
-     * Returns what is heard: a cry for each one struck, and the snarls of those it calls.
+     * The sword comes down: every living creature within reach and inside the arc before the eye is struck, each
+     * one once. The dead take no part: they are neither hit again nor counted in `hits`.
+     * Returns what is heard (a cry for each one struck, and the snarls of those it calls) and the creatures that
+     * were struck, so the caller can tell a hit from a swing through empty air.
      */
     strike({ x, z, yaw, reach, arc, damage }: { x: number; z: number; yaw: number; reach: number; arc: number; damage: number }) {
       const events: MobEvent[] = []
+      const hits: { x: number; z: number; health: number; dead: boolean }[] = []
       for (const mob of mobs) {
         if (mob.stance === 'dead') continue
+        if (!inSwordArc({ x, z, yaw, reach, arc, targetX: mob.x, targetZ: mob.z, radius: mob.kind.radius })) continue
         const dx = mob.x - x
         const dz = mob.z - z
         const d = Math.hypot(dx, dz) || 1
-        if (d > reach + mob.kind.radius) continue
-        // the player looks along (-sin yaw, -cos yaw)
-        if (Math.abs(turnBetween(yaw, Math.atan2(-dx, -dz))) > arc) continue
         mob.health -= damage
         mob.flash = 1
+        // It flares in the very frame it is struck, not the next one: the blow and its light are one event.
+        for (const material of mob.materials) material.uniforms.uFlash.value.w = FLASH_MOST
         mob.pushX = ((dx / d) * KNOCK_SPEED) / mob.kind.scale
         mob.pushZ = ((dz / d) * KNOCK_SPEED) / mob.kind.scale
         const dead = mob.health <= 0
+        hits.push({ x: mob.x, z: mob.z, health: Math.max(0, mob.health), dead })
         events.push(eventOf(mob, dead ? 'death' : 'hurt'))
         flecks.burst({
           at: [mob.x, groundHeight(mob.x, mob.z) + 0.75 * mob.kind.scale, mob.z],
@@ -649,7 +654,7 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
           events.push(eventOf(other, 'alert'))
         }
       }
-      return events
+      return { events, hits }
     },
     /** every creature alive again and at its home */
     reset: () => mobs.forEach(revive),

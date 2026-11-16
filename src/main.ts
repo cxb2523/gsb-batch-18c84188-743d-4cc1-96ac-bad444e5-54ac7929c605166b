@@ -6,6 +6,7 @@ import type { SoundName } from './audio.ts'
 import type { MobEvent } from './mobs.ts'
 import { bakeShade, gustAt, shared } from './paint.ts'
 import { buildMobs } from './mobs.ts'
+import { SWORD, createSword } from './sword.ts'
 import { buildViewModel } from './viewmodel.ts'
 import { BACKDROP, buildWorld, groundHeight, pushOut } from './world.ts'
 
@@ -43,8 +44,6 @@ const JUMP_SPEED = 6.4
 const GRAVITY = 19
 // how far a hard landing dips the eye, metres
 const LANDING_DIP = 0.14
-// the sword strikes what is within reach of the player and inside the arc (radians each side) before the eye
-const SWORD = { reach: 2.3, arc: 0.95, damage: 1 }
 const MAX_HEALTH = 5
 // a heart comes back every HEAL_SECONDS, once no blow has landed for HEAL_AFTER_SECONDS
 const HEAL_AFTER_SECONDS = 6
@@ -198,6 +197,7 @@ const flat = new THREE.Camera()
 const world = buildWorld()
 const mobs = buildMobs({ scene: world.scene, colliders: world.colliders, walkable: world.walkable })
 const hands = buildViewModel({ hearts: MAX_HEALTH })
+const sword = createSword()
 const audio = buildAudio()
 // the sun's shade over the part of the valley the player can walk
 bakeShade({ renderer, scene: world.scene, center: new THREE.Vector3(0, 0, -75), half: 260 })
@@ -282,7 +282,12 @@ function look({ dx, dy, speed }: { dx: number; dy: number; speed: number }) {
 
 /** the sword is swung, if the player stands and it is not in a swing already */
 function swing() {
-  if (player.down < 0 && hands.swing()) audio.play({ sound: 'swing' })
+  if (player.down < 0 && sword.swing()) {
+    tally.swings++
+    audio.play({ sound: 'swing' })
+    return true
+  }
+  return false
 }
 
 // a browser makes no sound before the player touches the page
@@ -372,11 +377,14 @@ function hurt(damage: number) {
   player.down = 0
   player.grounded = true
   player.vx = player.vz = 0
+  // struck down mid-swing: the swing is given up and settles nothing (the hands fall still with the player)
+  sword.cancel()
 }
 
 /** the player starts again at the forest, whole, and so do the creatures */
 function rise() {
   Object.assign(player, world.start, { vx: 0, vz: 0, stride: 0, grounded: true, vy: 0, dip: 0, health: MAX_HEALTH, calm: 0, down: -1 })
+  sword.cancel()
   mobs.reset()
 }
 
@@ -469,27 +477,53 @@ function render(time: number) {
 // how dark the picture is, 0..1: it goes dark when the player is struck down and clears when the player rises
 let dark = 0
 
-const handsUpdate = (dt: number, time: number) =>
-  hands.update({ dt, time, bob: player.bob, stride: player.stride, turn: turnSpeed, rise: player.grounded ? 0 : player.vy, health: player.health })
+const handsUpdate = (dt: number, time: number, swingPhase: number) =>
+  hands.update({ dt, time, bob: player.bob, stride: player.stride, turn: turnSpeed, rise: player.grounded ? 0 : player.vy, health: player.health, swing: swingPhase })
 
-function advance(dt: number, time: number) {
+/** one step of the game: everything that moves, without drawing it */
+function simulate(dt: number, time: number) {
   step(dt)
   audio.update({ x: player.x, z: player.z, yaw: player.yaw, gust: gustAt({ x: player.x, z: player.z, time }) })
-  const { damage, events } = mobs.update({ dt, time, prey: prey() })
-  if (damage > 0 && player.down < 0 && player.calm > GRACE_SECONDS) hurt(damage)
-  const { struck } = handsUpdate(dt, time)
-  if (struck && player.down < 0) {
-    const cries = mobs.strike({ x: player.x, z: player.z, yaw: player.yaw, ...SWORD })
-    if (cries.some((cry) => cry.type === 'hurt' || cry.type === 'death')) audio.play({ sound: 'hit' })
-    events.push(...cries)
+  // One sword clock (sword.ts): the blade lands at STRIKE_AT of a swing and nowhere else. The step it reports as
+  // `hit` is the only one that settles damage and its feedback, so the drawn blade and the blow cannot drift apart.
+  // The blow is settled before the creatures step, so the flash, the flecks, the cry, the knock back and the fall
+  // all show in the very frame the blade is drawn at STRIKE_AT.
+  const blade = sword.advance(dt)
+  const strikes: MobEvent[] = []
+  if (blade.hit && player.down < 0) {
+    const { events: cries, hits } = mobs.strike({ x: player.x, z: player.z, yaw: player.yaw, ...SWORD })
+    tally.settled++
+    tally.hits += hits.length
+    tally.lastHits = hits.length
+    tally.lastSwing = blade.id
+    tally.lastEvents = cries.map((cry) => cry.type)
+    // the clang of a blade on a body only when something was really struck: a swing through empty air is silent
+    if (hits.length > 0) {
+      audio.play({ sound: 'hit' })
+      tally.hitSound++
+    } else tally.misses++
+    strikes.push(...cries)
   }
+  const { damage, events } = mobs.update({ dt, time, prey: prey() })
+  events.push(...strikes)
+  if (damage > 0 && player.down < 0 && player.calm > GRACE_SECONDS) hurt(damage)
+  handsUpdate(dt, time, blade.phase)
   for (const { type, x, z, voice } of events) {
     audio.play({ sound: MOB_SOUNDS[type], rate: voice, at: { x, z }, delay: type === 'alert' ? Math.random() * ALERT_STAGGER_SECONDS : 0 })
   }
   const darkest = player.down < 0 ? 0 : THREE.MathUtils.smoothstep(player.down, 0.6, 2)
   dark += (darkest - dark) * (1 - Math.exp(-dt * 6))
+}
+
+function advance(dt: number, time: number) {
+  simulate(dt, time)
   render(time)
 }
+
+// What the sword has done since the page loaded, for checking that a blow is settled once and that feedback
+// follows the blow. `settled` counts the frames in which damage was resolved (at most one per swing), and `hits`
+// counts the creatures struck in them; a blow that finds nothing adds to `misses`.
+const tally = { swings: 0, settled: 0, hits: 0, misses: 0, lastHits: 0, lastSwing: 0, hitSound: 0, lastEvents: [] as MobEvent['type'][] }
 
 // Debug hook for screenshots and frame-by-frame capture. While `manual` is on, only `tick` moves time.
 const debug = {
@@ -499,15 +533,56 @@ const debug = {
   scene: world.scene,
   mobs,
   hands,
+  sword,
   audio,
+  tally,
   finish: finish.material.uniforms,
   manual: false,
   time: 3,
+  /** start a swing as a key or click would, and say whether it was taken (a swing under way refuses another) */
+  swing,
+  /** print what the sword has settled so far, and the state of the nearest creatures */
+  report() {
+    const nearest = [...mobs.list]
+      .filter((mob) => mob.stance !== 'dead')
+      .map((mob) => ({ kind: mob.kind.scale > 1.5 ? 'troll' : 'goblin', stance: mob.stance, health: mob.health, metres: Math.hypot(mob.x - player.x, mob.z - player.z) }))
+      .sort((a, b) => a.metres - b.metres)
+      .slice(0, 4)
+    return { swinging: sword.swinging, phase: Number(sword.phase.toFixed(3)), tally: { ...tally }, nearest }
+  },
+  /** put the nearest living creature right in front of the eye, so the next swing lands; returns where it went */
+  aim() {
+    const mob = [...mobs.list].filter((other) => other.stance !== 'dead').sort((a, b) => Math.hypot(a.x - player.x, a.z - player.z) - Math.hypot(b.x - player.x, b.z - player.z))[0]
+    if (!mob) return undefined
+    const distance = 1.6
+    mob.x = player.x - Math.sin(player.yaw) * distance
+    mob.z = player.z - Math.cos(player.yaw) * distance
+    mob.stance = 'roam'
+    mob.clock = 0
+    return { kind: mob.kind.scale > 1.5 ? 'troll' : 'goblin', x: mob.x, z: mob.z, health: mob.health }
+  },
+  /** swing once and step the whole swing at 1/60 s without drawing; says what that swing settled */
+  swingThrough(dt = 1 / 60) {
+    const before = { ...tally }
+    const taken = swing()
+    if (!taken) return { taken, settled: 0, hits: 0, misses: 0, hitSound: 0, events: [] as MobEvent['type'][] }
+    while (sword.swinging) {
+      debug.time += dt
+      simulate(dt, debug.time)
+    }
+    const settled = tally.settled - before.settled
+    return { taken, settled, hits: tally.hits - before.hits, misses: tally.misses - before.misses, hitSound: tally.hitSound - before.hitSound, events: settled > 0 ? tally.lastEvents : [] }
+  },
+  /** step the game by dt seconds without drawing it: for checking the simulation when GL is slow */
+  sim(dt: number) {
+    debug.time += dt
+    simulate(dt, debug.time)
+  },
   /** place the player, draw one frame, return it as a PNG data URL */
   snap(pose: Partial<typeof player> = {}) {
     Object.assign(player, pose)
     mobs.update({ dt: 0, time: debug.time, prey: prey() })
-    handsUpdate(0, debug.time)
+    handsUpdate(0, debug.time, sword.phase)
     render(debug.time)
     return canvas.toDataURL('image/png')
   },
@@ -516,8 +591,7 @@ const debug = {
     debug.time += dt
     advance(dt, debug.time)
     return canvas.toDataURL('image/png')
-  },
-}
+  },}
 Object.assign(window, { game: debug })
 
 let last = performance.now()

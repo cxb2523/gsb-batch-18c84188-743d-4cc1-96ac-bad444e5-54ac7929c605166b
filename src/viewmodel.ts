@@ -24,9 +24,6 @@ const WALK = {
   sword: { x: [-7.3, 9.2, -3.8, 0.2, 1.2], y: [-0.3, -2.8, 2.6, -5, 2.6] },
 }
 const swayAt = (c: number[], phase: number) => c[0] + c[1] * Math.cos(phase) + c[2] * Math.sin(phase) + c[3] * Math.cos(2 * phase) + c[4] * Math.sin(2 * phase)
-const SWING_SECONDS = 0.42
-// the share of a swing at which the blade lands
-const STRIKE_AT = 0.3
 // how far the hands hang back when the player rises or falls: sprite pixels for a metre a second, and the most
 const HANG = { rate: 1.3, most: 9 }
 const SPARK_COUNT = 14
@@ -247,7 +244,6 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
   let scale = 1
   let inset = 0
   let swordDrop = 0
-  let swing = -1
 
   return {
     scene,
@@ -272,17 +268,12 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       sword.scale.setScalar(scale)
       for (const heart of hearts) heart.scale.setScalar(scale)
     },
-    /** Starts a swing of the sword. Returns false when one is under way already. */
-    swing() {
-      if (swing >= 0) return false
-      swing = 0
-      return true
-    },
     /**
      * bob: walk cycle phase, stride: 0..1 walk speed, turn: yaw speed in rad/s, rise: metres a second upward,
-     * health: hearts left. Returns struck: true in the frame the blade of a swing lands.
+     * health: hearts left, swing: how far through a swing the blade is (0..1), or -1 between swings.
+     * The swing phase comes from the one sword clock (sword.ts): the hand drawn and the blow settled never differ.
      */
-    update({ dt, time, bob, stride, turn, rise, health }: { dt: number; time: number; bob: number; stride: number; turn: number; rise: number; health: number }) {
+    update({ dt, time, bob, stride, turn, rise, health, swing }: { dt: number; time: number; bob: number; stride: number; turn: number; rise: number; health: number; swing: number }) {
       sparks.update(dt, time)
       const lag = THREE.MathUtils.clamp(turn * 4, -10, 10)
       // the hands hang back: they are late to rise in a jump and late to fall
@@ -299,10 +290,6 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
         heart.position.set(Math.round((HEART_MARGIN + i * (HEART_SIZE[0] + HEART_GAP)) * scale), Math.round(height - (HEART_MARGIN + HEART_SIZE[1]) * scale), 0)
       })
 
-      const before = swing
-      if (swing >= 0) swing += dt / SWING_SECONDS
-      const struck = before >= 0 && before < STRIKE_AT && swing >= STRIKE_AT
-      if (swing > 1) swing = -1
       const slash = swing < 0 ? 0 : Math.sin(Math.PI * swing)
       const restX = width / scale - inset - (SWORD.size[0] - SWORD.margin[0]) + SWORD.pivot[0]
       const restY = -SWORD.margin[1] - swordDrop + SWORD.pivot[1]
@@ -312,7 +299,6 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
         0,
       )
       sword.rotation.z = slash * 1.2
-      return { struck }
     },
   }
 }

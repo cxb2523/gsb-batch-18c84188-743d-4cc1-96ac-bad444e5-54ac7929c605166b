@@ -29,6 +29,9 @@ src/main.ts ───────▶ renderer, input, player step (walk, jump, h
    ├──▶ src/mobs.ts ────── buildMobs(): goblins and trolls in camps (CAMPS). update() ──▶ think (stance: roam,
    │                       chase, windup, recover, reel, dead) ──▶ move ──▶ pose. strike(): the sword lands
    │
+   ├──▶ src/sword.ts ───── the swing clock: SWING_SECONDS, STRIKE_AT, the arc. advance() says which step the
+   │                       blade lands in. No three.js: tested on its own
+   │
    ├──▶ src/audio.ts ───── buildAudio(): samples from public/audio through the Web Audio API, wind and torch
    │                       loops, the song. play({ sound, at }) is quieter with distance and panned
    │
@@ -39,11 +42,22 @@ src/main.ts ───────▶ renderer, input, player step (walk, jump, h
 One frame (`advance` in `main.ts`):
 
 ```
-step(dt) ──▶ mobs.update() ──▶ hearts their blows take ──▶ hurt()      (not within GRACE_SECONDS of the last blow)
-         ──▶ hands.update() ─▶ struck: the blade lands ──▶ mobs.strike() ──▶ flash, knock back, flecks, death
-         ──▶ MobEvent[] from both ──▶ audio.play()        (MOB_SOUNDS maps what a creature did to a sound)
+step(dt) ──▶ creatures update: hearts their blows take ──▶ hurt()   (not within GRACE_SECONDS of the last blow)
+         ──▶ sword.advance(dt) ─▶ phase to draw + `hit` on exactly one step (STRIKE_AT of the swing)
+         ──▶ on `hit`: mobs.strike() ──▶ damage, flash, knock back, flecks, death, cries
+         ──▶ hands.update({ swing: phase })  (the drawn blade is the one that lands)
+         ──▶ MobEvent[] ──▶ audio.play()     (MOB_SOUNDS maps what a creature did to a sound)
          ──▶ render()
 ```
+
+- **The sword has one clock** (`src/sword.ts`) and it is the only thing that decides when a blow is settled. The
+  view model draws the blade from the phase that same clock returns; `mobs.strike()` is called only on the step the
+  clock marks `hit` (the share `STRIKE_AT` of the swing). A swing settles once: a second press during a swing is
+  refused, a swing that has ended settles nothing, and being struck down cancels it. Do not give the hands or the
+  creature code a clock of their own for the blow: that is how the blade and the damage drift apart.
+- **Damage and feedback are one event** (`strike()` in `mobs.ts`): every living creature inside the arc is hurt
+  once, and gets its flash, flecks, knock back and cry in that same call. A swing that finds nothing plays no hit
+  sound and throws no paint. The dead take no part in later blows.
 
 The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitHub/oil-paint`). Read its
 `src/oilpaint/dabs.js`, `src/night/kit.js`, `src/world/forest.js` and `src/night/pines.js` before changing a painter.
@@ -142,5 +156,28 @@ The clip's camera does not bob: its background only drifts slowly, so all the li
 game.snap({ x: 0, z: 14, yaw: 0, pitch: -0.05 }) // place the player, returns a PNG data URL of the frame
 game.manual = true; game.stick.y = -1; game.tick(1 / 24) // step frame by frame while walking forward
 ```
+
+## checking a blow
+
+The sword's call is `src/sword.ts`; the blow it settles is `mobs.strike()`. The hook lets both be driven by hand:
+
+```js
+game.report()        // { swinging, phase, tally: { swings, settled, hits, misses, hitSound, lastEvents }, nearest }
+game.swingThrough()  // swing once and step the whole swing at 1/60 s, no drawing; says what it settled
+game.aim()           // put the nearest living creature 1.6 m in front of the eye; the next swing lands
+game.sim(1 / 60)     // one step of the game without drawing (the world is heavy, software GL is slow)
+game.swing()         // start a swing as a key or click does: false if one is under way
+```
+
+- a hit: `game.aim(); game.swingThrough()` → `{ settled: 1, hits: 1, hitSound: 1, events: ['hurt'] }`, the creature
+  loses a heart and flashes in the frame the blade is drawn at `phase === 0.3`
+- an empty swing: `game.swingThrough()` with nothing in the arc → `{ settled: 1, hits: 0, misses: 1, hitSound: 0 }`:
+  no hit sound, no paint, no cry
+- one blow only: press `game.swing()` twice in a row → the second returns `false`; `tally.settled` goes up by one
+- many at once: put several creatures in the arc, then `game.swingThrough()` → `hits` equals the number in the arc,
+  each creature's health down by exactly one
+
+`tests/sword.test.ts` and `tests/mobs.test.ts` cover the same ground headless: `pnpm test` (Node runs the
+TypeScript directly). `pnpm typecheck` checks `src` and `tests`.
 
 Compare `snap` output with frames of the reference video side by side. Keep the palette measured, not guessed.

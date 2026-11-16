@@ -24,7 +24,9 @@ pnpm dev
 Packs of **goblins** and a few **trolls** roam the meadows and the paths (`src/mobs.ts`).
 
 - They see you from about 17 m, run at you and raise a club. Step back or jump before it comes down.
-- A swing of the sword strikes everything in reach before you. A goblin takes three blows, a troll nine.
+- A swing of the sword strikes everything in reach before you, once: it lands three tenths of the way through the
+  swing, and the flash, the flung paint and the cry come in that same moment. A goblin takes three blows, a troll
+  nine.
 - You have five hearts. They show while you are hurt and come back when no blow has landed for a while.
 - Struck down, you start again at the forest and every creature is back at its home.
 
