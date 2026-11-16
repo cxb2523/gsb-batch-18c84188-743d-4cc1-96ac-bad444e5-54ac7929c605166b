@@ -552,6 +552,8 @@ async function boot() {
       if (conversation && ui.dialogueSpeaking && dialogueVoice) sound.dialogue(dialogueVoice);
       else if (ui.dialogueOpen && ui.dialogueSpeaking && dialogueVoice) sound.dialogue(dialogueVoice);
       else sound.stopDialogue();
+      // `active: false` while a menu/dialogue/transition covers the world: GameSound ducks the
+      // ambient bed through the engine's run-state path and schedules no footsteps or phrases.
       sound.update({ dt, moving: player.moving, grounded: player.grounded, sprinting: ui.input.sprint,
         verticalSpeed: player.physics.velocity.dot(player.normal), water: world.isWater(player.position), active: phase === 'playing' && !ui.blocked, life: director.life });
       saveElapsed += dt; if (saveElapsed >= 5) { saveElapsed = 0; savePose(); }

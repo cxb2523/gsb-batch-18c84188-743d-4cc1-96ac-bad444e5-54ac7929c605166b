@@ -10,7 +10,9 @@ export interface SoundFrame {
   /** Optional 0..1 proximity to water; wins over the boolean when provided. */
   waterNear?: number;
   verticalSpeed?: number;
-  /** False while a menu/dialogue/transition blocks play: ambience ducks. Undefined counts as true. */
+  /** False while a menu/dialogue/transition blocks play: the ambient bed ducks (through the same
+   * run-state path as pause) and no footsteps, jump/landing or ambient phrases are scheduled.
+   * Undefined counts as true. */
   active?: boolean;
   /** 0..1 chapter revival, drives ambience brightness. */
   life?: number;

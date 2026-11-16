@@ -29,7 +29,14 @@ export interface EngineOptions {
 }
 
 export const MASTER_LEVEL = 0.8;
-const BUS_LEVEL = { sfx: 0.9, music: 0.8, ambient: 0.62, speech: 0.7 };
+/** Ambient bus gain while the world is open, and while a menu/dialogue/pause ducks it.
+ * The bed used to write these two levels into the bus from `Ambience.update` (1 open, 0.4
+ * covered); the same levels now live in the engine's single run-state path. */
+const AMBIENT_BASE = 1;
+export const AMBIENT_LEVEL = AMBIENT_BASE;
+export const AMBIENT_DUCK_LEVEL = 0.4;
+const AMBIENT_RAMP = 0.28;
+const BUS_LEVEL = { sfx: 0.9, music: 0.8, ambient: AMBIENT_LEVEL, speech: 0.7 };
 const BUS_WET = { sfx: 0.16, music: 0.34, ambient: 0.3, speech: 0.07 };
 
 function userHasActivated(): boolean {
@@ -48,6 +55,8 @@ export class AudioEngine {
   enabled = true;
   started = false;
   paused = false;
+  /** Menus/dialogue cover the world: lower (not stop) the ambient bed. */
+  ducked = false;
   readonly budget = new VoiceBudget(28);
   readonly samples = new SampleBank();
   private graph: Graph | null = null;
@@ -63,6 +72,15 @@ export class AudioEngine {
 
   /** Context time, or 0 when there is no context. */
   get time(): number { return this.ctx?.currentTime ?? 0; }
+
+  /** Ambient bus gain the run state converges to (base while open, ducked under a menu, 0 muted). */
+  get ambientLevel(): number { return this.ambientTarget(); }
+
+  /** The ambient bus input node once the graph exists (observability hook for tests/debug). */
+  get ambientGain(): GainNode | null { return this.graph?.ambient.input ?? null; }
+
+  /** The master gain node once the graph exists (observability hook for tests/debug). */
+  get masterGain(): GainNode | null { return this.graph?.master ?? null; }
 
   /** Create the context after a user gesture (idempotent). Returns the graph, or null. */
   ensure(): Graph | null {
@@ -84,10 +102,12 @@ export class AudioEngine {
     return this.graph;
   }
 
-  /** The graph when sound may play right now, otherwise null. */
+  /** The graph when sound may play right now, otherwise null. A paused or muted engine never
+   * builds a graph just to drop a sound on it. */
   live(): Graph | null {
+    if (!this.enabled || this.paused) return null;
     const graph = this.graph ?? this.ensure();
-    if (!graph || !this.enabled || this.paused || this.locked || graph.ctx.state === 'closed') return null;
+    if (!graph || this.locked || graph.ctx.state === 'closed') return null;
     return graph;
   }
 
@@ -97,6 +117,8 @@ export class AudioEngine {
   }
   setEnabled(enabled: boolean): void { this.enabled = enabled; this.applyRunState(); }
   setPaused(paused: boolean): void { this.paused = paused; this.applyRunState(); }
+  /** Menus/dialogue cover the world: duck the ambient bed through the same run-state path as pause. */
+  setDucked(ducked: boolean): void { if (this.ducked === ducked) return; this.ducked = ducked; this.applyRunState(); }
 
   dispose(): void {
     const ctx = this.ctx;
@@ -108,16 +130,26 @@ export class AudioEngine {
   claim(duration: number, priority = 1): boolean { return this.budget.acquire(this.time, duration, priority); }
 
   // ---------------------------------------------------------------- run state
+  /** One convergence point for mute, pause and menu ducking: master level plus the ambient bus.
+   * Called from every state setter and from `ensure()`, so pause and menu cover cannot diverge. */
   private applyRunState(): void {
     const graph = this.graph, ctx = this.ctx;
     if (!graph || !ctx || ctx.state === 'closed') return;
     const t = ctx.currentTime;
     graph.master.gain.cancelScheduledValues(t);
     graph.master.gain.setTargetAtTime(this.enabled ? MASTER_LEVEL : 0, t, 0.05);
+    graph.ambient.input.gain.cancelScheduledValues(t);
+    graph.ambient.input.gain.setTargetAtTime(this.ambientTarget(), t, AMBIENT_RAMP);
     if (this.offline) return;
     if (this.enabled && !this.paused) { if (ctx.state !== 'running') this.requestResume(); }
     else if (this.paused) void ctx.suspend().catch(() => {});
     else setTimeout(() => { if (!this.enabled && ctx.state === 'running') void ctx.suspend().catch(() => {}); }, 420);
+  }
+
+  /** The ambient bus level the current run state wants. Never muting the master unless disabled. */
+  private ambientTarget(): number {
+    if (!this.enabled) return 0;
+    return this.paused || this.ducked ? AMBIENT_DUCK_LEVEL : AMBIENT_LEVEL;
   }
 
   private requestResume(): void {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GameSound } from '../src/audio/index.ts';
+import { GameSound, AMBIENT_DUCK_LEVEL, AMBIENT_LEVEL } from '../src/audio/index.ts';
 import {
   CHAPTER_MELODY, PAD_CHORDS, PENTATONIC, THREAD_VOICING, VOICE_PROFILES, VoiceBudget, createSyllableGenerator,
   melodyDegree, midiToFreq, mulberry32, nextChordIndex, phraseInterval, phraseNotes, pickSparkleMidi,
@@ -219,8 +219,11 @@ test('GameSound is a safe no-op when WebAudio is unavailable', async () => {
 function fakeParam() {
   const param = {
     value: 0, calls: 0,
+    /** Values passed to setTargetAtTime, in order (lets tests observe ducking). */
+    targets: [] as number[],
     setValueAtTime() { param.calls++; return param; }, linearRampToValueAtTime() { param.calls++; return param; },
-    exponentialRampToValueAtTime() { param.calls++; return param; }, setTargetAtTime() { param.calls++; return param; },
+    exponentialRampToValueAtTime() { param.calls++; return param; },
+    setTargetAtTime(target: number) { param.calls++; param.targets.push(target); return param; },
     cancelScheduledValues() { return param; },
   };
   return param;
@@ -331,6 +334,97 @@ test('muted and paused states drop sounds instead of queueing them', () => {
   sound.setPaused(false);
   sound.ui('click');
   assert.ok(fake.count('osc') > before, 'sound returns after resume');
+});
+
+test('pause silences the per-frame driver: update and ui create no oscillators or noise while paused', () => {
+  const fake = fakeContext();
+  const sound = new GameSound({ createContext: () => fake.ctx, strict: true });
+  sound.start();
+  const walk = { dt: 0.25, moving: 1.3, grounded: true, sprinting: true, water: true, verticalSpeed: 0, active: true, life: 0.8 };
+  for (let i = 0; i < 8; i++) sound.update(walk);
+  assert.ok(fake.count('source') > 3, 'beds plus footsteps were built before the pause');
+
+  sound.setPaused(true);
+  const osc = fake.count('osc'), sources = fake.count('source'), biquads = fake.count('biquad');
+  for (let i = 0; i < 120; i++) {
+    // Motion, jump/landing transitions and menu frames all keep arriving while paused.
+    sound.update({ ...walk, verticalSpeed: i % 2 ? 6 : -6, grounded: i % 3 !== 0 });
+    sound.update({ ...walk, active: false });
+    sound.ui('click');
+    sound.threadStep(i, 'water');
+    sound.dialogue('mid');
+  }
+  assert.equal(fake.count('osc'), osc, 'paused: no oscillators scheduled');
+  assert.equal(fake.count('source'), sources, 'paused: no noise sources scheduled');
+  assert.equal(fake.count('biquad'), biquads, 'paused: no filters scheduled');
+
+  sound.setPaused(false);
+  sound.stopDialogue();
+  for (let i = 0; i < 8; i++) sound.update(walk);
+  assert.ok(fake.count('source') > sources || fake.count('osc') > osc, 'a normal walk produces footsteps again after resume');
+});
+
+test('resume continues from the current pose: no jump or landing is replayed for a missed transition', () => {
+  const fake = fakeContext();
+  const sound = new GameSound({ createContext: () => fake.ctx, strict: true });
+  sound.start();
+  const walk = { dt: 0.25, moving: 0, grounded: true, sprinting: false, water: false, verticalSpeed: 0, active: true, life: 0 };
+  sound.update(walk);
+  sound.setPaused(true);
+  const before = fake.count('osc');
+  // In the air the whole time we were paused; sound can never know about the jump or landing.
+  for (let i = 0; i < 10; i++) sound.update({ ...walk, grounded: false, verticalSpeed: i < 5 ? 4 : -6 });
+  assert.equal(fake.count('osc'), before);
+  sound.setPaused(false);
+  sound.update({ ...walk, grounded: true, verticalSpeed: 0 });
+  assert.equal(fake.count('osc'), before, 'standing still after resume replays no jump/landing');
+});
+
+test('menu cover ducks the ambient bus through the run state and restores it without rebuilding', () => {
+  const fake = fakeContext();
+  const sound = new GameSound({ createContext: () => fake.ctx, strict: true });
+  sound.start();
+  const frame = { dt: 0.016, moving: 0, grounded: true, sprinting: false, water: false, verticalSpeed: 0, active: true, life: 0.5 };
+  sound.update(frame);
+  type FakeGain = { gain: { targets: number[]; calls: number } };
+  const ambientNode = sound.ambientGain;
+  const masterNode = sound.masterGain;
+  const ambient = (ambientNode as unknown as FakeGain).gain;
+  const master = (masterNode as unknown as FakeGain).gain;
+  const structural = () => ['gain', 'osc', 'source', 'biquad', 'convolver', 'compressor', 'delay'].reduce((sum, kind) => sum + fake.count(kind), 0);
+
+  const openLevel = ambient.targets[ambient.targets.length - 1];
+  assert.equal(sound.ambientLevel, openLevel, 'the getter reports the level the run state is converging to');
+  assert.ok(openLevel > 0.9, `world open: ambient bus at full level, got ${openLevel}`);
+
+  const built = structural();
+  for (let i = 0; i < 30; i++) sound.update({ ...frame, active: false });
+  const ducked = ambient.targets[ambient.targets.length - 1];
+  assert.ok(ducked < openLevel * 0.6, `menu open: ambient bus ducked, got ${ducked}`);
+  assert.equal(sound.ambientLevel, ducked);
+  assert.equal(sound.ducked, true);
+  assert.equal(structural(), built, 'ducking does not rebuild the audio graph');
+  assert.ok(master.targets.every(level => Math.abs(level - 0.8) < 1e-9), 'the master output is never muted by the menu');
+
+  for (let i = 0; i < 30; i++) sound.update(frame);
+  const restored = ambient.targets[ambient.targets.length - 1];
+  assert.equal(restored, openLevel, 'closing the cover returns the ambient bus to its original level');
+  assert.equal(sound.ducked, false);
+  assert.equal(structural(), built, 'restoring does not rebuild the audio graph');
+});
+
+test('pause and menu cover converge: either one keeps the ambient bed ducked until both clear', () => {
+  const fake = fakeContext();
+  const sound = new GameSound({ createContext: () => fake.ctx, strict: true });
+  sound.start();
+  const frame = { dt: 0.016, moving: 0, grounded: true, sprinting: false, water: false, verticalSpeed: 0, active: false, life: 0 };
+  sound.setPaused(true);
+  sound.update(frame);
+  assert.equal(sound.ambientLevel, 0.4);
+  sound.setPaused(false);
+  assert.equal(sound.ambientLevel, 0.4, 'pausing cleared but the menu is still open');
+  sound.update({ ...frame, active: true });
+  assert.equal(sound.ambientLevel, 1, 'both cleared: back to full ambience');
 });
 
 test('nothing is created before a user gesture when the browser reports none', () => {

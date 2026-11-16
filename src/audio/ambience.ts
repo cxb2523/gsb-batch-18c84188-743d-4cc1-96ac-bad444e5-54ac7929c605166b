@@ -75,7 +75,8 @@ export class Ambience {
     this.controlClock = 0;
     const t = g.ctx.currentTime;
 
-    g.ambient.input.gain.setTargetAtTime(active ? 1 : 0.4, t, 0.5);
+    // The ambient bus level belongs to the engine's run state (menu ducking / pause); the beds
+    // only shape their own relative mix so ducking never fights the per-frame controllers.
 
     // Sea: silent away from the water, swelling to the same peak right beside it.
     const near = clamp(frame.waterNear ?? (frame.water ? 1 : 0));

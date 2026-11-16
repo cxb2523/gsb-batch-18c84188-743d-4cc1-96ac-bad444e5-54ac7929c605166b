@@ -12,6 +12,7 @@ export type { SoundFrame, UiSound, Voice, SoundEvent } from './types';
 export { SOUND_EVENTS } from './types';
 export type { SampleOptions } from './samples';
 export type { EngineOptions } from './engine';
+export { AMBIENT_LEVEL, AMBIENT_DUCK_LEVEL, MASTER_LEVEL } from './engine';
 
 export interface GameSoundOptions extends EngineOptions {
   /** Test hook: rethrow errors instead of swallowing them (production never lets audio crash the game). */
@@ -40,6 +41,8 @@ export class GameSound {
   private stepClock = 0;
   private wasGrounded = true;
   private airborneVertical = 0;
+  /** False while the engine is not live (paused, muted or autoplay-locked). */
+  private wasLive = false;
 
   private readonly strict: boolean;
 
@@ -57,11 +60,30 @@ export class GameSound {
   get started(): boolean { return this.engine.started; }
   /** True once the context exists and sound can play right now. */
   get live(): boolean { return this.engine.live() !== null; }
+  /** Ambient bus level the run state is converging to (base, ducked under a menu, 0 muted). */
+  get ambientLevel(): number { return this.engine.ambientLevel; }
+  /** True while a menu/dialogue cover is ducking the ambient bed. */
+  get ducked(): boolean { return this.engine.ducked; }
+  get paused(): boolean { return this.engine.paused; }
+  /** The ambient bus gain node (observe ducking), or null before the graph exists. */
+  get ambientGain(): GainNode | null { return this.engine.ambientGain; }
+  /** The master output gain node, or null before the graph exists. */
+  get masterGain(): GainNode | null { return this.engine.masterGain; }
 
   /** Call from a user gesture (the start button). Creates and resumes the audio context. */
   start(): void { this.guard(() => this.engine.start()); }
   setEnabled(enabled: boolean): void { this.guard(() => this.engine.setEnabled(enabled)); }
-  setPaused(paused: boolean): void { this.guard(() => this.engine.setPaused(paused)); }
+  /** Pause stops all sound: nothing new is scheduled while paused, and the next live frame
+   * continues from the current motion state without replaying missed beats. */
+  setPaused(paused: boolean): void {
+    this.guard(() => {
+      if (paused) this.suspendSchedule();
+      this.engine.setPaused(paused);
+    });
+  }
+  /** Menus and dialogue cover the world: lower the ambient bus, keep everything else playing.
+   * Shares the engine run-state path with pause, so the two converge instead of fighting. */
+  setDucked(ducked: boolean): void { this.guard(() => this.engine.setDucked(ducked)); }
   dispose(): void { this.guard(() => { this.ambience.stop(this.engine.live()); this.babble.stop(); this.engine.dispose(); }); }
 
   /** Replace a synthesized event with a recording (decoded lazily on first use; synth until ready). */
@@ -77,11 +99,26 @@ export class GameSound {
     this.play(`ui.${action}` as SoundEvent, 'sfx', g => this.sfx.ui(g, action));
   }
 
-  /** Per-frame driver: ambience, footsteps, jump/land, dialogue babble. */
+  /** Per-frame driver: ambience, footsteps, jump/land, dialogue babble.
+   *
+   * While the engine is not live (paused, muted, menu-locked) this is a pure no-op: it schedules
+   * nothing and does not advance the step/babble/ambience clocks, so resuming picks up from the
+   * current state instead of flushing a queue of missed beats. */
   update(frame: SoundFrame): void {
     this.guard(() => {
+      // Menus/dialogue (active: false) duck the ambient bed through the engine's run-state path —
+      // the same one pause uses — even on frames where nothing may be scheduled.
+      this.engine.setDucked(!(frame.active ?? true));
       const g = this.engine.live();
-      if (!g) { this.stepClock = 0; return; }
+      if (!g) { this.wasLive = false; return; }
+      if (!this.wasLive) {
+        // First live frame after a pause/mute/lock: adopt the current pose silently so the
+        // transition that happened while sound was stopped is not replayed. A fall already in
+        // progress keeps its current speed, so a landing after resume still sounds natural.
+        this.wasLive = true;
+        this.wasGrounded = frame.grounded;
+        this.airborneVertical = frame.grounded ? 0 : (frame.verticalSpeed ?? 0);
+      }
       const active = frame.active ?? true;
       this.babble.update(frame.dt, g);
       this.ambience.update(frame, g);
@@ -124,6 +161,15 @@ export class GameSound {
   chapterComplete(): void { this.play('chapterComplete', 'music', g => this.music.chapterComplete(g)); }
 
   // ---------------------------------------------------------------- internals
+  /** Stop every scheduler clock so a paused stretch never replays missed beats. The gait starts
+   * fresh from the resume frame instead of banking the phase it had when sound stopped. */
+  private suspendSchedule(): void {
+    this.wasLive = false;
+    this.stepClock = 0;
+    this.airborneVertical = 0;
+    this.babble.stop();
+  }
+
   /** Play a registered sample if one is ready, otherwise run the synth version. */
   private play(event: SoundEvent, bus: 'sfx' | 'music', synth: (g: Graph) => void): void {
     this.guard(() => {
