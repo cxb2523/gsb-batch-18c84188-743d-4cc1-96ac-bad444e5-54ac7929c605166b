@@ -7,6 +7,8 @@
 - Button text changes now invalidate layout automatically.
 - DockWorkbench can cancel activation before leaving an invalid edit.
 - Consumed shortcuts no longer reach a newly opened confirmation dialog.
+- Runtime layer reordering (`setLayerOrder`, `moveLayer`, `bringLayerToFront`, `sendLayerToBack`) now recomposites the affected region in the new order instead of leaving stale stacking.
+- Partial repaint boundaries are canonical physical pixels: aligned damage is idempotent at DPR 1, 1.25, 1.5 and 2, and `clearLayer` clears exactly the pixels `composite` clips.
 
 ## 0.2.0 — 2026-10-21
 

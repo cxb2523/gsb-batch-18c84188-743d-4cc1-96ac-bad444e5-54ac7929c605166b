@@ -1214,6 +1214,53 @@ describe('RuntimeHost', () => {
     host.dispose()
   })
 
+  it('composites in the new layer order after a runtime reorder', () => {
+    vi.stubGlobal('OffscreenCanvas', TestOffscreenCanvas)
+    const canvas = document.createElement('canvas')
+    const screen = createCanvasContext()
+    ;(canvas as any).getContext = vi.fn(() => screen)
+    const host = new RuntimeHost({
+      canvas,
+      dpr: 1,
+      onFrame: vi.fn(),
+      getViewportSize: () => ({ width: 100, height: 80 }),
+    })
+    try {
+      // Consume the construction-time full-layer damage first, then give the two layers that
+      // will trade places bounded local content. The host compositor is the system under test,
+      // so drive its partial-repaint API directly rather than through a full layer paint.
+      host.compositor.composite()
+      host.compositor.clearLayer('main', { x: 10, y: 10, width: 40, height: 30 })
+      host.compositor.clearLayer('overlay', { x: 20, y: 20, width: 40, height: 30 })
+      vi.mocked(screen.clearRect).mockClear()
+      vi.mocked(screen.drawImage).mockClear()
+
+      host.moveLayer('main', host.compositor.getLayerOrder().length - 1)
+      host.markLayerDirtyRect('transient', { x: 22, y: 24, width: 6, height: 4 })
+      host.compositor.composite()
+
+      // The reorder keeps the composite local: the screen is not cleared end to end, and the
+      // clear matches the clip so no seam is left behind.
+      const cleared = vi.mocked(screen.clearRect).mock.calls.at(-1)!
+      expect(cleared).not.toEqual([0, 0, 100, 80])
+      expect(vi.mocked(screen.rect).mock.calls.at(-1)).toEqual(cleared)
+      expect(cleared[0]).toBeLessThanOrEqual(22)
+      expect(cleared[1]).toBeLessThanOrEqual(24)
+      expect(cleared[0]! + cleared[2]!).toBeGreaterThanOrEqual(28)
+      expect(cleared[1]! + cleared[3]!).toBeGreaterThanOrEqual(28)
+
+      // Layers are drawn back-to-front in exactly the new stacking order.
+      const order = host.compositor.getLayerOrder()
+      const layers = (host.compositor as unknown as { layers: Map<string, unknown> }).layers
+      const drawn = vi.mocked(screen.drawImage).mock.calls
+        .map(call => [...layers].find(([, layerCanvas]) => layerCanvas === call[0])?.[0])
+      expect(drawn).toEqual(order)
+      expect(order.at(-1)).toBe('main')
+    } finally {
+      host.dispose()
+    }
+  })
+
   it('registers layout inspector debug overlay above the default layers', () => {
     vi.stubGlobal('OffscreenCanvas', TestOffscreenCanvas)
     const canvas = document.createElement('canvas')

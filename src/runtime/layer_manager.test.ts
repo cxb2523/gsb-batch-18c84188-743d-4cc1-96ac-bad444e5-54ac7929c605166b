@@ -10,6 +10,8 @@ class TestCompositor {
   getPaintRect = vi.fn(rect => ({ ...rect }))
   registerLayer = vi.fn()
   unregisterLayer = vi.fn()
+  setLayerOrder = vi.fn()
+  moveLayer = vi.fn()
   private readonly _order: LayerName[] = ['background', 'main', 'overlay']
   private readonly _contexts = new Map<LayerName, PaintContext>()
 
@@ -165,4 +167,18 @@ describe("Partial repaint damage and state", () => {
     expect(manager.hasDirtyLayers).toBe(false)
   })
 
+  it('passes an explicit layer index through registration and order changes', () => {
+    const compositor = new TestCompositor()
+    const manager = new LayerManager(compositor as unknown as Compositor)
+
+    manager.registerLayer({ layer: 'main', index: 0, paint: vi.fn() })
+    expect(compositor.registerLayer).toHaveBeenCalledWith('main', 0)
+    manager.registerPainter({ layer: 'overlay', index: 2, paint: vi.fn() })
+    expect(compositor.registerLayer).toHaveBeenCalledWith('overlay', 2)
+
+    manager.setLayerOrder(['overlay', 'main'])
+    expect(compositor.setLayerOrder).toHaveBeenCalledWith(['overlay', 'main'])
+    manager.moveLayer('main', 0)
+    expect(compositor.moveLayer).toHaveBeenCalledWith('main', 0)
+  })
 })

@@ -10,6 +10,11 @@ export type LayerPaintTimings = Record<LayerName, number>
 
 export interface LayerRegistration {
   layer: LayerName
+  /**
+   * Stacking position (0 = bottom). For a new layer it is the insertion point; for an existing
+   * layer it moves that layer, which recomposites the affected region in the new order.
+   */
+  index?: number
   clear?: boolean
   paint?: (scope: LayerPaintScope) => void
   shouldPaint?: () => boolean
@@ -18,6 +23,8 @@ export interface LayerRegistration {
 
 export interface LayerPainterRegistration {
   layer: LayerName
+  /** Stacking position (0 = bottom); see `LayerRegistration.index`. */
+  index?: number
   paint: (scope: LayerPaintScope) => void
   shouldPaint?: () => boolean
   dirtyRect?: () => DirtyRect | undefined
@@ -37,7 +44,7 @@ export class LayerManager {
   constructor(private readonly _compositor: Compositor) {}
 
   registerLayer(registration: LayerRegistration): () => void {
-    this._compositor.registerLayer(registration.layer)
+    this._compositor.registerLayer(registration.layer, registration.index)
     this._layers.set(registration.layer, { clear: registration.clear ?? true })
     this.markDirty(registration.layer)
     if (registration.paint) {
@@ -65,7 +72,7 @@ export class LayerManager {
   }
 
   registerPainter(registration: LayerPainterRegistration): () => void {
-    this._compositor.registerLayer(registration.layer)
+    this._compositor.registerLayer(registration.layer, registration.index)
     if (!this._layers.has(registration.layer)) {
       this._layers.set(registration.layer, { clear: true })
     }
@@ -89,6 +96,19 @@ export class LayerManager {
 
   markAllDirty(): void {
     for (const layer of this._compositor.getLayerOrder()) this.markDirty(layer)
+  }
+
+  /**
+   * Change the stacking order (bottom first). Layer contents are kept; the compositor
+   * recomposites the affected region in the new order on the next `composite()`.
+   */
+  setLayerOrder(order: LayerName[]): void {
+    this._compositor.setLayerOrder(order)
+  }
+
+  /** Move a layer so it ends up at `index` in the stacking order. */
+  moveLayer(layer: LayerName, index: number): void {
+    this._compositor.moveLayer(layer, index)
   }
 
   isLayerDirty(layer: LayerName): boolean {

@@ -997,6 +997,21 @@ export class RuntimeHost {
     this.layerManager.markAllDirty()
   }
 
+  /**
+   * Change the compositor layer stacking order (bottom first). Contents are preserved; the
+   * next frame recomposites only the region whose stacking relationship changed.
+   */
+  setLayerOrder(order: string[]): void {
+    this.layerManager.setLayerOrder(order)
+    this.scheduleFrame('layer-order')
+  }
+
+  /** Move one layer to a new stacking position (0 = bottom) and request a composite. */
+  moveLayer(layer: string, index: number): void {
+    this.layerManager.moveLayer(layer, index)
+    this.scheduleFrame('layer-order')
+  }
+
   isLayerDirty(layer: string): boolean {
     return this.layerManager.isLayerDirty(layer)
   }

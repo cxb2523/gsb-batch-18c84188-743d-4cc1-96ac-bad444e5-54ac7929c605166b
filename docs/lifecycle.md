@@ -72,9 +72,16 @@ LayerManager unions the damage reported by every participating painter. Painters
 
 Clearing, repaint clipping and screen composition use the same viewport-clamped physical-pixel extent, including at fractional DPR. Each painter runs inside its own `save()` / `restore()` scope, with restoration in `finally`, so changes to transforms or clips do not leak into the next painter or a recovery pass. Empty offscreen damage is consumed without drawing. Painters must balance any additional save/restore scopes they create themselves.
 
+`Compositor.getPaintRect()` is the single source of that boundary: an aligned rectangle passed back in is returned unchanged at DPR 1, 1.25, 1.5 and 2, and a rectangle that is empty or fully clipped by the canvas edge normalizes to `{ x: 0, y: 0, width: 0, height: 0 }`. Non-finite damage keeps treating the layer as fully dirty. Clearing uses the aligned logical rect on a DPR-scaled layer context, so it covers exactly the device pixels that composition clears and clips.
+
 Runtime and popup transient painting replays retained visible participants when a region is damaged. This restores unchanged content that overlaps the cleared region; partial layer clips prevent opacity from accumulating outside it. Nodes under hidden ancestors are skipped. Requests raised during replay still remain queued for the next frame.
 
 RenderBox includes a margin for standard strokes and antialiasing in `paintBounds`, without enlarging layout or hit-test size. Custom effects extending farther must report their complete painted extent; moving content must invalidate both its old and new extents. After a painter throws, consumed damage and new damage remain available for the next explicit invalidation, while the Canvas state is restored. This does not change DrawList's primitive coordinate-snapping rules.
+
+
+## Layer order
+
+`Compositor` and `LayerManager` expose `setLayerOrder()`, `moveLayer()` and `bringLayerToFront()` / `sendLayerToBack()`, and `registerLayer()` accepts an optional `index` to insert or move a layer. Reordering preserves layer contents. The compositor tracks each layer's recently cleared or damaged extent and, on the next `composite()`, recomposites the union of the overlaps whose stacking relationship changed, in the new order — a partial dirty region stays partial, and a full-screen repaint happens only when a full-canvas layer is actually involved. `RuntimeHost.setLayerOrder()` / `moveLayer()` also schedule the frame.
 
 
 ## Browser service lifecycle
