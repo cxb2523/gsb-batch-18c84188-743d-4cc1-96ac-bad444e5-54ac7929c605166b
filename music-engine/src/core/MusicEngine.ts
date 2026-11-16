@@ -633,7 +633,15 @@ export class MusicEngine {
     }
   }
 
-  private teardownInstance(): void {
+  /**
+   * @param preserveTailFX when true (transition boundary only), keep the
+   * reverb/shimmer state established before the boundary: their wet already
+   * converged to near zero and the incoming style must re-arm them itself, so a
+   * reset() here would both resurrect an audible old tail and clobber the new
+   * style's parameters. Every other path (stop/pause edits) still does a full
+   * resetAll(), preserving the previous non-transition behaviour.
+   */
+  private teardownInstance(preserveTailFX = false): void {
     if (this.instance) {
       try {
         this.instance.stop();
@@ -643,7 +651,8 @@ export class MusicEngine {
     }
     this.instance = null;
     this.styleRandom = null;
-    this.fx.resetAll();
+    if (preserveTailFX) this.fx.resetAllExceptTailFX();
+    else this.fx.resetAll();
     if (this.audio) this.instruments.stopAll(this.audio.ctx.currentTime + 0.01, 0.05);
     this.scheduler?.queue.clear();
   }
@@ -723,6 +732,11 @@ export class MusicEngine {
     // Ring out what is already sounding, dropping not-yet-dispatched events.
     this.scheduler?.queue.clearFrom(boundary - 0.3);
     this.audio.setFade(0, Math.max(now + 0.03, audioBoundary - 0.9), 0.8);
+    // The master fade only gates the dry signal: reverb/shimmer tails would
+    // otherwise keep ringing across the boundary. Collapse their wet over the
+    // same fade window so the old tail dries up before the switch (master
+    // volume is deliberately not touched).
+    this.fx.convergeTailWet();
 
     const waitMs = Math.max(0, (audioBoundary - now) * 1000 - 25);
     this.transitionTimer = setTimeout(() => {
@@ -742,9 +756,14 @@ export class MusicEngine {
       };
       this.pendingTarget = null;
       this.transitionTarget = null;
+      // 1) Kill the old dry sources and drop everything still queued.
       this.instruments.stopAll(n2 + 0.02, 0.05);
       this.scheduler?.queue.clear();
-      this.teardownInstance();
+      // 2) Tear the old instance down. Reverb/shimmer are NOT reset on purpose:
+      //    their wet has converged to near zero already, and resetting them now
+      //    would restore their default (audible) wet. The serial FX still get
+      //    their neutral reset here.
+      this.teardownInstance(true);
       if (effective.styleId) {
         this.stylePlugin = this.validateStyle(effective.styleId);
         this.params.init(this.stylePlugin.id, this.stylePlugin.parameters);
@@ -755,6 +774,9 @@ export class MusicEngine {
         this.eventBus.emit('seed', { seed: this.seed });
       }
       this.generatedUntil = this.transport.isActive ? this.transport.positionAt(n2) : 0;
+      // 3) Instantiate the new style LAST: its start() re-arms reverb/shimmer
+      //    with the new style's own wet/decay/feedback, and no reset runs after
+      //    this point, so those parameters are guaranteed to survive.
       this.instantiateStyle();
       a.setFade(1, n2 + 0.06, 1.1);
       this.transitioning = false;
