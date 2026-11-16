@@ -20,17 +20,17 @@ if (typeof performance === "undefined") {
   };
 }
 
-// Mock createImageBitmap
-if (typeof createImageBitmap === "undefined") {
-  (globalThis as unknown as { createImageBitmap: typeof createImageBitmap }).createImageBitmap =
-    async (_source: ImageBitmapSource) => {
-      return {
-        width: 64,
-        height: 64,
-        close: () => {},
-      } as ImageBitmap;
-    };
-}
+// Mock createImageBitmap.
+// happy-dom may ship a partial implementation that throws for the image
+// sources used by the loader, so always replace it with a deterministic mock.
+(globalThis as unknown as { createImageBitmap: typeof createImageBitmap }).createImageBitmap =
+  async (_source: ImageBitmapSource) => {
+    return {
+      width: 64,
+      height: 64,
+      close: () => {},
+    } as ImageBitmap;
+  };
 
 // Mock HTMLCanvasElement.transferToImageBitmap
 (

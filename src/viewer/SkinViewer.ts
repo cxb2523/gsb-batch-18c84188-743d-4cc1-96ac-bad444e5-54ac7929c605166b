@@ -20,7 +20,7 @@ import {
   updateOrbitControls,
 } from "../core/camera/OrbitControls";
 import type { OrbitControls } from "../core/camera/OrbitControls";
-import { BufferUsage, TextureFilter, isWebGPUSupported } from "../core/renderer/types";
+import { BufferUsage, TextureFilter } from "../core/renderer/types";
 import type {
   BackendType,
   BindGroup,
@@ -29,7 +29,7 @@ import type {
   IRenderer,
   ITexture,
 } from "../core/renderer/types";
-import { getRendererPlugin, getRegisteredBackends } from "../core/renderer/registry";
+import { resolveRenderer } from "../core/renderer/backend-resolver";
 import { PART_NAMES, createDefaultVisibility } from "../model/types";
 import type {
   BoxGeometry,
@@ -272,38 +272,10 @@ export async function createSkinViewer(options: SkinViewerOptions): Promise<Skin
   const height = canvas.clientHeight || canvas.height;
   const variant: ModelVariant = options.slim ? "slim" : "classic";
 
-  // Determine and create renderer based on preferred backend
+  // Unified backend availability check + creation-time fallback.
+  // Only registered backends participate; auto prefers WebGPU then WebGL2,
+  // and an explicitly requested backend is kept whenever it creates successfully.
   const preferredBackend = options.preferredBackend ?? "auto";
-  const registeredBackends = getRegisteredBackends();
-
-  if (registeredBackends.length === 0) {
-    throw new Error(
-      "No renderer registered. Please register a renderer using use():\n" +
-        "  import { use } from 'minecraft-skin-renderer'\n" +
-        "  import { WebGLRendererPlugin } from 'minecraft-skin-renderer/webgl'\n" +
-        "  use(WebGLRendererPlugin)",
-    );
-  }
-
-  // Determine which backend to use (prefer WebGPU if available)
-  const targetBackend: BackendType =
-    preferredBackend !== "auto"
-      ? preferredBackend
-      : getRendererPlugin("webgpu") && isWebGPUSupported()
-        ? "webgpu"
-        : getRendererPlugin("webgl")
-          ? "webgl"
-          : registeredBackends[0];
-
-  const plugin = getRendererPlugin(targetBackend);
-  if (!plugin) {
-    throw new Error(
-      `Renderer "${targetBackend}" is not registered. Available: [${registeredBackends.join(", ")}]\n` +
-        `Please register it using use():\n` +
-        `  import { ${targetBackend === "webgpu" ? "WebGPURendererPlugin" : "WebGLRendererPlugin"} } from 'minecraft-skin-renderer/${targetBackend}'\n` +
-        `  use(${targetBackend === "webgpu" ? "WebGPURendererPlugin" : "WebGLRendererPlugin"})`,
-    );
-  }
 
   const rendererOptions = {
     canvas,
@@ -312,24 +284,23 @@ export async function createSkinViewer(options: SkinViewerOptions): Promise<Skin
     preserveDrawingBuffer: options.preserveDrawingBuffer ?? false,
   };
 
-  let renderer: IRenderer;
-  try {
-    renderer = await plugin.createRenderer(rendererOptions);
-  } catch (e) {
-    // Try fallback to other registered backend
-    const fb = registeredBackends.find((b) => b !== targetBackend);
-    const fbPlugin = fb && getRendererPlugin(fb);
-    if (!fbPlugin) throw e;
-    console.warn(`${targetBackend} initialization failed, falling back to ${fb}:`, e);
-    try {
-      renderer = await fbPlugin.createRenderer(rendererOptions);
-    } catch (fallbackError) {
-      throw new Error(
-        `All renderers failed to initialize.\n` +
-          `  ${targetBackend}: ${e instanceof Error ? e.message : (e as string)}\n` +
-          `  ${fb}: ${fallbackError instanceof Error ? fallbackError.message : (fallbackError as string)}`,
-      );
-    }
+  // Resources from a backend whose factory throws never leave the resolver,
+  // so the renderer below is guaranteed to own every resource created later.
+  const resolved = await resolveRenderer(preferredBackend, rendererOptions);
+  const renderer: IRenderer = resolved.renderer;
+
+  if (resolved.fellBack) {
+    const reasons = resolved.fallbackErrors
+      .map((failure) => {
+        const message =
+          failure.error instanceof Error ? failure.error.message : String(failure.error);
+        return `${failure.backend}: ${message}`;
+      })
+      .join("; ");
+    console.warn(
+      `Requested "${preferredBackend}" renderer is unavailable, fell back to "${resolved.backend}".` +
+        (reasons ? ` Reason(s): ${reasons}` : ""),
+    );
   }
 
   const initCleanup: (() => void)[] = [() => renderer.dispose()];

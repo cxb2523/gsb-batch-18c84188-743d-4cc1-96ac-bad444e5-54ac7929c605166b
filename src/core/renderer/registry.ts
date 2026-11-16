@@ -102,3 +102,14 @@ export function getRegisteredBackends(): BackendType[] {
 export function isBackendRegistered(backend: BackendType): boolean {
   return registry.has(backend);
 }
+
+/**
+ * Remove all registered renderer plugins.
+ *
+ * Intended for unit tests that need a deterministic registry state; production
+ * code should register plugins once at startup.
+ * @internal
+ */
+export function clearRendererRegistry(): void {
+  registry.clear();
+}
