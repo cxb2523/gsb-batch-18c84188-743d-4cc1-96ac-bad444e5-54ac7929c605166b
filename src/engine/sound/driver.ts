@@ -169,8 +169,15 @@ export class SoundDriver {
     return true;
   }
 
-  /** fn 06c8 (ah=5) and fn 06c3 (ah=8): put a sound number in one of the two eight-slot queues. */
+  /**
+   * fn 06c8 (ah=5) and fn 06c3 (ah=8): put a sound number in one of the two eight-slot queues.
+   *
+   * Returns whether the request is in the queue afterwards: true when it was added, or when this engine
+   * note was already waiting, and false when the queue is full. A full queue is left untouched, so a
+   * refused hit never costs one of the requests already waiting for a channel.
+   */
   play(sound: number, music = false): boolean {
+    if (sound === 0) return false;                            // zero is how an empty queue slot reads
     const queue = music ? this.music : this.effects;
     if (sound >= 0x40 && queue.includes(sound)) return true;   // one engine note per car at a time
     const free = queue.indexOf(0);
@@ -258,21 +265,51 @@ export class SoundDriver {
   /**
    * fn 7b46's half of the engine note: the pitch goes into the 0x95 command of that car's record and the
    * command after it decides whether the little sequence loops on or ends.
+   *
+   * An engine that is already sounding only has its record rewritten: fn 0294 keeps the note keyed down for
+   * sound numbers of 0x40 and up, so the pitch bends instead of the note being struck again. `play` folds a
+   * request that is already waiting into the queue rather than queueing the car twice.
    */
   engine(car: number, pitch: number, running: boolean): void {
     const at = ENGINE_RECORDS + car * ENGINE_LEN;
     this.data[at + 0x0A] = pitch & 0xFF;
     this.data[at + 0x0C] = running ? 0x98 : 0x91;
-    if (running && !this.isPlaying(0x40 + car)) this.play(0x40 + car);
+    const sound = 0x40 + car;
+    if (running) {
+      if (!this.isPlaying(sound)) this.play(sound);
+      return;
+    }
+    // Stopping: a request that never reached a channel must not start after the car has gone, and a sequencer
+    // already on the note is sent to the record's end/loop byte and made to read it on the next tick, so the
+    // engine really ends and frees the OPL channel. If the car starts again before that tick the byte is 0x98
+    // instead, which loops with the key still down.
+    this.cancel(sound);
+    for (const s of this.slots) {
+      if (s.state === 0 || s.sound !== sound) continue;
+      s.seq = at + 0x0C;
+      if (s.time >= 0) s.time = -1;
+    }
   }
 
-  /** fn 0704 / 089e: start everything the queue asked for, then empty it. */
+  /** Drop a request that is still waiting in either queue. */
+  private cancel(sound: number): void {
+    for (const queue of [this.effects, this.music]) {
+      for (let i = 0; i < queue.length; i++) if (queue[i] === sound) queue[i] = 0;
+    }
+  }
+
+  /**
+   * fn 0704 / 089e: start everything the queue asked for, oldest first.
+   *
+   * A request that finds no free channel record or no free OPL channel stays where it is, and so does
+   * everything behind it, so the next tick tries again instead of silently losing the rest of the queue.
+   */
   private runQueue(queue: Uint8Array): void {
     for (let i = 0; i < queue.length; i++) {
       const sound = queue[i]!;
       if (sound === 0) continue;
+      if (!this.start(sound)) return;                      // 071a: nothing free, this request and the rest wait
       queue[i] = 0;
-      if (!this.start(sound)) return;                      // 071a: nothing free, the rest waits
     }
   }
 
