@@ -395,6 +395,7 @@ export class ClodSelector {
   // mark (instance, group) refined: its member clusters enter the cut, their source groups become candidates
   _refine(bi, i, g, floorPx) {
     const b = this.batches[bi], a = b.asset, G = a.meta.groups, cU = a.clusterU, gF = a.groupF, frame = this.frame;
+    const minLv = a.minMemberLevel, loaded = a.loadedLevel;
     b.refined[i * G + g] = frame;
     if (this.rN * 3 >= this.rList.length) { const r = new Int32Array(this.rList.length * 2); r.set(this.rList); this.rList = r; }
     this.rList[this.rN * 3] = bi; this.rList[this.rN * 3 + 1] = i; this.rList[this.rN * 3 + 2] = g; this.rN++;
@@ -409,24 +410,80 @@ export class ClodSelector {
         const o = s * 5, dx = gF[o] - cx, dy = gF[o + 1] - cy, dz = gF[o + 2] - cz;
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - gF[o + 3];
         const err = d <= 1e-6 ? Infinity : gF[o + 4] * this.K / d;
-        if (err > floorPx) this._push(err, bi, i, s);
+        if (err <= floorPx) continue; // within the error floor: no refinement is wanted
+        // Streaming: a group can only be refined when all of its member clusters are resident.
+        // A wanted-but-unresident group never enters the refine heap (so no virtual triangles are
+        // charged against the budget and no unloaded group is refined into); its product clusters
+        // stay in the cut as the coarser fallback and we remember the finest level the cut would
+        // refine into. Recording this even when the budget cannot afford the group lets
+        // updateStreaming fetch ahead, and matches threshold mode, which draws the coarser resident
+        // cluster and records the same wanted level.
+        if (a.stream && minLv[s] < loaded) {
+          this._wantBeyond(bi, i, s, floorPx);
+          continue;
+        }
+        this._push(err, bi, i, s);
       }
     }
     return add / 3;
   }
+  // Streaming: from a wanted source group whose member clusters are not resident, walk the parts
+  // of the group DAG whose projected error is still above the floor and record the finest member
+  // level reached in a.wantLevel. This is independent of the triangle budget -- a group the view
+  // wants must be requested even when the budget cannot afford to refine it -- and mirrors the
+  // error-driven descent the threshold selector does before it draws the coarser fallback. The
+  // walk touches only non-resident groups (a resident group is reached only from another resident
+  // group, which goes through the heap instead) and stamps each group once per frame.
+  _wantBeyond(bi, i, g0, floorPx) {
+    const b = this.batches[bi], a = b.asset, G = a.meta.groups, cU = a.clusterU, gF = a.groupF;
+    const minLv = a.minMemberLevel, loaded = a.loadedLevel, frame = this.frame, stamped = b.wantStamp;
+    const dstack = this._wstack || (this._wstack = new Int32Array(4096));
+    const cx = b.camL[i * 3], cy = b.camL[i * 3 + 1], cz = b.camL[i * 3 + 2];
+    let dp = 0; dstack[dp++] = g0;
+    while (dp > 0) {
+      const g = dstack[--dp];
+      // only a level finer than anything resident is worth fetching; on a complete asset
+      // (loadedLevel 0) this never lowers wantLevel, so it stays at its 255 "nothing wanted".
+      if (minLv[g] < a.wantLevel && minLv[g] < loaded) a.wantLevel = minLv[g];
+      for (let k = a.memberOff[g], e = a.memberOff[g + 1]; k < e; k++) {
+        const s = cU[a.memberIds[k] * 4 + 2];
+        if (s < 0 || stamped[i * G + s] === frame) continue;
+        stamped[i * G + s] = frame;
+        if (!this._vis(b, i, gF, s * 5)) continue;
+        const o = s * 5, dx = gF[o] - cx, dy = gF[o + 1] - cy, dz = gF[o + 2] - cz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - gF[o + 3];
+        if (!(d <= 1e-6 || gF[o + 4] * this.K > floorPx * d)) continue;
+        if (dp >= dstack.length) { const bigger = new Int32Array(dstack.length * 2); bigger.set(dstack); this._wstack = dstack = bigger; }
+        dstack[dp++] = s;
+      }
+    }
+  }
   _selectBudget(floorPx, budget) {
     const frame = this.frame; this.hN = 0; this.rN = 0;
-    let count = 0, lastKey = Infinity;
-    this.batches.forEach((b, bi) => {
+    let count = 0;
+    this.batches.forEach((b) => {
       const G = b.asset.meta.groups;
-      if (!b.refined) { b.refined = new Int32Array(b.count * G); b.pushed = new Int32Array(b.count * G); }
+      if (!b.refined) { b.refined = new Int32Array(b.count * G); b.pushed = new Int32Array(b.count * G); b.wantStamp = new Int32Array(b.count * G); }
+    });
+    // Streaming pre-scan: find the finest level the view would refine into if every level were
+    // resident, independent of the triangle budget, and remember it in wantLevel. This must not
+    // depend on the budget loop -- a tight budget can be spent entirely on resident geometry and
+    // never reach a non-resident group, but the wanted data still has to be fetched so a later
+    // frame can refine. Threshold mode performs the same error-driven descent as it falls back.
+    for (let bi = 0; bi < this.batches.length; bi++) {
+      const b = this.batches[bi], a = b.asset;
+      if (!a.stream) continue;
+      for (let i = 0; i < b.count; i++) if (b.visible_[i]) this._wantBeyond(bi, i, 0, floorPx);
+    }
+    this.batches.forEach((b, bi) => {
       for (let i = 0; i < b.count; i++) if (b.visible_[i]) count += this._refine(bi, i, 0, floorPx);
     });
     const top = [0, 0, 0];
     while (this.hN > 0 && count < budget) {
-      lastKey = this._pop(top);
+      this._pop(top);
       const b = this.batches[top[0]], a = b.asset, i = top[1], g = top[2];
-      if (a.minMemberLevel[g] < a.loadedLevel && a.minMemberLevel[g] < a.wantLevel) a.wantLevel = a.minMemberLevel[g]; // wanted but not resident
+      // Every heap entry is resident: _refine never pushes a group whose member clusters are not
+      // loaded. Non-resident refinement is requested through wantLevel and keeps the coarser cut.
       // the clusters this group produced are all in the cut right now; they leave it
       let rem = 0;
       for (let k = a.productOff[g], e = a.productOff[g + 1]; k < e; k++) { const c = a.productIds[k]; if (this._vis(b, i, a.clusterF, c * 4)) rem += a.clusterU[c * 4 + 1]; }
