@@ -205,10 +205,39 @@ class EventEmitter:
     def close(self):
         """Close the event handler.
 
-        Drops all pending events, send the close event, and disables the emitter.
+        Drops all pending events, sends the close event to the handlers that
+        are registered at this moment, and then disables the emitter.
+
+        The close event is emitted *before* the handlers are released, so
+        registered handlers always receive it. Calling this method more than
+        once is a no-op: the close event is emitted exactly once.
+
+        Any events that were submitted but not yet flushed are dropped: they
+        do not reach any handler. After closing, ``submit()`` silently ignores
+        events, and handlers registered afterwards are never called.
         """
         # This is a little feature because detecting a widget from closing can be tricky.
-        if not self._closed:
-            self._pending_events.clear()
-            self.submit({"event_type": "close"})
-            self.flush()
+        if self._closed:
+            return
+
+        # Mark as closed first: this makes submit() and add_handler() no-ops
+        # while the close event is being dispatched, and makes re-entrant or
+        # repeated calls to close() harmless.
+        self._closed = True
+
+        # Drop events that were pending (submitted but not flushed): after
+        # closing they must not trigger any handler.
+        self._pending_events.clear()
+
+        # Notify the currently registered handlers. Note that emit() does not
+        # check _closed, and that it snapshots the callbacks before calling
+        # them, so (de)registering handlers from within a handler is safe.
+        # We bypass submit() (which is a no-op now) but keep its time_stamp
+        # convention, so the close event looks like any other submitted event.
+        close_event = {"event_type": "close", "time_stamp": time.perf_counter()}
+        self.emit(close_event)
+
+        # Release the handlers and any (newly submitted) pending events.
+        # Note that emit() already calls _release() for the close event, but
+        # doing it here too makes this method robust and explicit.
+        self._release()

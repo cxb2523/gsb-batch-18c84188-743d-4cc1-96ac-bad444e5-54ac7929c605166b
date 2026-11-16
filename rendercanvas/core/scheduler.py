@@ -52,6 +52,7 @@ class Scheduler:
 
         # Scheduling variables
         self._enabled = True
+        self._stopped = False
         self._draw_requested = True  # Start with a draw in ondemand mode
         self._ready_for_present = None
         self._just_cancelled_a_frame = False
@@ -67,6 +68,27 @@ class Scheduler:
         assert task is not None
         return task
 
+    def stop(self):
+        """Stop the scheduler.
+
+        After this, the scheduler no longer requests draws and no longer waits
+        for a presentation to complete. If the scheduler is currently waiting
+        for a draw, that wait is cancelled (i.e. the scheduler task is woken),
+        so that it can finish instead of hanging until the loop stops.
+
+        This is a one-way operation: a stopped scheduler cannot be restarted.
+        Calling this method more than once is a no-op.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+
+        # Wake the scheduler task if it is waiting for a present. Without this,
+        # closing a canvas mid-draw could leave the task waiting forever.
+        if self._ready_for_present is not None:
+            self._ready_for_present.set()
+            self._ready_for_present = None
+
     def get_canvas(self):
         """Get the canvas, or None if it is closed or gone."""
         canvas = self._canvas_ref()
@@ -76,6 +98,8 @@ class Scheduler:
             return canvas
 
     def set_update_mode(self, update_mode, *, min_fps=None, max_fps=None):
+        if self._stopped:
+            return  # Do not (re)activate a stopped scheduler.
         update_mode = str(update_mode)
         if update_mode not in UpdateMode:
             raise ValueError(
@@ -95,6 +119,8 @@ class Scheduler:
             self._max_fps = max(1, float(max_fps))
 
     def set_enabled(self, enabled: bool):
+        if self._stopped:
+            return  # Do not (re)activate a stopped scheduler.
         enabled = bool(enabled)
         if enabled != self._enabled:
             self._enabled = enabled
@@ -103,6 +129,8 @@ class Scheduler:
 
     def request_draw(self):
         """Request a new draw to be done. Only affects the 'ondemand' mode."""
+        if self._stopped:
+            return  # Do not (re)activate a stopped scheduler.
         # Just set the flag
         self._draw_requested = True
 
@@ -116,6 +144,10 @@ class Scheduler:
         await sleep(0.02)
 
         while True:
+            # Stop when explicitly stopped (e.g. because the canvas closes).
+            if self._stopped:
+                break
+
             # Determine delay
             if self._just_cancelled_a_frame:
                 self._just_cancelled_a_frame = False

@@ -27,6 +27,9 @@ class StubContext:
     def _rc_present(self, force_sync=False):
         return {"method": "skip"}
 
+    def _rc_close(self):
+        pass
+
 
 class MyCanvas(BaseRenderCanvas):
     _rc_canvas_group = MyCanvasGroup(MyLoop())
@@ -181,6 +184,96 @@ def test_scheduling_fastest():
     canvas.force_draw()
     assert canvas.draw_count == 1
     assert canvas.events_count == 0
+
+
+# ==================== stopping the scheduler
+
+
+class DrawCountCanvas(MyCanvas):
+    """A canvas that counts the requests that the scheduler makes."""
+
+    def __init__(self, *args, **kwargs):
+        self.request_draw_count = 0
+        super().__init__(*args, **kwargs)
+
+    def _rc_request_draw(self):
+        self.request_draw_count += 1
+        super()._rc_request_draw()
+
+
+def test_scheduling_close_stops_drawing():
+    canvas = DrawCountCanvas(max_fps=100, update_mode="continuous")
+
+    canvas.active_sleep(0.11)
+    assert canvas.draw_count > 0
+
+    canvas.close()
+    assert canvas.get_closed()
+
+    draws = canvas.draw_count
+    requests = canvas.request_draw_count
+    canvas.active_sleep(0.11)
+    assert canvas.draw_count == draws
+    assert canvas.request_draw_count == requests
+
+    # After closing, requesting a draw or changing the update mode is a
+    # no-op, and does not reactivate the scheduler.
+    canvas.request_draw()
+    canvas.set_update_mode("continuous")
+    canvas.request_draw(lambda: None)
+    canvas.active_sleep(0.11)
+    assert canvas.draw_count == draws
+    assert canvas.request_draw_count == requests
+
+
+class StubSchedulerCanvas:
+    """The minimal canvas interface that the Scheduler uses."""
+
+    def get_closed(self):
+        return False
+
+
+class FakeEvent:
+    def __init__(self):
+        self.is_set = False
+
+    def set(self):
+        self.is_set = True
+
+
+def test_scheduler_stop_wakes_waiting_present():
+    from rendercanvas.core.scheduler import Scheduler
+
+    canvas = StubSchedulerCanvas()
+    scheduler = Scheduler(canvas, events=None, update_mode="ondemand")
+
+    # Simulate that the scheduler is waiting for a draw to be presented.
+    fake_event = FakeEvent()
+    scheduler._ready_for_present = fake_event
+
+    scheduler.stop()
+
+    # The wait was cancelled, so the scheduler task can finish.
+    assert fake_event.is_set
+    assert scheduler._ready_for_present is None
+
+    # Stopping twice is harmless.
+    scheduler.stop()
+
+    # And the scheduler no longer requests draws or changes its mode.
+    scheduler._draw_requested = False
+    mode, min_fps, max_fps = scheduler._mode, scheduler._min_fps, scheduler._max_fps
+    scheduler.request_draw()
+    scheduler.set_update_mode("continuous", min_fps=1, max_fps=5)
+    scheduler.set_enabled(False)
+    scheduler.set_enabled(True)
+    assert scheduler._draw_requested is False
+    assert (scheduler._mode, scheduler._min_fps, scheduler._max_fps) == (
+        mode,
+        min_fps,
+        max_fps,
+    )
+    assert scheduler._enabled
 
 
 if __name__ == "__main__":

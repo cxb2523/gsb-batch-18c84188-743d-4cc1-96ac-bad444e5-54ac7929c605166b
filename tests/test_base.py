@@ -3,6 +3,7 @@ Test the base canvas class.
 """
 
 import numpy as np
+import pytest
 import rendercanvas
 from testutils import run_tests, can_use_wgpu_lib
 from pytest import mark
@@ -203,6 +204,148 @@ def test_canvas_base_events():
 
     c._events.flush()
     assert events == [1, 2]
+
+
+# ==================== closing
+
+
+class CanvasThatLogsClose(rendercanvas.base.BaseRenderCanvas):
+    _rc_canvas_group = SomeCanvasGroup(None)
+
+    def __init__(self, *, fail_close=False, fail_context_close=False):
+        super().__init__()
+        self._fail_close = fail_close
+        self._fail_context_close = fail_context_close
+        self.close_count = 0
+        self._present_to_screen = False
+        self._canvas_context = ClosingStubContext(fail_context_close)
+
+    def _draw_frame(self):
+        pass
+
+    def _rc_close(self):
+        self.close_count += 1
+        if self._fail_close:
+            raise Exception("rc-close-failed")
+
+
+class ClosingStubContext:
+    def __init__(self, fail=False):
+        self._fail = fail
+        self.close_count = 0
+
+    def _rc_present(self, force_sync=False):
+        return {"method": "skip"}
+
+    def _rc_close(self):
+        self.close_count += 1
+        if self._fail:
+            raise Exception("context-close-failed")
+
+
+def test_canvas_close_emits_close_once():
+    canvas = CanvasThatLogsClose()
+
+    events = []
+    canvas.add_event_handler(lambda ev: events.append(ev["event_type"]), "close")
+
+    canvas.close()
+    assert canvas.get_closed()
+    assert events == ["close"]
+    assert canvas.close_count == 1
+    assert canvas._canvas_context is None
+    assert canvas._events._closed
+
+    # Closing again does not raise, does not emit the close event again,
+    # and does not close the native canvas again.
+    canvas.close()
+    assert events == ["close"]
+    assert canvas.close_count == 1
+
+    # Drawing and scheduling after close are safe no-ops.
+    canvas.force_draw()
+    canvas.request_draw()
+    canvas.set_update_mode("continuous")
+    assert canvas.close_count == 1
+
+
+def test_canvas_close_drops_pending_events():
+    canvas = CanvasThatLogsClose()
+
+    received = []
+    canvas.add_event_handler(
+        lambda ev: received.append(ev["event_type"]), "key_down", "close"
+    )
+    canvas.submit_event({"event_type": "key_down", "key": "A"})
+
+    canvas.close()
+    assert received == ["close"]
+
+    # Submitting after close is silently ignored.
+    canvas.submit_event({"event_type": "key_down", "key": "B"})
+    canvas._events.flush()
+    assert received == ["close"]
+
+
+def test_canvas_close_ignores_new_handlers():
+    canvas = CanvasThatLogsClose()
+    canvas.close()
+
+    received = []
+    canvas.add_event_handler(lambda ev: received.append(ev), "close", "key_down")
+    canvas.submit_event({"event_type": "key_down", "key": "A"})
+    canvas._events.flush()
+    assert received == []
+
+
+def test_canvas_close_from_within_draw():
+    canvas = CanvasThatLogsClose()
+
+    def draw_frame():
+        canvas.close()
+
+    canvas.request_draw(draw_frame)
+    canvas.force_draw()  # Must not raise, and must not present after closing.
+
+    assert canvas.get_closed()
+    assert canvas.close_count == 1
+
+
+def test_canvas_close_from_within_before_draw():
+    canvas = CanvasThatLogsClose()
+    drawn = []
+
+    def on_before_draw(event):
+        if not canvas.get_closed():
+            canvas.close()
+
+    canvas.add_event_handler(on_before_draw, "before_draw")
+    canvas.request_draw(lambda: drawn.append(True))
+    canvas.force_draw()  # Must not raise, and must not draw after closing.
+
+    assert canvas.get_closed()
+    assert drawn == []
+    assert canvas.close_count == 1
+
+
+def test_canvas_close_raises_first_error_but_finishes_closing():
+    canvas = CanvasThatLogsClose(fail_close=True, fail_context_close=True)
+
+    received = []
+    canvas.add_event_handler(lambda ev: received.append(ev["event_type"]), "close")
+
+    with pytest.raises(Exception) as err:
+        canvas.close()
+
+    assert "rc-close-failed" in str(err.value)
+    # The event system was still closed properly, and close was emitted once.
+    assert received == ["close"]
+    assert canvas._events._closed
+    assert canvas._canvas_context is None
+
+    # A subsequent call is a no-op and does not raise again.
+    canvas.close()
+    assert received == ["close"]
 
 
 if __name__ == "__main__":

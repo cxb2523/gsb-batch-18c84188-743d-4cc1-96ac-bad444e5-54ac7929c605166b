@@ -402,6 +402,10 @@ class BaseRenderCanvas:
         # accumulative events to accumulate. Once per draw, and at max_fps
         # when there are no draws (in ondemand and manual mode).
 
+        # After closing, the native widget may be gone and the events are released.
+        if self.__is_closed:
+            return
+
         # Get events from the GUI into our event mechanism.
         self._rc_gui_poll()
 
@@ -473,6 +477,8 @@ class BaseRenderCanvas:
                 function. If not given or None, the last set draw function is used.
 
         """
+        if self.__is_closed:
+            return  # Do not reactivate a stopped scheduler, and keep no refs.
         if draw_function is not None:
             self._draw_frame = draw_function
         if self.__scheduler is not None:
@@ -489,6 +495,8 @@ class BaseRenderCanvas:
         this, consider using a timer. Nevertheless, sometimes you just want to force
         a draw right now.
         """
+        if self.__is_closed:
+            return  # The native canvas and the context are gone.
         if self.__is_drawing:
             raise RuntimeError("Cannot force a draw while drawing.")
         if self._present_to_screen:
@@ -515,6 +523,11 @@ class BaseRenderCanvas:
             _draw_and_present() ->  ...  ->   finish_present()  ->  _rc_request_paint()
         """
 
+        # Draws that were requested before closing may still arrive here (e.g.
+        # via a queued paint callback). Don't touch the native canvas anymore.
+        if self.__is_closed:
+            return
+
         # This is an good time to process events, it's the moment that's closest to the actual draw
         # as possible, but it's not in the native's paint-event (which is a bad moment to process events).
         # Doing it now - as opposed to right before _rc_request_draw() - ensures that the rendered frame
@@ -535,6 +548,8 @@ class BaseRenderCanvas:
 
         Errors are logged to the "rendercanvas" logger.
         """
+        if self.__is_closed:
+            return
         if self._present_to_screen:
             self._draw_and_present(force_sync=True)
 
@@ -579,6 +594,12 @@ class BaseRenderCanvas:
             # Emit before-draw
             self._events.emit({"event_type": "before_draw"})
 
+            # A before_draw handler may have closed the canvas.
+            if self.__is_closed:
+                if scheduler is not None:
+                    scheduler.on_cancel_draw()
+                return
+
             # Perform the user-defined drawing code. When this errors,
             # we should report the error and then continue, otherwise we crash.
             with log_exception("Draw error"):
@@ -594,6 +615,13 @@ class BaseRenderCanvas:
             # Perform the presentation process. Might be async
             with log_exception("Present init error"):
                 # Note: if vsync is used, this call may wait a little (happens down at the level of the driver or OS)
+
+                # The draw function (or a before_draw handler) may have closed
+                # the canvas. The context is gone then, so don't present.
+                if self.__is_closed:
+                    if scheduler is not None:
+                        scheduler.on_cancel_draw()
+                    return
 
                 try:
                     if force_sync:
@@ -617,6 +645,12 @@ class BaseRenderCanvas:
 
     def _finish_present(self, result):
         """Wrap up the presentation process."""
+
+        # An async present may complete after the canvas was closed. The
+        # native canvas is gone then, and the scheduler is stopped, so there is
+        # nothing left to do.
+        if self.__is_closed:
+            return
 
         with log_exception("Present finish error"):
             method = result.pop("method", "unknown")
@@ -676,12 +710,36 @@ class BaseRenderCanvas:
         return self._size_info["total_pixel_ratio"]
 
     def close(self) -> None:
-        """Close the canvas."""
+        """Close the canvas.
+
+        The order of operations is fixed, so that closing is predictable:
+
+        1. Stop the scheduler, so no new draws are requested, and a draw that
+           is currently awaited is cancelled (woken up).
+        2. Unregister the canvas and close the native canvas and the context.
+        3. Close the event emitter. The "close" event is emitted to the
+           handlers that are registered at this point, before the event
+           system releases them.
+
+        Calling this method more than once is a no-op: the "close" event is
+        emitted exactly once, and no exception is raised on later calls. If
+        closing the native canvas or the context raises, the event system is
+        still closed properly, and the first error is raised afterwards.
+        """
         # Note that this function may be called multiple times, and may even be re-entered.
         if self.__is_closed:
             return
         self.__is_closed = True
         errors = []
+        # Stop the scheduler first: it must not request any more draws while we
+        # tear down the native canvas. Stopping also wakes a scheduler task that
+        # is waiting for a draw to be presented, so closing cannot hang there.
+        scheduler, self.__scheduler = self.__scheduler, None
+        if scheduler is not None:
+            try:
+                scheduler.stop()
+            except Exception as err:
+                errors.append(err)
         # Unregister
         loop = None
         if self._rc_canvas_group is not None:
@@ -701,8 +759,13 @@ class BaseRenderCanvas:
         except Exception as err:
             errors.append(err)
         self._canvas_context = None
-        # Close the event at least after get_closed() would return True
-        self._events.close()
+        # Close the event emitter last. This emits the "close" event to the
+        # handlers that are registered right now, before the emitter releases
+        # them and its pending events.
+        try:
+            self._events.close()
+        except Exception as err:
+            errors.append(err)
         # Stop the loop if this was the last canvas. It's important to do now,
         # because the native loop may stop right after, giving us no flow to properly close.
         if loop is not None:

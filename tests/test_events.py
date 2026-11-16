@@ -352,5 +352,38 @@ def test_mini_benchmark():
     print(f"add_handler: {1000 * t1:0.0f} ms, emit: {1000 * t2:0.0f} ms")
 
 
+def test_events_close():
+    ee = EventEmitter()
+
+    values = []
+
+    def handler(event):
+        values.append(event["event_type"])
+
+    ee.add_handler(handler, "*")
+
+    # A pending event is dropped when closing; only the close event is emitted.
+    ee.submit({"event_type": "key_down", "value": 1})
+    ee.close()
+
+    assert ee._closed
+    assert values == ["close"]
+
+    # Closing twice does not emit the close event again.
+    ee.close()
+    assert values == ["close"]
+
+    # Submitting (even with an invalid event type) is silently ignored.
+    ee.submit({"event_type": "key_down", "value": 2})
+    ee.submit({"event_type": "not_a_valid_event_type"})
+    ee.flush()
+    assert values == ["close"]
+
+    # A handler registered after closing is never called.
+    ee.add_handler(handler, "key_down")
+    ee.emit({"event_type": "key_down", "value": 3})
+    assert values == ["close"]
+
+
 if __name__ == "__main__":
     run_tests(globals())
