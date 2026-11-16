@@ -90,7 +90,7 @@ function hash32(x) {
 //   music voices -> song buses -> musicIn -> mVol -> mDuck -> mPause -> master
 //   music sends  ------------------> musicRev -> (mirrored chain) -> reverb
 //   sfx voices   -> sfxIn -> sVol -> master ;  sfx sends -> sfxRev -> reverb
-//   loops        -> loopBus (pause mute) -> sfxIn
+//   loops        -> loopBus (pause duck) -> sfxIn
 //   voice babble -> radio EQ -> sfxIn
 //   master -> compressor (glue/limit) -> trim -> destination
 let ctx = null;
@@ -106,6 +106,7 @@ const volGain = (v) => clamp(v, 0, 1) * clamp(v, 0, 1) * 1.25; // perceptual sli
 const MUSIC_TRIM = 0.62;   // overall music level (leaves headroom for SFX)
 const SFX_TRIM = 0.9;
 const REVERB_RETURN = 2.4;
+const PAUSE_LEVEL = 0.25;  // pause ducks music and loops to the same level
 
 function mkGain(v = 1) {
   const g = ctx.createGain();
@@ -166,7 +167,7 @@ function buildGraph() {
   chain(g.sfxIn, g.sVol[0], g.master);
   chain(g.sfxRev, g.sVol[1], g.verbIn);
 
-  // Loops are muted as a group while paused.
+  // Loops are ducked as a group while paused (same level as the music).
   g.loopBus = mkGain(1);
   g.loopBus.connect(g.sfxIn);
 
@@ -887,6 +888,7 @@ class LoopSound {
     this.dead = false;
     this.stopAt = Infinity;
     this.key = '';
+    this.params = null;
     this.out = mkGain(0);
     this.out.connect(G.loopBus);
     this.nodes.push(this.out);
@@ -929,7 +931,15 @@ class LoopSound {
   }
   set(params) {
     if (this.stopped || !this.update) return;
-    this.update(params || {}, ctx.currentTime);
+    this.params = params || {};
+    this.update(this.params, ctx.currentTime);
+  }
+  // Re-apply the last parameters even when nothing changed. Used after a
+  // pause/visibility restore, when scheduled automation may have gone stale.
+  refresh() {
+    if (this.stopped || !this.update || !this.params) return;
+    this.key = '';
+    this.update(this.params, ctx.currentTime);
   }
   stop(fade) {
     if (this.stopped) return;
@@ -2280,6 +2290,22 @@ function startSong(name, fade) {
   current.schedule(now + LOOKAHEAD, now);
 }
 
+// Force every live loop to re-apply its latest parameters (see LoopSound.refresh).
+function refreshLoops() {
+  for (const l of activeLoops) { try { l.refresh(); } catch (e) { /* ignore */ } }
+}
+
+// Tab hidden -> shown: make sure the context is running and loops reflect the
+// current state rather than whatever was scheduled before the tab went away.
+// (Music needs no such nudge: the scheduler already skips overdue steps.)
+function handleVisibility() {
+  if (typeof document === 'undefined' || document.hidden || !ctx) return;
+  if (ctx.state !== 'running' && ctx.state !== 'closed') {
+    try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ }
+  }
+  refreshLoops();
+}
+
 // -----------------------------------------------------------------------------
 // 13. Public API
 // -----------------------------------------------------------------------------
@@ -2315,17 +2341,13 @@ function createContext() {
       b.start(0);
     } catch (e) { /* ignore */ }
     if (isPaused) {
-      for (const g of G.mPause) g.gain.value = 0.25;
-      G.loopBus.gain.value = 0;
+      for (const g of G.mPause) g.gain.value = PAUSE_LEVEL;
+      G.loopBus.gain.value = PAUSE_LEVEL;
     }
     timer = setInterval(tick, 25);
     if (timer && typeof timer.unref === 'function') timer.unref();
     if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
-          try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ }
-        }
-      });
+      document.addEventListener('visibilitychange', handleVisibility);
     }
   } catch (e) {
     failed = true;
@@ -2448,8 +2470,11 @@ export const AudioSys = {
     if (!ctx) return;
     try {
       const t = ctx.currentTime;
-      for (const g of G.mPause) glide(g.gain, isPaused ? 0.25 : 1, 0.08, t);
-      glide(G.loopBus.gain, isPaused ? 0 : 1, isPaused ? 0.025 : 0.08, t);
+      // Music and loops duck to the same level with the same time constant,
+      // so they fade down and come back together.
+      for (const g of G.mPause) glide(g.gain, isPaused ? PAUSE_LEVEL : 1, 0.08, t);
+      glide(G.loopBus.gain, isPaused ? PAUSE_LEVEL : 1, 0.08, t);
+      if (!isPaused) refreshLoops();
     } catch (e) { /* ignore */ }
   },
 };
@@ -2457,9 +2482,11 @@ export const AudioSys = {
 // Test/debug hooks (not used by the game).
 export const __audioInternals = {
   SONGS, SFX, LOOPS, compileSong, parseMelody, parseChord, tick,
+  refreshLoops, handleVisibility, PAUSE_LEVEL,
   get ctx() { return ctx; },
   get graph() { return G; },
   get current() { return current; },
+  get paused() { return isPaused; },
   get players() { return players; },
   get pools() { return { sfx: sfxPool, music: musicPool }; },
   get loops() { return { active: activeLoops, dying: dyingLoops }; },

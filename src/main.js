@@ -26,7 +26,7 @@ import {
   setBossHP, popText, MENU_CB, titlePressed, titleReset, updateMenus, menuBack, refreshTitle, showTitleMenu, setLoading, showResults,
   updateResults, skipResults, resetHUDCache, setGameOverText, clearMarkers,
 } from './hud.js';
-import { AudioSys } from './audio.js';
+import { AudioSys, __audioInternals } from './audio.js';
 
 // Resolve on the next animation frame, or after a short timeout when the tab is in the background.
 const nextFrame = () => new Promise(r => { let done = false; const f = () => { if (!done) { done = true; r(); } }; requestAnimationFrame(f); setTimeout(f, 60); });
@@ -97,7 +97,7 @@ async function boot() {
   enterTitle(true);
   requestAnimationFrame(loop);
   if (__DEV__) Object.assign(window, {
-    G, BOSS, WING, ship, emit, Input, POST, GFX, THREE,
+    G, BOSS, WING, ship, emit, Input, POST, GFX, THREE, __audioInternals,
     __jump: (d) => { G.run = G.run || newRun(); hideScreens(); setupStage(d, false); },
     __start: () => startMission(),
     CAMP, progress,
