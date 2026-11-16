@@ -106,6 +106,49 @@ function sheetTolerance(s: number, tolerance: number): number {
 /** Where {@link offsetStroke} keeps the width it has read while working. */
 const WIDTH_ATTRIBUTE = '__offsetStrokeWidth'
 
+/**
+ * Fills the vertices of each curve whose width was not set with the width of the nearest
+ * vertex that has one, so a missing value never reads as a pinch to zero. The distance is
+ * measured along the vertices (cyclically on a closed curve); ties take the earlier vertex.
+ * Only a curve without any width at all keeps its missing values, which then read as zero.
+ */
+function fillMissingWidths(path: Path): Path {
+	const curves = path.curves.map(curve => {
+		const values = curve.vertices.map(
+			v => v.attrs?.[WIDTH_ATTRIBUTE] as number | undefined
+		)
+		const setIndices = values
+			.map((value, index) => (typeof value === 'number' ? index : -1))
+			.filter(index => index >= 0)
+		if (setIndices.length === 0) return curve
+
+		const count = values.length
+		return {
+			...curve,
+			vertices: curve.vertices.map((vertex, index) => {
+				if (typeof values[index] === 'number') return vertex
+				let best = setIndices[0]
+				let bestDistance = Infinity
+				for (const j of setIndices) {
+					const gap = Math.abs(j - index)
+					const distance = curve.closed ? Math.min(gap, count - gap) : gap
+					if (distance < bestDistance) {
+						bestDistance = distance
+						best = j
+					}
+				}
+				const fill = values[best]
+				return tagged(vertex, {
+					...vertex.attrs,
+					[WIDTH_ATTRIBUTE]: fill as number,
+				})
+			}),
+		}
+	})
+
+	return withCurves<Path>(path, curves)
+}
+
 const TAG_OFFSET = 'offset'
 const TAG_AUX = 'aux'
 
@@ -637,7 +680,7 @@ export function offsetStroke(
 		typeof width === 'string' ? path.attrDefs?.[width] : undefined
 	const complete = completeVertexAttrs(path)
 	const withWidth = readsWidth
-		? setAttribute(complete, WIDTH_ATTRIBUTE, width)
+		? fillMissingWidths(setAttribute(complete, WIDTH_ATTRIBUTE, width))
 		: complete
 	const halfWidthAt = (vertex: Vertex) => {
 		const value = readsWidth ? vertex.attrs?.[WIDTH_ATTRIBUTE] : width
@@ -645,6 +688,7 @@ export function offsetStroke(
 	}
 
 	const sheets: PlanarCurve[] = []
+	const pinchPoints: vec2[] = []
 	let smallest = Infinity
 
 	for (const source of withWidth.curves) {
@@ -665,6 +709,14 @@ export function offsetStroke(
 				...curveSheets(curve, -d, opts)
 			)
 		} else {
+			// Interior vertices of zero width are natural pinch points; on an open curve the
+			// ends taper there as well, but there the two faces already close the outline.
+			curve.vertices.forEach((vertex, i) => {
+				if (halfWidthAt(vertex) !== 0) return
+				if (!curve.closed && (i === 0 || i === curve.vertices.length - 1))
+					return
+				pinchPoints.push(vertex.point)
+			})
 			sheets.push(
 				...variableCurveSheets(curve, 1, opts, widthDef),
 				...variableCurveSheets(curve, -1, opts, widthDef)
@@ -712,9 +764,132 @@ export function offsetStroke(
 	})
 
 	const result = withCurves<Path>(path, curves)
-	return readsWidth
+	const cleaned = readsWidth
 		? deleteAttribute(result, WIDTH_ATTRIBUTE, {level: 'vertex'})
 		: result
+	return readsWidth ? spliceZeroPinches(cleaned, pinchPoints) : cleaned
+}
+
+/** The largest coordinate magnitude on the path, used to scale geometric tolerances. */
+function pathExtent(path: Path): number {
+	let extent = 0
+	for (const curve of path.curves) {
+		for (const {point} of curve.vertices) {
+			extent = Math.max(extent, Math.abs(point[0]), Math.abs(point[1]))
+		}
+	}
+	return Math.max(extent, 1)
+}
+
+/**
+ * Merges the closed loops that only touch at a zero-width vertex into a single
+ * self-touching closed curve. At such a vertex the two offset faces meet at the vertex
+ * itself, so the boolean engine, which links edges through shared nodes, hands back two
+ * loops meeting at one point. Splicing them at the pinch restores the natural outline:
+ * the vertex is visited twice and no cap, gap or reverse spike is introduced.
+ */
+function spliceZeroPinches(path: Path, pinchPoints: vec2[]): Path {
+	if (pinchPoints.length === 0 || path.curves.length <= 1) return path
+
+	const tolerance = 1e-7 * pathExtent(path)
+	const keyOf = (point: vec2) =>
+		pinchPoints.reduce(
+			(best, p, i) =>
+				vec2.distance(p, point) < vec2.distance(pinchPoints[best], point)
+					? i
+					: best,
+			0
+		)
+	const atPinch = (point: vec2) =>
+		pinchPoints.some(p => vec2.distance(p, point) <= tolerance)
+
+	// Union-find over the loops, joined whenever two of them pass through the same pinch.
+	const parent = path.curves.map((_, i) => i)
+	const find = (i: number): number => {
+		while (parent[i] !== i) {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	const merge = (a: number, b: number) => {
+		parent[find(a)] = find(b)
+	}
+
+	const owners = new Map<number, number[]>()
+	path.curves.forEach((curve, curveIndex) => {
+		for (const vertex of curve.vertices) {
+			if (!atPinch(vertex.point)) continue
+			const key = keyOf(vertex.point)
+			const list = owners.get(key)
+			if (list) {
+				for (const other of list) merge(curveIndex, other)
+				list.push(curveIndex)
+			} else {
+				owners.set(key, [curveIndex])
+			}
+		}
+	})
+
+	const groups = new Map<number, number[]>()
+	path.curves.forEach((_, i) => {
+		const root = find(i)
+		const list = groups.get(root)
+		if (list) list.push(i)
+		else groups.set(root, [i])
+	})
+
+	const out: Curve[] = []
+	for (const indices of groups.values()) {
+		if (indices.length === 1) {
+			out.push(path.curves[indices[0]])
+			continue
+		}
+		out.push(
+			spliceLoops(
+				indices.map(i => path.curves[i]),
+				tolerance
+			)
+		)
+	}
+	return withCurves<Path>(path, out)
+}
+
+/** Concatenates closed loops that share a pinch point into one self-touching loop. */
+function spliceLoops(curves: Curve[], tolerance: number): Curve {
+	let merged = curves[0]
+
+	for (let k = 1; k < curves.length; k++) {
+		const next = curves[k]
+		const jointA = merged.vertices.findIndex(v =>
+			next.vertices.some(w => vec2.distance(v.point, w.point) <= tolerance)
+		)
+		if (jointA < 0) {
+			// No shared point: leave the loop untouched rather than force a connection
+			merged = {
+				vertices: [...merged.vertices, ...next.vertices],
+				closed: true,
+			}
+			continue
+		}
+		const jointB = next.vertices.findIndex(
+			v => vec2.distance(v.point, merged.vertices[jointA].point) <= tolerance
+		)
+		// Rotate each loop so its shared vertex is first, then drop the duplicated joint
+		const rotate = (curve: Curve, index: number): Vertex[] => [
+			curve.vertices[index],
+			...curve.vertices.slice(index + 1),
+			...curve.vertices.slice(0, index),
+		]
+		const a = rotate(merged, jointA)
+		const b = rotate(next, jointB)
+		merged = {
+			vertices: [...a, ...b.slice(1)],
+			closed: true,
+		}
+	}
+
+	return merged
 }
 
 /** The sheets of one side of a curve whose stroke width changes along the way. */

@@ -812,4 +812,127 @@ describe('offsetStroke with varying widths', () => {
 		const p = Path.setAttribute(Path.line([10, 50], [90, 50]), 'w', 4)
 		expect(JSON.stringify(Path.offsetStroke(p, 'w'))).not.toContain('__')
 	})
+
+	it('closes an open curve whose both ends taper to zero, with no end caps', () => {
+		const p: Path = {
+			curves: [
+				{
+					closed: false,
+					vertices: [
+						{command: 'L', point: [0, 0], attrs: {w: 0}},
+						{command: 'L', point: [50, 0], attrs: {w: 10}},
+						{command: 'L', point: [100, 0], attrs: {w: 0}},
+					],
+				},
+			],
+		}
+		const butt = Path.offsetStroke(p, 'w')
+		const round = Path.offsetStroke(p, 'w', {
+			lineCap: 'round',
+			lineJoin: 'round',
+		})
+		// One closed outline whose tips are the two zero-width end points
+		expect(butt.curves.length).toBe(1)
+		expect(butt.curves[0].closed).toBe(true)
+		expect(
+			butt.curves[0].vertices.some(v => vec2.distance(v.point, [0, 0]) < 1e-6)
+		).toBe(true)
+		expect(
+			butt.curves[0].vertices.some(v => vec2.distance(v.point, [100, 0]) < 1e-6)
+		).toBe(true)
+		// No caps are generated at the zero ends, so the cap style changes nothing
+		expect(Math.abs(Path.area(round))).toBeCloseTo(
+			Math.abs(Path.area(Path.offsetStroke(p, 'w', {lineJoin: 'round'}))),
+			6
+		)
+	})
+
+	it('keeps a closed curve with one zero-width vertex a single closed outline', () => {
+		const p: Path = {
+			curves: [
+				{
+					closed: true,
+					vertices: [
+						{command: 'L', point: [0, 0], attrs: {w: 0}},
+						{command: 'L', point: [50, 0], attrs: {w: 10}},
+						{command: 'L', point: [50, 50], attrs: {w: 10}},
+						{command: 'L', point: [0, 50], attrs: {w: 10}},
+					],
+				},
+			],
+		}
+		for (const lineJoin of ['miter', 'round', 'bevel'] as const) {
+			const q = Path.offsetStroke(p, 'w', {lineJoin})
+			expect(q.curves.length).toBe(1)
+			expect(q.curves[0].closed).toBe(true)
+			// the zero-width vertex is part of the boundary; no gap opens around it
+			expect(
+				q.curves[0].vertices.some(v => vec2.distance(v.point, [0, 0]) < 1e-6)
+			).toBe(true)
+		}
+	})
+
+	it('joins the two lobes of an interior zero-width vertex into one outline', () => {
+		const p: Path = {
+			curves: [
+				{
+					closed: false,
+					vertices: [
+						{command: 'L', point: [0, 0], attrs: {w: 10}},
+						{command: 'L', point: [50, 0], attrs: {w: 0}},
+						{command: 'L', point: [100, 0], attrs: {w: 10}},
+					],
+				},
+			],
+		}
+		const q = Path.offsetStroke(p, 'w')
+		expect(q.curves.length).toBe(1)
+		expect(q.curves[0].closed).toBe(true)
+		expect(inside(q, [25, 0])).toBe(true)
+		expect(inside(q, [75, 0])).toBe(true)
+	})
+
+	it('uses the nearest set width for vertices that have none', () => {
+		const p: Path = {
+			curves: [
+				{
+					closed: false,
+					vertices: [
+						{command: 'L', point: [0, 0], attrs: {w: 10}},
+						{command: 'L', point: [40, 0]},
+						{command: 'L', point: [60, 0]},
+						{command: 'L', point: [100, 0], attrs: {w: 10}},
+					],
+				},
+			],
+		}
+		const q = Path.offsetStroke(p, 'w')
+		// The missing vertices take the nearest value (10), so this is a uniform stroke
+		expect(q.curves.length).toBe(1)
+		expect(Math.abs(Path.area(q))).toBeCloseTo(1000, 6)
+		expect(inside(q, [50, 4])).toBe(true)
+		expect(inside(q, [50, 6])).toBe(false)
+	})
+
+	it('treats a function returning undefined as a missing, not zero, width', () => {
+		const p = Path.polyline([0, 0], [40, 0], [60, 0], [100, 0])
+		const width = (v: {point: vec2}) =>
+			v.point[0] === 40 || v.point[0] === 60 ? undefined : 10
+		const q = Path.offsetStroke(p, width as never)
+		expect(q.curves.length).toBe(1)
+		expect(Math.abs(Path.area(q))).toBeCloseTo(1000, 6)
+	})
+
+	it('keeps an all-positive stroke identical whether the width is uniform or per-vertex', () => {
+		const poly = Path.polyline([0, 0], [40, 40], [80, 0], [120, 40])
+		const numeric = Path.offsetStroke(poly, 8, {lineJoin: 'round'})
+		const attributed = Path.offsetStroke(Path.setAttribute(poly, 'w', 8), 'w', {
+			lineJoin: 'round',
+		})
+		expect(attributed.curves.length).toBe(numeric.curves.length)
+		expect(Math.abs(Path.area(attributed))).toBeCloseTo(
+			Math.abs(Path.area(numeric)),
+			6
+		)
+	})
 })
