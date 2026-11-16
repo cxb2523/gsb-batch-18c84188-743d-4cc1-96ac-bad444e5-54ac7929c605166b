@@ -122,6 +122,20 @@ function textAnchorX(entity, scale) {
     return boxLeft;
 }
 
+// Regra única de visibilidade de texto no zoom (LOD), compartilhada por textos soltos,
+// textos de cota (dimension) e filhos de bloco (insert): abaixo de 0.75px o texto some;
+// entre 0.75px e 3.5px vira placeholder (barras, sem o motor de fontes); acima disso
+// desenha os glifos. Altura exatamente no limiar conta como visível. Entidade selecionada
+// ou em hover (forceDetail) sempre desenha o texto completo, em qualquer zoom.
+export const TEXT_MIN_PX = 0.75;
+export const TEXT_GREEK_PX = 3.5;
+export function textVisibility(screenPx, { forceDetail = false } = {}) {
+    if (forceDetail) return 'full';
+    if (screenPx < TEXT_MIN_PX) return 'hidden';
+    if (screenPx < TEXT_GREEK_PX) return 'placeholder';
+    return 'full';
+}
+
 export class Renderer {
     constructor(canvas, viewport, { webglCanvas = null } = {}) {
         this.canvas = canvas;
@@ -206,8 +220,7 @@ export class Renderer {
             // são descartadas para evitar engasgos e saturação da fila de renderização.
             if (!selected && !hovered) {
                 if (entity.type === 'text') {
-                    const px = (entity.height || 2.5) * viewport.scale;
-                    if (px < 0.75) return;
+                    if (textVisibility((entity.height || 2.5) * viewport.scale) === 'hidden') return;
                 } else if (entity.type === 'point') {
                     const p = entity.position ?? entity.point;
                     if (!p || !pointInBox(p, visible)) return;
@@ -229,6 +242,8 @@ export class Renderer {
                 dashed: selected,
                 dash: this.dashFor(lineType),
                 alpha: 1,
+                // Seleção/hover desenha sempre completo (inclusive textos de cota e filhos de bloco).
+                forceDetail: selected || hovered,
             };
 
             // Batching para primitivas vetoriais regulares (linhas, círculos, arcos, polilinhas não selecionadas)
@@ -480,7 +495,7 @@ export class Renderer {
             const box = entityBox(entity);
             const screenW = (box.maxX - box.minX) * this.viewport.scale;
             const screenH = (box.maxY - box.minY) * this.viewport.scale;
-            if (!style.dashed && screenW < 0.4 && screenH < 0.4) return;
+            if (!style.dashed && !style.forceDetail && screenW < 0.4 && screenH < 0.4) return;
             expandInsert(entity).forEach(child=>{
                 const layer=this.currentDoc?layerOf(this.currentDoc,child.layer):null;if(layer?.visible===false)return;
                 const color=this.currentDoc?this.entityDisplayColor(entityColor(child,this.currentDoc)):style.color;
@@ -785,20 +800,25 @@ export class Renderer {
             ctx.closePath();
             ctx.fill();
         });
+        // O texto da cota segue a mesma regra de visibilidade dos demais textos (textVisibility
+        // dentro de drawText); forceDetail da seleção/hover chega pelo style. Linhas e setas
+        // acima nunca são afetadas pelo culling do texto.
         g.texts.forEach((t) => this.drawText(t, { ...style, dashed: false }));
     }
 
     drawText(entity, style) {
         const { ctx, viewport } = this;
         const px = (entity.height || 2.5) * viewport.scale;
-        if (px < 0.75) return;
+        // Mesma regra para texto solto, texto de cota e filho de bloco (ver textVisibility).
+        const visibility = textVisibility(px, { forceDetail: Boolean(style?.forceDetail) });
+        if (visibility === 'hidden') return;
         const p = viewport.worldToScreen(entity.position);
         ctx.save();
         ctx.translate(p.x, p.y);
         ctx.rotate(-((entity.rotation ?? 0) * Math.PI) / 180);
         if (entity.mirrored) ctx.scale(-1, 1);
         ctx.fillStyle = style.color;
-        if (px < 3.5) {
+        if (visibility === 'placeholder') {
             // Text Greeking (padrão CAD): abaixo de 3.5px os glifos são ilegíveis.
             // Barra por linha, sem o motor de fontes, no mesmo lugar e ângulo do texto.
             const greekLines = typeof entity.text === 'string' ? entity.text.split('\n') : ['    '];
