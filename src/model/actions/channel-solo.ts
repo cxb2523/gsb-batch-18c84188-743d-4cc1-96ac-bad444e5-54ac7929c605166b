@@ -22,84 +22,41 @@
  */
 import type { Store } from "vuex";
 import type { IUndoRedoState } from "@/model/factories/history-state-factory";
-import type { Instrument } from "@/model/types/instrument";
 import AudioService from "@/services/audio-service";
 import type { EffluxState } from "@/store";
 
-type InstrumentState = {
-    muted: boolean;
-    solo: boolean;
-};
-
 export default function( store: Store<EffluxState>, instrumentIndex: number, solo: boolean ): IUndoRedoState {
-    const { instruments } = store.getters.activeSong;
-    const instrument      = instruments[ instrumentIndex ];
+    const instrument = store.getters.activeSong.instruments[ instrumentIndex ];
 
-    const volume   = instrument.volume;
     const wasSolod = instrument.solo;
     const wasMuted = !!instrument.muted;
 
-    const instrumentStates: InstrumentState[] = instruments.reduce(( acc: InstrumentState[], instrument: Instrument, index: number ) => {
-        acc[ index ] = {
-            muted : instrument.muted,
-            solo  : instrument.solo
-        };
-        return acc;
-    }, []);
-
-    // whether another instrument also has solo mode activated
-    const hadExistingSolo = instrumentStates.some(({ solo }, index ) => index !== instrumentIndex && !!solo );
-
-
-    const handleChange = ( newValue: boolean ): void => {
-        const isUndo = newValue === wasSolod;
-        // update volumes of all other instruments
-        store.getters.activeSong.instruments.forEach(( instrument: Instrument, index: number ): void => {
-            if ( index === instrumentIndex ) {
-                return;
-            }
-            const oldState = instrumentStates[ index ];
-            let volume = 0;
-            if ( !oldState.muted ) {
-                if ( newValue ) {
-                    volume = oldState.solo ? instrument.volume : 0;
-                } else {
-                    volume = oldState.solo || !hadExistingSolo ? instrument.volume : 0;
-                }
-            }
-            if ( isUndo ) {
-                store.commit( "updateInstrument", { instrumentIndex: index, prop: "solo", value: oldState.solo });
-            }
-            AudioService.adjustInstrumentVolume( index, volume );
-        });
-        // update volume of this instrument
-        if ( newValue ) {
-            if ( wasMuted ) {
-                // activating solo always unmutes instrument
-                store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: false });
-            }
-            // as multiple channels can enable solo, force volume on for this channel
-            AudioService.adjustInstrumentVolume( instrumentIndex, volume );
-        } else {
-            if ( wasMuted ) {
-                store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: true });
-            }
-            AudioService.adjustInstrumentVolume( instrumentIndex, wasMuted || hadExistingSolo ? 0 : volume );
-        }
+    // recalculate the output gain of all instruments so the new mute/solo
+    // state is immediately reflected in the audible (and recorded) output
+    const updateOutputGains = (): void => {
+        AudioService.applyMuteSoloStates( store.getters.activeSong.instruments );
     };
 
     // update function
 
     const commit = () => {
         store.commit( "updateInstrument", { instrumentIndex, prop: "solo", value: solo });
-        handleChange( solo );
+        if ( solo && wasMuted ) {
+            // activating solo always unmutes instrument
+            store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: false });
+        }
+        updateOutputGains();
     };
     commit();
 
     return {
         undo(): void {
             store.commit( "updateInstrument", { instrumentIndex, prop: "solo", value: wasSolod });
-            handleChange( wasSolod );
+            if ( solo && wasMuted ) {
+                // restore the muted state that was unset by activating solo
+                store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: true });
+            }
+            updateOutputGains();
         },
         redo: commit
     };

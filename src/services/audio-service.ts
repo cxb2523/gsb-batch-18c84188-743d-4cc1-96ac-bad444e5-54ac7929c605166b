@@ -28,6 +28,7 @@ import ModuleFactory from "@/model/factories/module-factory";
 import { ACTION_NOTE_ON } from "@/model/types/audio-event";
 import { applyRouting } from "./audio/module-router";
 import { applyModuleParamChange, getCurrentValueForParam } from "./audio/module-automation";
+import { calculateOutputGain, hasSoloInstrument } from "./audio/mixer-util";
 import type { ExternalEventCallback } from "./audio/module-automation";
 import type OutputRecorder from "./audio/output-recorder";
 import type WaveTables from "./audio/wave-tables";
@@ -190,12 +191,11 @@ export const cacheCustomTables = ( instruments: Instrument[]): void => {
 export const applyModules = ( song: EffluxSong, connectAnalysers = false ): void => {
     useAnalysers = connectAnalysers;
     // first check if one of the channels is configured to operate solo
-    const hasSoloChannel = song.instruments.find( instrument => !!instrument.solo );
+    const songHasSolo = hasSoloInstrument( song.instruments );
     song.instruments.forEach(( instrument, instrumentIndex ) => {
         const instrumentModules = instrumentModulesList[ instrumentIndex ];
-        const { muted, solo } = instrument;
 
-        instrumentModules.output.gain.value = muted || ( hasSoloChannel && !solo ) ? 0 : instrument.volume;
+        instrumentModules.output.gain.value = calculateOutputGain( instrument, songHasSolo );
 
         if ( instrumentModules.panner ) {
             const panning = instrument.panning ? parseFloat( instrument.panning.toString() ) : 0;
@@ -205,6 +205,20 @@ export const applyModules = ( song: EffluxSong, connectAnalysers = false ): void
         ModuleFactory.applyConfiguration( "delay",     instrumentModules, instrument.delay,     masterBus );
         ModuleFactory.applyConfiguration( "eq",        instrumentModules, instrument.eq,        masterBus );
         ModuleFactory.applyConfiguration( "overdrive", instrumentModules, instrument.overdrive, masterBus );
+    });
+};
+
+/**
+ * recalculate the output gain of all instrument channels to reflect the current
+ * mute/solo state of given instruments. This applies the exact same rule as
+ * applyModules() and can be invoked at runtime (e.g. when toggling mute/solo
+ * during playback) to immediately update the audible - and recordable - output
+ * of all channels, including those of currently playing notes.
+ */
+export const applyMuteSoloStates = ( instruments: Instrument[] ): void => {
+    const songHasSolo = hasSoloInstrument( instruments );
+    instruments.forEach(( instrument, instrumentIndex ) => {
+        instrumentModulesList[ instrumentIndex ].output.gain.value = calculateOutputGain( instrument, songHasSolo );
     });
 };
 
@@ -413,6 +427,7 @@ const AudioService =
     reset,
     cacheCustomTables,
     applyModules,
+    applyMuteSoloStates,
     getAudioContext,
     isRecording,
     noteOn,

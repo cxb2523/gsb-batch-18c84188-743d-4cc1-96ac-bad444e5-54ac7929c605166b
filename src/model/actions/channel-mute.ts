@@ -22,53 +22,37 @@
  */
 import type { Store } from "vuex";
 import type { IUndoRedoState } from "@/model/factories/history-state-factory";
-import type { Instrument } from "@/model/types/instrument";
 import AudioService from "@/services/audio-service";
 import type { EffluxState } from "@/store";
-
-function hasSolo( store: Store<EffluxState>, instrumentIndex: number ): boolean {
-    // whether one or more of the other channels in the songs instrument list has solo enabled
-    return store.getters.activeSong.instruments.find(( instrument: Instrument, index: number ):  boolean => {
-        return index !== instrumentIndex && instrument.solo;
-    });
-}
 
 export default function( store: Store<EffluxState>, instrumentIndex: number, mute: boolean ): IUndoRedoState {
     const instrument = store.getters.activeSong.instruments[ instrumentIndex ];
 
     const wasMuted = !!instrument.muted;
     const wasSolod = instrument.solo;
-    const volume   = instrument.volume;
 
-    // whether another instrument was solod
-    const hadExistingSolo = hasSolo( store, instrumentIndex );
-
-    const handleChange = ( targetValue: boolean ): void => {
-        let targetVolume = targetValue ? 0 : volume;
-        const isUndo = targetValue === wasMuted;
-        if ( targetValue ) {
-            if ( wasSolod ) {
-                // activating mute always unsolos instrument
-                store.commit( "updateInstrument", { instrumentIndex, prop: "solo", value: false });
-            }
-        } else if ( hadExistingSolo && isUndo ) {
-            targetVolume = 0;
-        }
-        AudioService.adjustInstrumentVolume( instrumentIndex, targetVolume );
+    // recalculate the output gain of all instruments so the new mute/solo
+    // state is immediately reflected in the audible (and recorded) output
+    const updateOutputGains = (): void => {
+        AudioService.applyMuteSoloStates( store.getters.activeSong.instruments );
     };
 
     // update function
 
     const commit = () => {
         store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: mute });
-        handleChange( mute );
+        if ( mute && wasSolod ) {
+            // activating mute always unsolos instrument
+            store.commit( "updateInstrument", { instrumentIndex, prop: "solo", value: false });
+        }
+        updateOutputGains();
     };
     commit();
 
     return {
         undo(): void {
             store.commit( "updateInstrument", { instrumentIndex, prop: "muted", value: wasMuted });
-            handleChange( wasMuted )
+            updateOutputGains();
         },
         redo: commit
     };
