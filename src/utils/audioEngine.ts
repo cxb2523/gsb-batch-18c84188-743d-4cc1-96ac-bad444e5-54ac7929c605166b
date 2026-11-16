@@ -23,13 +23,29 @@ class AudioEngine {
   private currentSpokenWord: string = '';
   private fallbackWordTimer: number | null = null;
   private hasReceivedNativeBoundary: boolean = false;
+  // Voiceover mute switch. While true, no TTS utterance or custom voice audio
+  // may start. Background music and UI sound effects are intentionally unaffected.
+  private voiceMuted = false;
 
   public getCurrentTrack(): string {
     return this.currentTrack;
   }
 
   public isSpeaking(): boolean {
-    return Boolean(this.speechUtterance);
+    return Boolean(this.speechUtterance) || Boolean(this.customAudio);
+  }
+
+  public isVoiceMuted(): boolean {
+    return this.voiceMuted;
+  }
+
+  // Toggle the voiceover mute switch. Enabling it immediately stops any
+  // in-flight narration so no voice can keep playing after muting.
+  public setVoiceMuted(muted: boolean) {
+    this.voiceMuted = muted;
+    if (muted) {
+      this.stopSpeaking();
+    }
   }
 
   public addWordListener(listener: WordBoundaryListener): () => void {
@@ -260,9 +276,16 @@ class AudioEngine {
     onWordSpoken?: (word: string, charIndex: number, wordIndex: number) => void,
     onEnd?: () => void,
     rate: number = 1.0,
-    pitch: number = 1.0
+    pitch: number = 1.0,
+    startWordIndex: number = 0
   ) {
     if (!('speechSynthesis' in window)) {
+      if (onEnd) onEnd();
+      return;
+    }
+
+    // Muted: never start synthesis. Signal completion so callers reset state.
+    if (this.voiceMuted) {
       if (onEnd) onEnd();
       return;
     }
@@ -278,7 +301,12 @@ class AudioEngine {
     const trimmedText = text.trim();
     const wordsList = trimmedText.split(/\s+/).filter(Boolean);
 
-    const utterance = new SpeechSynthesisUtterance(trimmedText);
+    // Resume support: skip the words that precede the current playback position.
+    const safeStart = Math.max(0, Math.min(startWordIndex, wordsList.length - 1));
+    const spokenText = safeStart > 0 ? wordsList.slice(safeStart).join(' ') : trimmedText;
+    const spokenWords = safeStart > 0 ? spokenText.split(/\s+/).filter(Boolean) : wordsList;
+
+    const utterance = new SpeechSynthesisUtterance(spokenText);
     utterance.rate = Math.max(0.7, Math.min(1.5, rate));
     utterance.pitch = Math.max(0.8, Math.min(1.3, pitch));
 
@@ -306,18 +334,19 @@ class AudioEngine {
         }
         return;
       }
-      if (fallbackIdx < wordsList.length) {
-        const spokenWord = wordsList[fallbackIdx];
+      if (fallbackIdx < spokenWords.length) {
+        const spokenWord = spokenWords[fallbackIdx];
+        const absoluteWordIndex = safeStart + fallbackIdx;
         if (onWordSpoken) {
-          onWordSpoken(spokenWord, 0, fallbackIdx);
+          onWordSpoken(spokenWord, 0, absoluteWordIndex);
         }
-        this.notifyWord(spokenWord, 0, fallbackIdx);
+        this.notifyWord(spokenWord, 0, absoluteWordIndex);
         fallbackIdx++;
       }
     }, intervalMs);
 
     utterance.onboundary = (event) => {
-      if (event.name === 'word') {
+      if (event.name === 'word' && this.speechUtterance === utterance) {
         this.hasReceivedNativeBoundary = true;
         if (this.fallbackWordTimer) {
           clearInterval(this.fallbackWordTimer);
@@ -325,18 +354,18 @@ class AudioEngine {
         }
 
         const charIdx = event.charIndex;
-        const slice = trimmedText.slice(charIdx);
+        const slice = spokenText.slice(charIdx);
         const match = slice.match(/^[\w'-]+/);
         const spokenWord = match
           ? match[0]
           : event.charLength
-          ? trimmedText.substring(charIdx, charIdx + event.charLength)
+          ? spokenText.substring(charIdx, charIdx + event.charLength)
           : '';
 
-        // Calculate 0-based word index
-        const textBefore = trimmedText.slice(0, charIdx);
+        // Calculate 0-based word index, offset by the words skipped on resume
+        const textBefore = spokenText.slice(0, charIdx);
         const wordsBefore = textBefore.trim() ? textBefore.trim().split(/\s+/).filter(Boolean) : [];
-        const wordIndex = wordsBefore.length;
+        const wordIndex = safeStart + wordsBefore.length;
 
         if (onWordSpoken) {
           onWordSpoken(spokenWord, charIdx, wordIndex);
@@ -346,6 +375,8 @@ class AudioEngine {
     };
 
     utterance.onend = () => {
+      // Ignore callbacks from an utterance that was already canceled/replaced.
+      if (this.speechUtterance !== utterance) return;
       if (this.fallbackWordTimer) {
         clearInterval(this.fallbackWordTimer);
         this.fallbackWordTimer = null;
@@ -357,6 +388,7 @@ class AudioEngine {
     };
 
     utterance.onerror = () => {
+      if (this.speechUtterance !== utterance) return;
       if (this.fallbackWordTimer) {
         clearInterval(this.fallbackWordTimer);
         this.fallbackWordTimer = null;
@@ -373,7 +405,12 @@ class AudioEngine {
 
   private customAudio: HTMLAudioElement | null = null;
 
-  public playCustomAudio(url: string, onEnd?: () => void) {
+  public playCustomAudio(url: string, onEnd?: () => void, startTimeSec: number = 0) {
+    // Muted: never start custom voice audio. Signal completion like a skipped clip.
+    if (this.voiceMuted) {
+      if (onEnd) onEnd();
+      return;
+    }
     this.stopSpeaking();
     this.setDucking(true);
     if (this.customAudio) {
@@ -382,18 +419,31 @@ class AudioEngine {
     }
     const audio = new Audio(url);
     audio.onended = () => {
+      if (this.customAudio !== audio) return;
       this.setDucking(false);
       this.customAudio = null;
       this.notifyWord('', -1, -1);
       if (onEnd) onEnd();
     };
     audio.onerror = () => {
+      if (this.customAudio !== audio) return;
       this.setDucking(false);
       this.customAudio = null;
       this.notifyWord('', -1, -1);
       if (onEnd) onEnd();
     };
     this.customAudio = audio;
+    if (startTimeSec > 0) {
+      const seekTo = () => {
+        try {
+          audio.currentTime = startTimeSec;
+        } catch {
+          // Metadata not ready yet: play from the start as a fallback.
+        }
+        audio.removeEventListener('loadedmetadata', seekTo);
+      };
+      audio.addEventListener('loadedmetadata', seekTo);
+    }
     audio.play().catch(() => {});
   }
 

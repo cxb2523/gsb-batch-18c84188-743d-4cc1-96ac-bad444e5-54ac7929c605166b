@@ -71,6 +71,119 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const duration = scene.durationSeconds || 7;
 
+  // Refs mirror the latest control values so the playback loop and narration
+  // starter always read current state without re-running (and restarting speech)
+  // when the user toggles mute, music, speed, or switches scenes.
+  const isVoiceMutedRef = useRef(isVoiceMuted);
+  isVoiceMutedRef.current = isVoiceMuted;
+  const isMusicEnabledRef = useRef(isMusicEnabled);
+  isMusicEnabledRef.current = isMusicEnabled;
+  const playbackSpeedRef = useRef(playbackSpeed);
+  playbackSpeedRef.current = playbackSpeed;
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
+  const musicTrackRef = useRef(musicTrack);
+  musicTrackRef.current = musicTrack;
+  const voiceRateRef = useRef(voiceRate);
+  voiceRateRef.current = voiceRate;
+  const voicePitchRef = useRef(voicePitch);
+  voicePitchRef.current = voicePitch;
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+  // Keep a ref to the latest time so the rAF loop and narration starter do not
+  // need to rely on stale state inside callbacks.
+  const currentTimeRef = useRef<number>(0);
+  currentTimeRef.current = currentTime;
+
+  // Keep the engine-level mute switch in sync. While muted, the engine refuses
+  // every narration/custom-audio start request, so the toggle stays effective
+  // across scene changes, pause/resume cycles and effect re-runs.
+  useEffect(() => {
+    audioEngine.setVoiceMuted(isVoiceMuted);
+    return () => {
+      if (audioEngine.isVoiceMuted()) {
+        audioEngine.setVoiceMuted(false);
+      }
+    };
+  }, [isVoiceMuted]);
+
+  // Set by the scrubber; the pending-seek effect below consumes it after commit
+  // so narration restarts with all refs reflecting the latest mute/scene state.
+  const pendingSeekRef = useRef<number | null>(null);
+
+  // Clear any spoken narration and subtitle highlight. Music keeps playing since
+  // it is governed by its own toggle.
+  const clearNarration = useCallback(() => {
+    setLiveWordIndex(-1);
+    audioEngine.stopSpeaking();
+  }, []);
+
+  // Proportional word position used both for muted-mode subtitle estimation and
+  // for deciding where a resumed narration should pick up.
+  const getWordIndexForTime = useCallback(
+    (time: number, activeScene: Scene) => {
+      const words = (activeScene.narration || '').split(/\s+/).filter(Boolean);
+      if (words.length === 0) return 0;
+      const progress = Math.min(0.999, Math.max(0, time / Math.max(0.1, activeScene.durationSeconds || durationRef.current)));
+      return Math.min(words.length - 1, Math.floor(progress * words.length));
+    },
+    []
+  );
+
+  // Start the scene's voiceover at the current playback position. When muted,
+  // nothing is started: subtitles fall back to the proportional time estimate.
+  const startNarrationAtCurrentPosition = useCallback(
+    (time: number) => {
+      const activeScene = sceneRef.current;
+      if (isVoiceMutedRef.current) {
+        setLiveWordIndex(-1);
+        return;
+      }
+      const startWordIndex = getWordIndexForTime(time, activeScene);
+      if (activeScene.customAudioUrl) {
+        audioEngine.playCustomAudio(activeScene.customAudioUrl, undefined, time);
+      } else if (activeScene.narration) {
+        audioEngine.speakNarration(
+          activeScene.narration,
+          (_word, _charIdx, wordIdx) => {
+            setLiveWordIndex(wordIdx);
+          },
+          () => {
+            setLiveWordIndex(-1);
+          },
+          voiceRateRef.current,
+          voicePitchRef.current,
+          startWordIndex
+        );
+      }
+    },
+    [getWordIndexForTime]
+  );
+
+  // React 19 batches the mute button's state updates, so refs still hold the
+  // old value inside the click handler. This effect runs after the committed
+  // render, guaranteeing the engine switch is already off before narration is
+  // (re)started at the current playback position — never from the beginning.
+  useEffect(() => {
+    if (!isVoiceMuted && isPlaying) {
+      startNarrationAtCurrentPosition(currentTimeRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVoiceMuted]);
+
+  // Consume scrubber requests while playing: restart narration aligned to the
+  // new time. When muted this only clears the highlight; time-based estimation
+  // takes over immediately because the engine refuses the start request.
+  useEffect(() => {
+    if (pendingSeekRef.current === null) return;
+    const seekTime = pendingSeekRef.current;
+    pendingSeekRef.current = null;
+    if (isPlaying) {
+      clearNarration();
+      startNarrationAtCurrentPosition(seekTime);
+    }
+  }, [currentTime, isPlaying, clearNarration, startNarrationAtCurrentPosition]);
+
   // Render canvas whenever state changes
   const redrawCanvas = useCallback(
     (time: number, selectedId: string | null) => {
@@ -93,62 +206,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     redrawCanvas(currentTime, selectedElementId);
   }, [redrawCanvas, currentTime, selectedElementId]);
 
-  // Reset playback time and live subtitle sync when scene changes
+  // Reset playback time and clear any narration/highlight when scene changes,
+  // so a previous scene's voice or subtitle highlight can never carry over.
   useEffect(() => {
     setCurrentTime(0);
-    setLiveWordIndex(-1);
-  }, [scene.id]);
+    clearNarration();
+  }, [scene.id, clearNarration]);
 
-  // Keep a ref to the latest time so the rAF loop does not need to call parent callbacks inside setState
-  const currentTimeRef = useRef<number>(0);
-  currentTimeRef.current = currentTime;
-
-  // Animation frame loop for smooth playback
+  // Animation frame loop for smooth playback.
+  // Only isPlaying starts/stops the loop. Mute, music, speed and scene changes
+  // are read through refs so toggling them never restarts narration from zero.
   useEffect(() => {
     let animId: number;
     let lastTimestamp: number | null = null;
 
     if (isPlaying) {
-      if (isMusicEnabled) {
-        audioEngine.startMusic(musicTrack);
+      if (isMusicEnabledRef.current) {
+        audioEngine.startMusic(musicTrackRef.current);
       }
 
-      // Trigger voiceover (custom uploaded audio or Web Speech synthesis)
-      if (!isVoiceMuted) {
-        if (scene.customAudioUrl) {
-          audioEngine.playCustomAudio(scene.customAudioUrl);
-        } else if (scene.narration) {
-          audioEngine.speakNarration(
-            scene.narration,
-            (_word, _charIdx, wordIdx) => {
-              setLiveWordIndex(wordIdx);
-            },
-            () => {
-              setLiveWordIndex(-1);
-            },
-            voiceRate,
-            voicePitch
-          );
-        }
-      }
+      // Voiceover starts at the current playback position (resume-aware). When
+      // muted, the engine refuses to start anything and subtitles use time math.
+      startNarrationAtCurrentPosition(currentTimeRef.current);
 
       const loop = (timestamp: number) => {
         if (!lastTimestamp) lastTimestamp = timestamp;
         const delta = (timestamp - lastTimestamp) / 1000;
         lastTimestamp = timestamp;
 
-        const nextTime = currentTimeRef.current + delta * playbackSpeed;
+        const nextTime = currentTimeRef.current + delta * playbackSpeedRef.current;
+        const sceneDuration = sceneRef.current.durationSeconds || durationRef.current;
 
-        if (nextTime >= duration) {
+        if (nextTime >= sceneDuration) {
           if (currentSceneIndex < totalScenes - 1) {
+            // Clean up narration before the next scene mounts; its own effect
+            // starts fresh narration from time 0.
+            clearNarration();
             setCurrentTime(0);
-            setLiveWordIndex(-1);
             onNextScene();
           } else {
-            setCurrentTime(duration);
+            setCurrentTime(sceneDuration);
             setIsPlaying(false);
-            setLiveWordIndex(-1);
-            audioEngine.stopSpeaking();
+            clearNarration();
             return;
           }
         } else {
@@ -160,33 +259,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       animId = requestAnimationFrame(loop);
     } else {
-      setLiveWordIndex(-1);
-      audioEngine.stopSpeaking();
+      clearNarration();
     }
 
     return () => {
       if (animId) cancelAnimationFrame(animId);
-      setLiveWordIndex(-1);
-      audioEngine.stopSpeaking();
+      clearNarration();
     };
-  }, [
-    isPlaying,
-    playbackSpeed,
-    duration,
-    currentSceneIndex,
-    totalScenes,
-    onNextScene,
-    isMusicEnabled,
-    musicTrack,
-    isVoiceMuted,
-    scene.narration,
-    voiceRate,
-    voicePitch,
-  ]);
+  }, [isPlaying, currentSceneIndex, totalScenes, onNextScene, startNarrationAtCurrentPosition, clearNarration]);
 
   const togglePlay = () => {
-    if (currentTime >= duration) {
+    if (currentTimeRef.current >= durationRef.current) {
       setCurrentTime(0);
+      currentTimeRef.current = 0;
     }
     setIsPlaying((prev) => !prev);
   };
@@ -194,15 +279,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handleRewind = () => {
     setIsPlaying(false);
     setCurrentTime(0);
-    setLiveWordIndex(-1);
-    audioEngine.stopSpeaking();
+    currentTimeRef.current = 0;
+    clearNarration();
     audioEngine.playWhoosh();
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newTime = parseFloat(e.target.value);
     setCurrentTime(newTime);
-    if (!isPlaying) {
+    currentTimeRef.current = newTime;
+    if (isPlaying) {
+      // The pending-seek effect restarts narration at the new position after
+      // commit. While muted it only clears the highlight; time-based estimation
+      // takes over immediately.
+      pendingSeekRef.current = newTime;
+    } else {
       setLiveWordIndex(-1);
     }
   };
@@ -314,8 +405,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   if (words.length === 0) return null;
                   const progress = Math.min(0.999, Math.max(0, currentTime / Math.max(0.1, duration)));
                   const computedFallbackIdx = Math.min(words.length - 1, Math.floor(progress * words.length));
+                  // Muted playback has no real speech boundaries, so the
+                  // highlight is always the proportional time estimate. With
+                  // sound on, live word boundaries drive the highlight.
                   const activeIdx =
-                    isPlaying && liveWordIndex >= 0 && liveWordIndex < words.length
+                    isPlaying && !isVoiceMuted && liveWordIndex >= 0 && liveWordIndex < words.length
                       ? liveWordIndex
                       : computedFallbackIdx;
 
@@ -505,7 +599,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             {/* Voice Narration Audio Toggle */}
             <button
-              onClick={() => setIsVoiceMuted((v) => !v)}
+              onClick={() => {
+                const nextMuted = !isVoiceMuted;
+                setIsVoiceMuted(nextMuted);
+                if (nextMuted) {
+                  // Engine switch blocks all future starts and kills live speech;
+                  // subtitles immediately fall back to time-based estimation.
+                  audioEngine.setVoiceMuted(true);
+                  setLiveWordIndex(-1);
+                }
+                // On unmute, a dedicated effect restarts narration from the
+                // current playback position once this state update commits.
+              }}
               className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
                 isVoiceMuted
                   ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
@@ -519,12 +624,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             {/* Background Music Toggle */}
             <button
               onClick={() => {
-                if (isMusicEnabled) {
+                if (isMusicEnabledRef.current) {
                   audioEngine.stopMusic();
                   setIsMusicEnabled(false);
                 } else {
                   setIsMusicEnabled(true);
-                  if (isPlaying) audioEngine.startMusic(musicTrack);
+                  if (isPlaying) audioEngine.startMusic(musicTrackRef.current);
                 }
               }}
               className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
