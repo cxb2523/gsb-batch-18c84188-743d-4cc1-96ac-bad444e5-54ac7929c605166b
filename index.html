@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>Attractors</title>
+	<meta name="description" content="Generative art: animated attractor fields painted on a canvas.">
+	<meta name="robots" content="noindex">
+	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+	<meta name="theme-color" content="#57A3BD">
+
+	<link rel="icon" href="favicon.svg" type="image/svg+xml">
+	<link rel="icon" sizes="192x192" href="favicon-192.png">
+	<link rel="icon" sizes="32x32" href="favicon-32.png">
+
+	<style>
+		body {
+			background-color: #57A3BD;
+			margin: 0;
+			overflow: hidden;
+		}
+
+		#paint-canvas {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+		}
+
+		#settings {
+			position: absolute;
+			bottom: 0;
+			right: 0;
+			margin-right: 10px;
+			font-size: 2em;
+			opacity: 0.1;
+			cursor: pointer;
+			user-select: none;
+		}
+
+		/** Area where no particle goes, when the "no go zone" option is on. */
+		#nogo {
+			position: absolute;
+			top: 100px;
+			left: 100px;
+			width: 300px;
+			height: 200px;
+		}
+	</style>
+
+	<script type="importmap">
+	{
+		"imports": {
+			"opentype.js": "./lib/opentype.mjs",
+			"lil-gui": "./lib/lil-gui.esm.js"
+		}
+	}
+	</script>
+</head>
+<body>
+	<canvas id="paint-canvas"></canvas>
+
+	<div id="nogo"></div>
+
+	<div id="settings" title="Settings">&#9881;</div>
+
+	<script type="module" src="main.js"></script>
+</body>
+</html>
