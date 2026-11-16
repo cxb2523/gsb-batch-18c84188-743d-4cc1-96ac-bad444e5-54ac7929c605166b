@@ -6,12 +6,31 @@ const xhrMockClass = () => ({
 });
 XMLHttpRequest = jest.fn().mockImplementation(xhrMockClass);
 
-const audioMockClass = () => ({
-  addEventListener: jest.fn(),
-  load: jest.fn(),
-  pause: jest.fn(),
-  play: jest.fn(() => Promise.resolve(jest.fn())),
-});
+// every HTML5 Audio instance created by the player, so tests can drive
+// loadedmetadata / canplaythrough and inspect volume-related state
+const audioInstances = [];
+const audioMockClass = () => {
+  const listeners = {};
+  const audio = {
+    addEventListener: jest.fn((name, callback) => {
+      listeners[name] = callback;
+    }),
+    fire            : (name) => {
+      if (listeners[name]) {
+        listeners[name]();
+      }
+    },
+    load            : jest.fn(),
+    pause           : jest.fn(),
+    play            : jest.fn(() => Promise.resolve(jest.fn())),
+    duration        : 0,
+    currentTime     : 0,
+    seekable        : { length: 0 },
+    src             : '',
+  };
+  audioInstances.push(audio);
+  return audio;
+};
 Audio = jest.fn().mockImplementation(audioMockClass);
 
 const audioContextMockClass = () => ({
@@ -27,7 +46,7 @@ window = {
   AudioContext     : jest.fn().mockImplementation(audioContextMockClass),
 };
 
-const { Gapless5, LogLevel } = require('./gapless5.js');
+const { Gapless5, LogLevel, CrossfadeShape } = require('./gapless5.js');
 
 /** test data **/
 
@@ -37,6 +56,30 @@ const INIT_OPTIONS = {
   useWebAudio: false,
   useHTML5Audio: false,
 };
+const TRACK_DURATION_SEC = 100;
+
+/** helpers **/
+
+const findAudio = (audioPath) => audioInstances.find((audio) => audio.src === audioPath);
+
+// Creates a player whose first track is fully "loaded" over HTML5 Audio, so the
+// source knows its length and can be driven through fades without playback.
+const createLoadedSource = (options = {}) => {
+  const player = new Gapless5({
+    ...INIT_OPTIONS,
+    useHTML5Audio: true,
+    tracks: TRACKS,
+    ...options,
+  });
+  const source = player.playlist.sources[0];
+  const audio = findAudio(TRACKS[0]);
+  audio.duration = TRACK_DURATION_SEC;
+  audio.fire('loadedmetadata');
+  audio.fire('canplaythrough');
+  return { player: player, source: source, audio: audio };
+};
+
+const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
 
 /** test suite **/
 
@@ -352,3 +395,243 @@ describe('Gapless-5 object with load limit', () => {
     expect(loadedTracks.size).toBe(0);
   });
 });
+
+describe('Gapless-5 crossfade timing vs playbackRate', () => {
+  // Keep the math readable: with CrossfadeShape.Linear the gain is simply
+  // how far the playhead has moved through the fade window.
+  const CROSSFADE_MS = 5000;
+  const DURATION_MS = TRACK_DURATION_SEC * 1000;
+
+  // Starts the first track so the source is in Play state (needed for the
+  // ended-callback scheduling) without waiting on any real timers.
+  const playAndSettle = async(source) => {
+    source.play();
+    await flushPromises();
+    expect(source.inPlayState(true)).toBe(true);
+  };
+
+  // Delay (ms) passed to the most recent window.setTimeout call.
+  const lastTimeoutDelay = () => {
+    const calls = window.setTimeout.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][1];
+  };
+
+  let player = null;
+  let source = null;
+
+  beforeEach(() => {
+    audioInstances.length = 0;
+    window.setTimeout.mockClear();
+    window.clearTimeout.mockClear();
+    ({ player, source } = createLoadedSource({ crossfade: CROSSFADE_MS }));
+    source.setCrossfade(CROSSFADE_MS, CROSSFADE_MS);
+    player.setCrossfadeShape(CrossfadeShape.Linear);
+    expect(source.getLength()).toBe(DURATION_MS);
+  });
+
+  it('fades out over exactly crossfade ms of real time at 1.0x', () => {
+    player.setPlaybackRate(1);
+
+    // Fade-out starts exactly crossfade ms before the end of the track.
+    source.setPosition(DURATION_MS - CROSSFADE_MS, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+
+    // Halfway through the real fade window.
+    source.setPosition(DURATION_MS - (CROSSFADE_MS / 2), false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    // One ms of track position is one ms of real time at 1.0x.
+    source.setPosition(DURATION_MS - (CROSSFADE_MS / 4), false);
+    expect(source.getVolume()).toBeCloseTo(0.25, 5);
+
+    // Silent at the very end.
+    source.setPosition(DURATION_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+  });
+
+  it('fades out over exactly crossfade ms of real time at 2.0x', () => {
+    player.setPlaybackRate(2);
+
+    // At 2x, crossfade real ms cover twice as much track position.
+    source.setPosition(DURATION_MS - (CROSSFADE_MS * 2), false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+
+    // Halfway through the window in real time == halfway in track position.
+    source.setPosition(DURATION_MS - CROSSFADE_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    source.setPosition(DURATION_MS - (CROSSFADE_MS / 2), false);
+    expect(source.getVolume()).toBeCloseTo(0.25, 5);
+
+    source.setPosition(DURATION_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+
+    // The fade must NOT start early (which the old position*rate math did).
+    source.setPosition(DURATION_MS - (CROSSFADE_MS * 3), false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+  });
+
+  it('fades in over exactly crossfade ms of real time at 1.0x', () => {
+    player.setPlaybackRate(1);
+
+    source.setPosition(CROSSFADE_MS, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+
+    source.setPosition(CROSSFADE_MS / 2, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    source.setPosition(CROSSFADE_MS / 4, false);
+    expect(source.getVolume()).toBeCloseTo(0.25, 5);
+
+    source.setPosition(0, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+  });
+
+  it('fades in over exactly crossfade ms of real time at 2.0x', () => {
+    player.setPlaybackRate(2);
+
+    // Fade-in window covers 2x the track position at 2x.
+    source.setPosition(CROSSFADE_MS * 2, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+
+    source.setPosition(CROSSFADE_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    source.setPosition(CROSSFADE_MS / 2, false);
+    expect(source.getVolume()).toBeCloseTo(0.25, 5);
+
+    // The fade-in must not run longer than crossfade real ms.
+    source.setPosition((CROSSFADE_MS * 2) + 1, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+  });
+
+  it('keeps an in-progress fade-out continuous when the rate changes', () => {
+    player.setPlaybackRate(1);
+    const halfway = DURATION_MS - (CROSSFADE_MS / 2);
+    source.setPosition(halfway, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    // Changing the rate mid-fade must not jump the gain: it stays where the
+    // fade had advanced to, and the remaining fade simply runs at the new rate.
+    player.setPlaybackRate(2);
+    source.setPosition(halfway, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    // Advancing 2000 ms of track position inside the preserved 5000 ms window
+    // leaves 500 ms of it, i.e. a gain of 0.1 (it was 0.5 at the rate change).
+    source.setPosition(halfway + 2000, false);
+    expect(source.getVolume()).toBeCloseTo(0.1, 5);
+
+    // And the end of the original window is still silent.
+    source.setPosition(DURATION_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+
+    // The fade does not restart: no new window opens behind the playhead.
+    player.setPlaybackRate(1);
+    source.setPosition(DURATION_MS - (CROSSFADE_MS * 2), false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+  });
+
+  it('keeps an in-progress fade-in continuous when the rate changes', () => {
+    player.setPlaybackRate(1);
+    source.setPosition(CROSSFADE_MS / 2, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    player.setPlaybackRate(2);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+
+    // Still inside the preserved 5000 ms window: at position 4000 the linear
+    // fade-in gain is 4000/5000 = 0.8.
+    source.setPosition(CROSSFADE_MS * 0.8, false);
+    expect(source.getVolume()).toBeCloseTo(0.8, 5);
+  });
+
+  it('does not re-open a completed fade-in when the rate changes', () => {
+    player.setPlaybackRate(1);
+    source.setPosition(CROSSFADE_MS * 1.2, false); // fade-in long over
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+
+    player.setPlaybackRate(2);
+    // A fresh 2x window would be 10000 ms and the playhead is at 6000 ms, which
+    // would put it back inside the fade-in under a naive recompute.
+    source.setPosition(CROSSFADE_MS * 1.2, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+  });
+
+  it('schedules the ended callback at the start of the fade-out', async() => {
+    player.setPlaybackRate(1);
+    await playAndSettle(source);
+    window.setTimeout.mockClear();
+
+    source.setPosition(DURATION_MS - 60000, false);
+    source.setPlaybackRate(1);
+    // At 1x the callback precedes the track end by the 5 s fade-out.
+    expect(lastTimeoutDelay()).toBeCloseTo(55000, 5);
+
+    window.setTimeout.mockClear();
+    player.setPlaybackRate(2);
+    // setPlaybackRate() ticks first, which can move the playhead a little, so
+    // derive the expectation from the live position.  The callback must land
+    // at the same instant the gain starts dropping: the point where the
+    // remaining track equals the 2x fade-out window (10 s of track position),
+    // converted to real seconds at 2x.
+    const remainingMS = DURATION_MS - source.getPosition();
+    const expectedMS = (remainingMS - (CROSSFADE_MS * 2)) / 2;
+    expect(lastTimeoutDelay()).toBeCloseTo(expectedMS, 5);
+
+    // Cross-check against the volume curve: just before the callback fires the
+    // gain is still full, and it begins falling exactly then.
+    const callback = window.setTimeout.mock.calls[window.setTimeout.mock.calls.length - 1][0];
+    expect(callback).toBeInstanceOf(Function);
+
+    source.setPosition(DURATION_MS - (CROSSFADE_MS * 2), false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+    source.setPosition((DURATION_MS - (CROSSFADE_MS * 2)) + 1, false);
+    expect(source.getVolume()).toBeLessThan(1);
+  });
+
+  it('clamps an over-long crossfade and applies the clamp in real time', () => {
+    // Track is 100 s long, so 60 s + 60 s does not fit: clamp to 50 s each.
+    source.setCrossfade(60000, 60000);
+
+    // At 1x the clamped fade-out starts 50 s (real) before the end.
+    player.setPlaybackRate(1);
+    source.setPosition(DURATION_MS - 50000, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+    source.setPosition(DURATION_MS - 25000, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+    source.setPosition(DURATION_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+  });
+
+  it('clamps against the real track duration at a non-1.0 rate', () => {
+    // At 2x the track only lasts 50 s of real time, so 120 s of crossfade is
+    // clamped to 25 s each, which is half the track's real duration.
+    player.setPlaybackRate(2);
+    source.setCrossfade(60000, 60000);
+
+    // The fade-out therefore covers 50 s of track position (25 s at 2x).
+    source.setPosition(DURATION_MS - 50000, false);
+    expect(source.getVolume()).toBeCloseTo(1, 5);
+    source.setPosition(DURATION_MS - 25000, false);
+    expect(source.getVolume()).toBeCloseTo(0.5, 5);
+    source.setPosition(DURATION_MS, false);
+    expect(source.getVolume()).toBeCloseTo(0, 5);
+  });
+
+  it('warns when the crossfade is clamped', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    audioInstances.length = 0;
+    // The player captures console.warn when it is constructed, so start the
+    // spy first and build a player that logs warnings.
+    const { source: warnSource } = createLoadedSource({ logLevel: LogLevel.Warning });
+
+    warnSource.setCrossfade(60000, 60000);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('Crossfade total exceeds duration');
+    warnSpy.mockRestore();
+  });
+});
+

@@ -64,20 +64,72 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
   let seekablePercent = 0;
   let endedCallback = null;
   let volume = 1; // source-specific volume (for cross-fading)
+  // Crossfade durations are specified in milliseconds of real playback time.
   let crossfadeIn = 0;
   let crossfadeOut = 0;
+  // The same windows expressed in track-position milliseconds.  Track position
+  // advances by playbackRate per second of real time, so a fade lasting
+  // crossfadeIn/crossfadeOut real milliseconds covers crossfade * rate
+  // milliseconds of track position.  These are kept separate from the public
+  // durations so an in-progress fade can keep its current curve when the rate
+  // changes (see syncFadeWindows).
+  let fadeInMS = 0;
+  let fadeOutMS = 0;
+  let fadeRate = 0; // playbackRate the windows above were derived for
 
+  // Recompute the track-position fade windows implied by the real-time
+  // durations at the given rate.  When preserveActive is set (a live playback
+  // rate change), a fade that has already started keeps its current window, so
+  // the gain stays continuous and the fade simply advances at the new rate from
+  // wherever it was.  Windows for fades that have not begun are rescaled so
+  // they last the configured real-time duration at the new rate.  A rescaled
+  // fade-out never reaches back behind the playhead: if the remaining track is
+  // shorter than the new window (e.g. after speeding up near the end), the
+  // window is trimmed to the remaining track, which starts the fade at full
+  // volume instead of jumping.
+  const syncFadeWindows = (rate, preserveActive) => {
+    const remaining = endpos - position;
+    const fadeInStarted = preserveActive && (fadeInMS > 0) && (position > 0);
+    if (!fadeInStarted) {
+      fadeInMS = crossfadeIn * rate;
+    }
+    const fadeOutRunning = preserveActive && (fadeOutMS > 0) && (position > 0) &&
+      (remaining < fadeOutMS);
+    if (!fadeOutRunning) {
+      fadeOutMS = crossfadeOut * rate;
+      if (preserveActive && (position > 0) && (fadeOutMS > remaining)) {
+        // The new window would start behind the playhead; trim it so the gain
+        // begins at full volume here rather than jumping down mid-fade.
+        fadeOutMS = Math.max(0, remaining);
+      }
+    }
+    fadeRate = rate;
+  };
+
+  /**
+   * Sets the crossfade durations for this source.
+   * Durations are given in milliseconds of real playback time, so they stay
+   * constant in wall-clock terms regardless of playbackRate.
+   *
+   * @param {number} amountIn - fade-in duration, in real playback milliseconds
+   * @param {number} amountOut - fade-out duration, in real playback milliseconds
+   * @param {boolean} [resetEndedCallback] - internal use only
+   */
   this.setCrossfade = (amountIn, amountOut, resetEndedCallback = true) => {
     crossfadeIn = amountIn;
     crossfadeOut = amountOut;
     if (endpos > 0) {
+      // The fades are real-time durations, so compare them against the track's
+      // real-time duration (track position length divided by playback rate).
+      const trackDuration = endpos / player.playbackRate;
       const totalFade = crossfadeIn + crossfadeOut;
-      if (totalFade > endpos) {
-        log.warn(`Crossfade total exceeds duration (${totalFade} > ${endpos}), clamping for ${this.audioPath}`);
-        crossfadeIn = Math.min(amountIn, endpos / 2);
-        crossfadeOut = Math.min(amountOut, endpos / 2);
+      if (totalFade > trackDuration) {
+        log.warn(`Crossfade total exceeds duration (${totalFade} > ${trackDuration}), clamping for ${this.audioPath}`);
+        crossfadeIn = Math.min(amountIn, trackDuration / 2);
+        crossfadeOut = Math.min(amountOut, trackDuration / 2);
       }
     }
+    syncFadeWindows(player.playbackRate, false);
     if (resetEndedCallback) {
       setEndedCallbackTime((endpos - position) / 1000);
     }
@@ -94,16 +146,29 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     return 0;
   };
 
+  /**
+   * Current fade/crossfade gain for this source.
+   * Track position advances at playbackRate per second, whereas fade windows
+   * are stored in the same track-position units (see syncFadeWindows), so the
+   * ratios below always describe the same amount of real playback time and the
+   * fade lengths do not change with the playback rate.
+   *
+   * @returns {number} - gain between 0 and 1
+   */
   this.getVolume = () => {
-    volume = 1;
-    const actualPos = position * player.playbackRate;
-    const actualEnd = endpos * player.playbackRate;
-    if (actualPos < crossfadeIn) {
-      volume = volume - this.calcFadeAmount(actualPos / crossfadeIn);
+    // Pick up a rate change made since the windows were last computed (e.g.
+    // before the player's first tick after setPlaybackRate) without
+    // interrupting a fade that is already running.
+    if (player.playbackRate !== fadeRate) {
+      syncFadeWindows(player.playbackRate, true);
     }
-    const timeRemaining = actualEnd - actualPos;
-    if (timeRemaining < crossfadeOut) {
-      volume = volume - this.calcFadeAmount(timeRemaining / crossfadeOut);
+    volume = 1;
+    if (position < fadeInMS) {
+      volume = volume - this.calcFadeAmount(position / fadeInMS);
+    }
+    const timeRemaining = endpos - position;
+    if (timeRemaining < fadeOutMS) {
+      volume = volume - this.calcFadeAmount(timeRemaining / fadeOutMS);
     }
     return Math.min(1, Math.max(0, volume * player.volume));
   };
@@ -246,7 +311,12 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
       window.clearTimeout(endedCallback);
     }
     if (this.inPlayState(true)) {
-      const restSec = Math.max(0, (restSecNormalized / player.playbackRate) - (crossfadeOut / 1000));
+      // restSecNormalized is the remaining track position in seconds (not yet
+      // scaled by playbackRate).  Subtract the fade-out window, which is stored
+      // in the same track-position units, then divide by the rate to convert
+      // the whole result to real seconds.  This puts the callback exactly where
+      // the fade-out begins, independent of playbackRate.
+      const restSec = Math.max(0, (((restSecNormalized * 1000) - fadeOutMS) / 1000) / player.playbackRate);
 
       // not using AudioBufferSourceNode.onended or 'ended' because:
       // a) neither will trigger when looped
@@ -379,6 +449,10 @@ function Gapless5Source(parentPlayer, parentLog, inAudioPath) {
     if (audio) {
       audio.playbackRate = rate;
     }
+    // Fades that are already running keep their current window so the gain
+    // curve stays continuous; they simply consume it at the new rate.  Idle
+    // windows are rescaled to match the new rate.
+    syncFadeWindows(rate, true);
     setEndedCallbackTime((endpos - position) / 1000);
   };
 
@@ -1465,6 +1539,10 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   this.currentPosition = () => this.currentSource() ? this.currentSource().getPosition() : 0;
 
   /**
+   * Updates the playback rate in real time.  Crossfade durations are expressed
+   * in real playback milliseconds, so they are unaffected by the rate; fades
+   * already in progress continue smoothly and advance at the new rate.
+   *
    * @param {number} rate - default = 1.0, higher = plays faster, lower = plays slower
    */
   this.setPlaybackRate = (rate) => {
@@ -1474,6 +1552,12 @@ function Gapless5(options = {}, deprecated = {}) { // eslint-disable-line no-unu
   };
 
   /**
+   * Sets the crossfade duration in real playback milliseconds.  The duration is
+   * independent of playbackRate: the fade-out lasts this long (in real time)
+   * before the end of the track, and the fade-in lasts this long after the
+   * start.  If the fades would not fit in the track, the total is clamped to
+   * half the track's real duration each.
+   *
    * @param {number} duration - in milliseconds
    */
   this.setCrossfade = (duration) => {

@@ -237,10 +237,20 @@ export class Gapless5 {
     currentLength: () => number;
     currentPosition: () => number;
     /**
+     * Updates the playback rate in real time.  Crossfade durations are expressed
+     * in real playback milliseconds, so they are unaffected by the rate; fades
+     * already in progress continue smoothly and advance at the new rate.
+     *
      * @param {number} rate - default = 1.0, higher = plays faster, lower = plays slower
      */
     setPlaybackRate: (rate: number) => void;
     /**
+     * Sets the crossfade duration in real playback milliseconds.  The duration is
+     * independent of playbackRate: the fade-out lasts this long (in real time)
+     * before the end of the track, and the fade-in lasts this long after the
+     * start.  If the fades would not fit in the track, the total is clamped to
+     * half the track's real duration each.
+     *
      * @param {number} duration - in milliseconds
      */
     setCrossfade: (duration: number) => void;
@@ -329,8 +339,26 @@ declare class Gapless5Source {
     constructor(parentPlayer: any, parentLog: any, inAudioPath: any);
     audioPath: any;
     trackName: any;
-    setCrossfade: (amountIn: any, amountOut: any, resetEndedCallback?: boolean) => void;
+    /**
+     * Sets the crossfade durations for this source.
+     * Durations are given in milliseconds of real playback time, so they stay
+     * constant in wall-clock terms regardless of playbackRate.
+     *
+     * @param {number} amountIn - fade-in duration, in real playback milliseconds
+     * @param {number} amountOut - fade-out duration, in real playback milliseconds
+     * @param {boolean} [resetEndedCallback] - internal use only
+     */
+    setCrossfade: (amountIn: number, amountOut: number, resetEndedCallback?: boolean) => void;
     calcFadeAmount: (percent: any) => number;
+    /**
+     * Current fade/crossfade gain for this source.
+     * Track position advances at playbackRate per second, whereas fade windows
+     * are stored in the same track-position units (see syncFadeWindows), so the
+     * ratios below always describe the same amount of real playback time and the
+     * fade lengths do not change with the playback rate.
+     *
+     * @returns {number} - gain between 0 and 1
+     */
     getVolume: () => number;
     getState: () => number;
     unload: (isError: any) => void;
