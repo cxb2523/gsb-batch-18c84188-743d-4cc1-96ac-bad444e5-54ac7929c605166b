@@ -51,7 +51,7 @@ http://localhost:8123/#seed=22
 
 **Interface.** An elevation card showing progress and total drop, a traffic strip mapping rival positions onto a player-centred hyperbolic axis, position badge, timer and speedometer. Drawn entirely in canvas with procedurally constructed letterforms.
 
-**Audio.** Synthesised in the Web Audio graph: engine tone driven by speed and load, tyre scrub, wind, impacts, and event cues, with a sidechain so one-shots cut through the engine.
+**Audio.** Synthesised in the Web Audio graph: engine tone driven by speed and load, tyre scrub, wind, impacts, and event cues, with a sidechain so one-shots cut through the engine. A gearchange barks through the exhaust — dull and short on an upshift, bright and long on a downshift — and each bark's filter sweep is its own, so rapid changes never inherit the previous one's curve.
 
 ## Rendering
 

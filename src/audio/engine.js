@@ -39,6 +39,29 @@ const REV_IDLE = 1050;
 const FIRINGS_PER_REV = 2;       // four cylinders, four stroke
 const TAU = 0.03;                // parameter smoothing, seconds
 
+/* How many gearchange barks may be sounding at once.
+ *
+ * Each bark owns a filter so that its sweep is its own: a shared filter means
+ * the next bark's automation retargets the previous burst's tail, which is the
+ * audible "second shift interrupted by the first" defect when two changes land
+ * closer together than one bark lasts. Four is far more than the drivetrain can
+ * produce (a bark is at most 0.18 s including its release, so four overlapping
+ * barks means a change every 45 ms) and the nodes are built once, so this pools
+ * rather than allocating per event. */
+const BARK_VOICES = 4;
+
+/* A frame longer than this is a discontinuity rather than a slow frame: a
+ * hidden tab, a harness that stopped stepping, a caller that froze its world
+ * without saying so. Deliberately far above any real frame time — fifteen
+ * frames at 60 Hz, four at 15 fps — because the cost of getting it too low is
+ * a genuine gearchange silently swallowed on a stutter, and the cost of
+ * getting it too high is only that a caller that never announces its pause is
+ * handled a fraction later than it could be. Nothing that matters rides on the
+ * exact value: the pause menu does not rely on this at all, because a
+ * suspended AudioContext does not advance its clock, so the gap never opens
+ * and the gear is adopted by `setPaused`/`resume` instead. */
+const RESYNC_GAP = 0.25;
+
 export class EngineVoice {
   constructor(ctx, dest, buffers, seed = 91) {
     this.ctx = ctx;
@@ -184,26 +207,50 @@ export class EngineVoice {
      * as something that happened rather than as the note stepping.
      *
      * One-shot, so unlike everything else in this file it allocates — but a
-     * gearchange happens a handful of times a lap, not sixty times a second,
-     * and the filter it runs into is permanent. */
+     * gearchange happens a handful of times a lap, not sixty times a second.
+     *
+     * EACH BARK GETS ITS OWN BAND, and that is not tidiness. The sweep is
+     * scheduled automation on the band's frequency, and an AudioParam has one
+     * timeline: a second bark sharing the first one's filter would retarget the
+     * ramp that is still running, so the new sweep would start from wherever
+     * the old one had got to and the previous burst's tail would change timbre
+     * underneath itself. Two changes 50 ms apart is a perfectly ordinary
+     * downshift-then-upshift, and it used to make the second bark's sweep
+     * start halfway down the first. So the filters below are a small permanent
+     * pool — one per bark that can be sounding at once — and a bark that
+     * arrives when they are all busy builds a transient one that its own
+     * source releases on `ended`. Nothing ever shares a frequency curve.
+     *
+     * `barkOut` stays a single permanent gain so the harness can solo the
+     * layer (`Audio.buses().shift`); everything funnels through it. */
     this.buf = buffers.white;
-    this.barkBand = node(ctx.createBiquadFilter());
-    this.barkBand.type = 'bandpass';
-    this.barkBand.frequency.value = 420;
-    /* Wide. A narrow band on a noise burst is a hi-hat; the thing being
-       modelled is a slug of gas leaving a pipe, which is broadband with a
-       low-mid emphasis, and the emphasis is all the band should supply. */
-    this.barkBand.Q.value = 0.55;
-    /* Its own gain on the way into the output, purely so the harness has
-       something to solo. A gearchange is a brief broadband event underneath a
-       loud harmonic one, which means it barely moves the peak or the RMS of
-       any window long enough to be worth measuring — measured on the engine
-       bus it is invisible, and a sound that cannot be measured is a sound
-       nobody will notice has broken. */
     this.barkOut = node(ctx.createGain());
     this.barkOut.gain.value = 1;
-    this.barkBand.connect(this.barkOut);
     this.barkOut.connect(this.out);
+    this.barkVoices = [];
+    for (let i = 0; i < BARK_VOICES; i++) {
+      const band = node(ctx.createBiquadFilter());
+      band.type = 'bandpass';
+      band.frequency.value = 420;
+      /* Wide. A narrow band on a noise burst is a hi-hat; the thing being
+         modelled is a slug of gas leaving a pipe, which is broadband with a
+         low-mid emphasis, and the emphasis is all the band should supply. */
+      band.Q.value = 0.55;
+      band.connect(this.barkOut);
+      this.barkVoices.push({ band, until: -Infinity });
+    }
+    /* The permanent filters, in a stable array, so a measurement can watch
+       every bark's curve without knowing which one a given shift chose. */
+    this.barkBands = this.barkVoices.map(v => v.band);
+    /* The most recently used band, by name, because that is what the old
+       single-filter implementation exposed. Nothing in the game reads it; the
+       measurement suite reads `barkOut`. */
+    this.barkBand = this.barkVoices[0].band;
+    /* Every bark source still in flight, so dispose() can stop it even if the
+       context is torn down before its scheduled end, and the transient bands
+       built when the pool is exhausted, which their sources own. */
+    this.barkSources = new Set();
+    this._transientBands = new Set();
 
     /* Smoothed state, so a frame-rate spike cannot step a parameter. */
     this.load = 0;
@@ -212,7 +259,59 @@ export class EngineVoice {
     this.shiftDir = 1;
     this.gear = null;
     this.crackle = 0;
+    /* Pause and resync. See setPaused(). */
+    this.paused = false;
+    this._adoptGear = false;
+    this._lastT = null;
   }
+
+  /**
+   * Freeze, or come back from frozen.
+   *
+   * The engine has two pieces of state that outlive a frame — the gear it last
+   * saw and the shift dip — and both are wrong across a pause. The world does
+   * not step while the menu is up, so the gear can only have moved if
+   * something outside the simulation moved the car, but it can move, and the
+   * stock comparison below would then read it as a shift and bark for an event
+   * the player never heard happen. Coming back from a suspend must therefore
+   * adopt the current gear without comparing it.
+   *
+   * @param {boolean} p
+   */
+  setPaused(p) {
+    p = !!p;
+    if (p === this.paused) return;
+    this.paused = p;
+    if (p) {
+      /* Drop the dip rather than leave it paused mid-decay: on resume it
+         would be a throttle cut that belonged to the note before the menu. */
+      this.shift = 0;
+    } else {
+      this._adoptGear = true;
+    }
+  }
+
+  /** @param {boolean} p */
+  pause() { this.setPaused(true); }
+
+  /** @param {boolean} p */
+  resume() { this.setPaused(false); }
+
+  /**
+   * Adopt the next frame's gear without treating it as a shift.
+   *
+   * For a car that was PLACED rather than driven — a restart onto the grid, a
+   * respawn, a teleport. Those set the gear from the new wheel speed, so a
+   * finished car in fifth that restarts in first would bark a downshift on the
+   * first frame of the new race if the engine compared the two. It did not
+   * shift; it was moved. The caller knows that and this is how it says so.
+   *
+   * Deliberately not automatic. An inference would either swallow real shifts
+   * or need a threshold, and a threshold is a number that is wrong on one side
+   * of the edge; the placement sites are few, known, and in the one file that
+   * owns the car.
+   */
+  resync() { this._adoptGear = true; }
 
   /**
    * @param {number} dt
@@ -221,12 +320,39 @@ export class EngineVoice {
    * @param {number} brake 0..1
    * @param {number} gear
    * @param {number} t when, on the engine's clock
+   * @param {{paused?:boolean}} [opts] `paused` freezes the voice outright.
+   *   A clock gap longer than RESYNC_GAP is treated the same way without
+   *   being asked — see the comment on `adopt` below.
    */
-  update(dt, rpm, throttle, brake, gear, t) {
+  update(dt, rpm, throttle, brake, gear, t, opts) {
     const ctx = this.ctx;
     const r = this.rand;
 
-    if (this.gear !== null && gear !== this.gear) {
+    const paused = this.paused || !!(opts && opts.paused);
+    if (paused) {
+      /* Adopt silently, write nothing. The graph keeps the phase it was
+         suspended at and resumes there rather than fast-forwarding through
+         however long the menu was up. */
+      this.gear = gear;
+      this.shift = 0;
+      this._lastT = t;
+      return;
+    }
+
+    /* A clock jump means frames went missing rather than that time passed.
+       Adopt whatever gear the car is in now without treating the difference
+       as an event — the bark for that change, if there was one, happened
+       while nothing was listening. `_adoptGear` covers the resume from a
+       suspend, where the two clocks agree but the world may have moved; the
+       gap covers a caller that simply stopped stepping (a hidden tab, a tool
+       that skipped frames) without ever saying it was paused. */
+    let adopt = this._adoptGear;
+    this._adoptGear = false;
+    if (this._lastT !== null && t - this._lastT > RESYNC_GAP) adopt = true;
+    this._lastT = t;
+
+    if (adopt) this.gear = gear;
+    else if (this.gear !== null && gear !== this.gear) {
       this.shift = 1;
       this.shiftDir = gear > this.gear ? 1 : -1;
       this.bark(t, rpm, throttle, this.shiftDir);
@@ -318,9 +444,15 @@ export class EngineVoice {
    * An upshift is a chuff: the throttle shuts, the pressure dumps, and it is
    * dull and short. A downshift is the opposite event — the throttle blips and
    * the revs come up to meet the lower gear — so it is brighter, longer and
-   * has a rising edge on it. Same two nodes either way; the difference is
-   * entirely in the numbers, which is the honest way to model it because the
-   * difference in the real thing is entirely in the airflow.
+   * has a rising edge on it. Same shape either way; the difference is entirely
+   * in the numbers, which is the honest way to model it because the difference
+   * in the real thing is entirely in the airflow.
+   *
+   * Each call takes a band of its own — see the pool in the constructor — and
+   * writes its whole sweep onto that band alone. That is what lets two changes
+   * 50 ms apart each start their own frequency ramp from their own f0 instead
+   * of inheriting the previous sweep's position, and what keeps the previous
+   * burst's tail intact until its source ends.
    *
    * @param {number} t
    * @param {number} rpm 0..1
@@ -338,6 +470,10 @@ export class EngineVoice {
     if (level < 0.03) return;
 
     const dur = up ? 0.085 : 0.16;
+    const until = t + dur + 0.02;
+    const voice = this._freeBarkVoice(t);
+    const band = voice.band;
+
     const src = ctx.createBufferSource();
     src.buffer = this.buf;
     /* Resampling the noise is the cheapest tone control there is: played slow
@@ -353,21 +489,79 @@ export class EngineVoice {
     g.gain.linearRampToValueAtTime(level * (up ? 2.4 : 1.9), t + (up ? 0.004 : 0.03));
     g.gain.exponentialRampToValueAtTime(0.0006, t + dur);
     src.connect(g);
-    g.connect(this.barkBand);
+    g.connect(band);
     src.start(t, r.f(0, this.buf.duration - dur * 1.5 - 0.01));
     src.stop(t + dur + 0.02);
-    src.onended = () => { src.disconnect(); g.disconnect(); };
+    this.barkSources.add(src);
+    src.onended = () => {
+      this.barkSources.delete(src);
+      src.disconnect();
+      g.disconnect();
+      /* A transient band built for this bark was never in the pool, so this
+         is where it goes. A pooled one stays, and its `until` is what lets
+         the next bark know it is free. */
+      if (voice.transient) {
+        this._transientBands.delete(band);
+        band.disconnect();
+      }
+    };
 
     /* The band sweeps with the burst rather than sitting still: a fixed-band
-       noise burst is a hi-hat, a sweeping one is gas moving through a pipe. */
+       noise burst is a hi-hat, a sweeping one is gas moving through a pipe.
+       `cancelScheduledValues` first is not about a previous bark — the band is
+       this bark's own — it is about a *pooled* band whose last sweep is over:
+       clearing the finished timeline means the new sweep starts from the value
+       written below, not from wherever the old curve happened to end. */
     const f0 = clamp(220 + rpm * 900, 200, 2400);
-    this.barkBand.frequency.cancelScheduledValues(t);
-    this.barkBand.frequency.setValueAtTime(up ? f0 * 0.75 : f0 * 0.95, t);
-    this.barkBand.frequency.exponentialRampToValueAtTime(
+    band.frequency.cancelScheduledValues(t);
+    band.frequency.setValueAtTime(up ? f0 * 0.75 : f0 * 0.95, t);
+    band.frequency.exponentialRampToValueAtTime(
       up ? f0 * 0.40 : f0 * 2.3, t + dur);
+
+    voice.until = until;
+    this.barkBand = band;
+    return voice;
+  }
+
+  /**
+   * A band that is not currently sounding, or a new one if the pool is full.
+   *
+   * Choosing by `until` rather than by a round-robin cursor is the difference
+   * between a pool and a queue: a cursor can hand out a band whose burst is
+   * still playing while a free one sits one slot over, which reintroduces the
+   * interrupted-sweep defect at high shift rates. The transient fallback is
+   * what keeps that from ever being audible — four shifts inside 45 ms is not
+   * a drivetrain, but a tool can feed one, and correctness should not depend
+   * on the caller's manners.
+   */
+  _freeBarkVoice(t) {
+    let best = null;
+    for (const v of this.barkVoices) {
+      if (v.until <= t) {
+        if (!best || v.until < best.until) best = v;
+      }
+    }
+    if (best) return best;
+    const band = this.ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 420;
+    band.Q.value = 0.55;
+    band.connect(this.barkOut);
+    this._transientBands.add(band);
+    return { band, until: -Infinity, transient: true };
   }
 
   dispose() {
+    for (const src of this.barkSources) {
+      src.onended = null;
+      try { src.stop(); } catch (_) {}
+      try { src.disconnect(); } catch (_) {}
+    }
+    this.barkSources.clear();
+    for (const band of this._transientBands) {
+      try { band.disconnect(); } catch (_) {}
+    }
+    this._transientBands.clear();
     for (const s of this.sources) { try { s.stop(); } catch (_) {} }
     for (const n of this.nodes) n.disconnect();
     for (const s of this.sources) s.disconnect();

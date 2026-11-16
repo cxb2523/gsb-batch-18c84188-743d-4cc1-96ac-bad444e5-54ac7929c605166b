@@ -34,6 +34,10 @@
  *                  distance if absent.
  *   boostTimer     seconds of boost-pad force left. Drives a second motor for
  *                  the same 1.2 seconds as the physics.
+ *   paused         true while the caller's simulation is frozen. No parameter
+ *                  is written and no gearchange is emitted; the gear is
+ *                  adopted silently, so resuming never barks for a change that
+ *                  happened while nothing could hear it.
  *
  * The shore fields are latched: pass them when you have them and omit them
  * when you do not, and the last known value is held rather than snapping back
@@ -81,6 +85,10 @@ export class Audio {
     this._starting = null;
     this._ownsContext = false;
     this._airborne = false;
+    /* Frozen, as opposed to merely not being fed. `stop()` sets it, `start()`
+       clears it, and update() forwards it so the engine can hold its gear
+       still rather than infer a gearchange across the gap. */
+    this._paused = false;
     this._duck = 0;
     this._speed = 0;
     /* Defaults chosen so the game sounds like a coast road before anything is
@@ -93,6 +101,14 @@ export class Audio {
   /** Create and resume the context, building the graph on first call. Safe to
       call every gesture; later calls only resume. */
   async start() {
+    /* The engine learns about the resume HERE and not on the first frame after
+       it, because the first frame can arrive before this promise resolves and
+       would otherwise compare the gear on the grid with the one the car had
+       when the menu opened. See EngineVoice.setPaused: a gear change across a
+       pause is not a gear change, and barking for one is the defect this
+       exists to prevent. Harmless when the engine was never paused. */
+    this.engine?.resume();
+    this._paused = false;
     if (this._starting) return this._starting;
     this._starting = (async () => {
       if (!this.ctx) {
@@ -109,6 +125,11 @@ export class Audio {
       if (!this.offline && this.ctx.state !== 'running') {
         await this.ctx.resume().catch(() => {});
       }
+      /* The context's own statechange fires this too on a live context, and
+         both calls are idempotent — but an OFFLINE context never changes
+         state, so this is the only place the clear happens for the harness. */
+      this.engine.resume();
+      this._paused = false;
       this.running = true;
       return this.ctx;
     })();
@@ -301,6 +322,20 @@ export class Audio {
     this.hits.connect(this.send);
 
     this.engine = new EngineVoice(ctx, this.bus, buffers, this.seed + 91);
+    /* A suspended context is a frozen simulation as far as the sound engine
+       is concerned: while it is suspended no parameter write can land and no
+       burst can be heard, so a gear change adopted across the gap is not a
+       gearchange. Listening to the context as well as to stop()/start() means
+       a host that suspends it directly — a page visibility handler, a tool, a
+       future pause path — gets the same behaviour for free, and the two entry
+       points cannot disagree. Offline contexts never fire this. */
+    if (typeof ctx.addEventListener === 'function') {
+      ctx.addEventListener('statechange', () => {
+        if (ctx.state === 'suspended') { this._paused = true; this.engine.pause(); }
+        else if (ctx.state === 'running') { this._paused = false; this.engine.resume(); }
+      });
+    }
+    if (this._paused) this.engine.pause();
     this.surface = new SurfaceVoices(ctx, this.bus, buffers, this.seed + 404);
     this.impacts = new Impacts(ctx, this.hits, buffers, this.seed + 7331);
     this.ambience = new Ambience(ctx, this.amb, buffers, this.seed + 8123);
@@ -356,6 +391,11 @@ export class Audio {
   /** Suspend. Cheap to reverse — start() picks the same graph back up. */
   stop() {
     this.running = false;
+    /* The voice is told as well as the context. Suspending stops the audio
+       thread but says nothing to the object holding the gear, and it is the
+       object that decides whether the next frame is a gearchange. */
+    this._paused = true;
+    this.engine?.pause();
     if (this.ctx && !this.offline) this.ctx.suspend().catch(() => {});
   }
 
@@ -365,7 +405,30 @@ export class Audio {
   }
 
   /**
+   * The car was moved, not driven — adopt its gear without a bark.
+   *
+   * See EngineVoice.resync. Call this from any path that places the car
+   * somewhere other than where the simulation drove it: restart, respawn,
+   * teleport, a harness `goTo`. The next frame a normal shift after it still
+   * barks; only the change across the placement is silent, which is correct,
+   * because there was no gearchange — the world jumped.
+   */
+  resync() { this.engine?.resync(); }
+
+  /**
    * One frame of the game's state, mapped onto the synthesis.
+   *
+   * `state.paused` says the caller's simulation is frozen — a pause menu, a
+   * harness holding a frame — and it is a FIRST-class field rather than
+   * inferred from "the caller stopped calling". A caller that keeps calling
+   * with a frozen world is the common case (a render loop with a stopped game
+   * loop, a debug view, a capture tool stepping one frame at a time), and the
+   * one thing that must not happen across it is a gear change barked for an
+   * event the player never heard happen. While paused, the engine adopts
+   * whatever gear it is shown and writes nothing to the graph, so the resume
+   * frame compares against the paused one and the suspension picks up at the
+   * phase it stopped at.
+   *
    * @param {number} dt seconds
    * @param {object} state see the header — every field optional
    */
@@ -390,6 +453,23 @@ export class Audio {
        limiter forever — and it is an easy wire-up mistake to make. */
     const rpmIn = state.rpm || 0;
     const rpm = clamp(rpmIn > 1.5 ? rpmIn / 7400 : rpmIn, 0, 1);
+
+    /* Frozen, and this is the early return rather than a flag passed down.
+       Everything below either writes an AudioParam or fires a one-shot, and
+       while the simulation is frozen neither should happen: a parameter
+       written at a suspended phase is a discontinuity waiting for the resume,
+       a landing edge fires a thump into a context nobody is hearing, and the
+       engine's own pause is what stops the gearchange comparison from seeing
+       a car that was moved while the menu was up. The engine still has to be
+       told the gear, so it adopts the world's current one and the resume
+       compares against that; `_paused` covers a host that suspends the context
+       itself, `state.paused` a caller that keeps feeding a frozen world, and
+       both mean the same thing. */
+    if (this._paused || state.paused) {
+      this.engine.update(step, rpm, throttle, brake, state.gear | 0, t,
+        { paused: true });
+      return;
+    }
 
     const s = {
       speed,

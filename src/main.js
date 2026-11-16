@@ -1303,6 +1303,8 @@ class Game {
        camera underneath a held shot while it was at it. */
     if (!this.ending.holding && p.strandedFor > 4) {
       p.recover();
+      /* Recovered, not driven: the gear came from the new wheel speed. */
+      this.audio?.resync();
       this.effects.reset();
       this.chase.started = false;
     }
@@ -1757,6 +1759,11 @@ class Game {
     this.resetSimClock();
     const p = this.player;
     p.placeAt(34, 0);
+    /* The car is being set down, not driven there. placeAt takes the gear from
+       the new wheel speed — which is zero — so without this a restart from
+       fifth barks a downshift on the first frame of the next race for a shift
+       nobody made. See Audio.resync. */
+    this.audio?.resync();
     p.finished = false;
     p.raceTime = 0;
     p.vertVel = 0; p.height = 0;
@@ -1838,6 +1845,8 @@ class Game {
     const p = this.player;
     p.placeAt(Math.max(6, p.s - 12), 0);
     p.vertVel = 0; p.height = 0;
+    /* Twelve metres back up the road is a warp, not a gearchange. */
+    this.audio?.resync();
     this.effects.reset();
     this.hud.clearFeedback();
   }
@@ -2024,6 +2033,9 @@ class Game {
     this.s = clamp(t, 0, 1) * this.track.length;
     this.player.placeAt(clamp(this.s, 6, this.track.length - 40), 0);
     this.player.applyTo(this.playerView);
+    /* A teleport lands in neutral. Barking a downshift for it would be the
+       sound of a tool moving a car rather than of a car changing gear. */
+    this.audio?.resync();
     /* Teleporting leaves a trail of smoke and skid marks strung across the
        whole stage between where the car was and where it now is. */
     this.effects.reset();
