@@ -156,6 +156,15 @@ if (canUseDOM()) {
 }
 ```
 
+### `findTrackQueueIndex`
+
+Locate a track in a queue by `id`, then object identity, then `url`.
+
+```typescript
+const index = findTrackQueueIndex(audioStore.queue, audioStore.currentTrack);
+// Returns: number (-1 when the track is not part of the queue)
+```
+
 ## Actions
 
 Access actions directly on the `audioStore` instance.
@@ -269,6 +278,28 @@ const audioStore = new AudioStore(htmlAudio, "my-audio-key");
 
 audioStore.setVolume({ volume: 0.5 });
 ```
+
+## Queue Index Consistency
+
+`currentQueueIndex` always points at the entry the store is actually playing. Every queue
+mutation re-anchors it so `next()`, `previous()`, preloading, and persistence cannot drift:
+
+| Mutation                                 | Index behaviour                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------- |
+| Remove an entry before the active one    | Shifts left with the playing track                                        |
+| Remove the active entry                  | Points at the entry that took its slot; new last entry if it was the tail |
+| Remove the last remaining entry          | `currentQueueIndex` becomes `-1` and `currentTrack` becomes `null`        |
+| Reorder (drag or `moveInQueue`)          | Follows the playing track to its new position                             |
+| `addToQueue` (`first` / `after`)         | Follows the playing track when the insertion shifts it                    |
+| `clearQueue`                             | `currentQueueIndex` becomes `-1` and `currentTrack` becomes `null`        |
+
+`getCurrentQueueIndex()` returns the index (or `-1` when nothing is active). `syncCurrentQueueIndex()`
+is public: call it after assigning `queue` directly so the index is re-derived from `currentTrack`
+(matched by `id`, then object identity, then `url`).
+
+Persistence keeps the stored pair consistent — `saveToStorage()` re-anchors the index before
+writing, and `loadFromStorage()` re-derives it from the restored track — so a page refresh
+resumes "next" from the correct entry.
 
 ## Persistence
 

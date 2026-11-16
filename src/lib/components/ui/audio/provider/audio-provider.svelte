@@ -2,7 +2,12 @@
 	import { onMount, untrack } from "svelte";
 	import type { Snippet } from "svelte";
 	import { HtmlAudio, type Track } from "$lib/html-audio.js";
-	import { AudioStore, calculateNextIndex, setAudioContext } from "$lib/audio-store.svelte.js";
+	import {
+		AudioStore,
+		calculateNextIndex,
+		findTrackQueueIndex,
+		setAudioContext,
+	} from "$lib/audio-store.svelte.js";
 
 	interface Props {
 		tracks?: Track[];
@@ -11,7 +16,7 @@
 	}
 
 	// storageKey defaults to DEFAULT_STORAGE_KEY; pass `null` to disable persistence
-	let { tracks = [], storageKey = 'audio:ui:store', children }: Props = $props();
+	let { tracks = [], storageKey = "audio:ui:store", children }: Props = $props();
 
 	// ─── Create instances & set context ───────────────────────────────────────
 	const htmlAudio = new HtmlAudio();
@@ -31,6 +36,7 @@
 	let lastUpdateTime = 0;
 	let prevTrackId: string | number | undefined = undefined;
 	let isRestoring = false;
+	let isMounted = false;
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	// ─── Sync tracks prop → store ───────────────────────────────────────────────
@@ -38,15 +44,29 @@
 		const t = tracks;
 		if (!t || t.length === 0) return;
 		const q = untrack(() => audioStore.queue);
+		const current = untrack(() => audioStore.currentTrack);
 		const cqi = untrack(() => audioStore.currentQueueIndex);
 		const changed =
-			q.length === 0 ||
-			q.length !== t.length ||
-			q.some((track, i) => track.id !== t[i]?.id);
-		if (changed) {
-			audioStore.queue = [...t];
-			if (!untrack(() => audioStore.currentTrack)) audioStore.currentTrack = t[0] ?? null;
-			if (cqi === -1) audioStore.currentQueueIndex = 0;
+			q.length === 0 || q.length !== t.length || q.some((track, i) => track.id !== t[i]?.id);
+		if (!changed) return;
+
+		audioStore.queue = [...t];
+
+		if (!current) {
+			audioStore.currentTrack = t[0] ?? null;
+			audioStore.currentQueueIndex = audioStore.currentTrack ? 0 : -1;
+			return;
+		}
+
+		// The externally supplied order may differ from the stored one; re-anchor
+		// the index on the playing track instead of trusting the old position.
+		audioStore.syncCurrentQueueIndex();
+		if (audioStore.currentQueueIndex === -1) {
+			// Playing track is absent from the new list — move to a clamped slot so
+			// `currentTrack` and `currentQueueIndex` stay in agreement.
+			const fallback = Math.max(0, Math.min(cqi, t.length - 1));
+			audioStore.currentTrack = t[fallback] ?? null;
+			audioStore.currentQueueIndex = audioStore.currentTrack ? fallback : -1;
 		}
 	});
 
@@ -81,10 +101,15 @@
 	}
 
 	function preloadNextTrack() {
-		if (!preloadAudio) return;
+		if (!preloadAudio || !isMounted) return;
+		// Queue mutations keep the index anchored to the playing track, but derive
+		// the position again here so preloading can never look ahead from a stale
+		// index (e.g. right after a removal or reorder).
+		const resolvedIndex = findTrackQueueIndex(audioStore.queue, audioStore.currentTrack);
+		const currentIndex = resolvedIndex !== -1 ? resolvedIndex : audioStore.currentQueueIndex;
 		const nextIdx = calculateNextIndex({
 			queue: audioStore.queue,
-			currentQueueIndex: audioStore.currentQueueIndex,
+			currentQueueIndex: currentIndex,
 			shuffleEnabled: audioStore.shuffleEnabled,
 			repeatMode: audioStore.repeatMode,
 		});
@@ -120,6 +145,7 @@
 		preloadAudio = new Audio();
 		preloadAudio.muted = true;
 		preloadAudio.preload = "none";
+		isMounted = true;
 
 		const audio = htmlAudio.getAudioElement();
 		if (!audio) return;
@@ -273,6 +299,10 @@
 
 		// ── Restore persisted state ───────────────────────────────────────────────
 		(async () => {
+			// The persisted index can be stale or absent (e.g. written by an older
+			// build); re-anchor it on the restored track so "next"/"previous"
+			// resume from the right entry — even when the queue was reordered.
+			audioStore.syncCurrentQueueIndex();
 			if (!audioStore.currentTrack || audioStore.currentTime <= 0) return;
 			isRestoring = true;
 			const track = audioStore.currentTrack;
@@ -288,6 +318,8 @@
 				htmlAudio.setPlaybackRate(audioStore.playbackRate);
 				audioStore.isLoading = false;
 				audioStore.isPlaying = false;
+				// Prime the preload buffer against the restored position.
+				preloadNextTrack();
 			} catch {
 				audioStore.isError = true;
 				audioStore.errorMessage = "Error restoring audio state";
@@ -301,6 +333,7 @@
 
 		return () => {
 			ctrl.abort();
+			isMounted = false;
 			htmlAudio.removeEventListener("bufferUpdate", handleBufferUpdate);
 			htmlAudio.cleanup();
 			if (saveTimeout) {
@@ -374,11 +407,24 @@
 		if (qLen === 0 && preloadAudio) preloadAudio.src = "";
 	});
 
+	/** Keep the preloaded entry in sync with the queue after removals/reorders */
+	$effect(() => {
+		void [
+			audioStore.currentTrack,
+			audioStore.currentQueueIndex,
+			audioStore.queue,
+			audioStore.shuffleEnabled,
+			audioStore.repeatMode,
+		];
+		if (!isMounted || audioStore.queue.length === 0) return;
+		preloadNextTrack();
+	});
+
 	/** Persist state to localStorage (debounced; currentTime excluded from reactivity) */
 	$effect(() => {
 		void [
 			audioStore.currentTrack,
-			audioStore.queue.length,
+			audioStore.queue, // array identity: reorders must persist too
 			audioStore.volume,
 			audioStore.isMuted,
 			audioStore.playbackRate,

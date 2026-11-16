@@ -124,13 +124,28 @@
 			.map((r) => displayTracks.find((t) => String(t.id) === String(r.id)))
 			.filter((t): t is Track => t !== undefined);
 
-		const newCurrentIndex =
-			audioStore.currentTrack?.id !== undefined
-				? reorderedTracks.findIndex(
-						(t) => String(t.id) === String(audioStore.currentTrack!.id)
-					)
-				: -1;
+		// Safety net: if the drag payload dropped entries, append them rather than
+		// silently deleting tracks from the queue.
+		if (reorderedTracks.length !== displayTracks.length) {
+			for (const track of displayTracks) {
+				if (!reorderedTracks.includes(track)) reorderedTracks.push(track);
+			}
+		}
 
+		if (reorderedTracks.length === 0) return;
+
+		// Follow the currently playing track to its new position. Matching by id
+		// (object identity as a fallback for tracks without ids) keeps the index
+		// and `currentTrack` pointing at the same entry after the drag.
+		const current = audioStore.currentTrack;
+		const newCurrentIndex = current
+			? reorderedTracks.findIndex((t) =>
+					current.id !== undefined ? String(t.id) === String(current.id) : t === current
+				)
+			: -1;
+
+		// If the playing track is not part of the reordered list, fall back to a
+		// clamped position rather than dropping it from the index.
 		const finalIndex =
 			newCurrentIndex >= 0
 				? newCurrentIndex
