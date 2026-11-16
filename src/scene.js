@@ -299,6 +299,13 @@ export function createStage(canvas) {
   const accent2Target = new THREE.Color(0x8a6bff);
   const rimTarget = new THREE.Color(0x2b4fa8);
 
+  // 画质档位只拥有 DPR 与辉光强度；镜头状态（FOV / 震动 / 拉近量）由关卡流程决定。
+  // 注册回调让关卡流程可以在降档发生时回收镜头状态的归属。
+  let qualityChangeListener = null;
+  const notifyQualityChange = (level) => {
+    if (qualityChangeListener) qualityChangeListener(level);
+  };
+
   return {
     renderer,
     scene,
@@ -338,23 +345,25 @@ export function createStage(canvas) {
       rim.color.copy(accent2Target);
     },
     setQuality(level) {
-      // 0 = 低, 1 = 中, 2 = 高
+      // 0 = 低, 1 = 中, 2 = 高。只改 DPR 与辉光强度，绝不触碰相机 FOV 或震动。
       if (level === 0) {
         dpr = 1;
         bloomPass.strength = 0.7;
-        resize();
       } else if (level === 1) {
         dpr = Math.min(window.devicePixelRatio || 1, 1.4);
         bloomPass.strength = 0.8;
-        resize();
       } else {
         dpr = Math.min(window.devicePixelRatio || 1, 1.9);
         bloomPass.strength = 0.9;
-        resize();
       }
+      resize();
+      notifyQualityChange(level);
     },
     setBloomEnabled(on) {
       bloomPass.enabled = on;
+    },
+    onQualityChange(fn) {
+      qualityChangeListener = fn;
     },
   };
 }

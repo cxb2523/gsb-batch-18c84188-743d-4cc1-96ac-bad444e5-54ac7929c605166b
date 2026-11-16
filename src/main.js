@@ -53,8 +53,111 @@ let fallCooldown = 0;
 let menuT = 0;
 let hintShown = false;
 
+const CAMERA_BASE_FOV = 56;
+// 跃迁过场期间冻结的镜头状态。过场与画质降档可能在同一帧发生，
+// 用它来明确 FOV / 震动 / warpZoom 的归属，避免降档把旧关卡的状态留在新星域。
+let warpCamera = null;
+// buildLevel 之后的第一帧直接吸附到跟随位，而不是从旧镜头位置插值。
+let pendingCameraSnap = false;
+
 const clock = new THREE.Clock();
 const tmpV = new THREE.Vector3();
+const tmpSnap = new THREE.Vector3();
+
+/** 跟随相机的理想落点：玩家上方 + 身后，被拍近量收缩，并避开星体表面。 */
+function followAnchor(out) {
+  const up = player.normal;
+  const dist = 10.4 * (1 - warpZoom * 0.72);
+  const height = 5.4 * (1 - warpZoom * 0.4);
+  out.copy(player.position).addScaledVector(up, height).addScaledVector(player.facing, -dist);
+  const body = player.body;
+  if (body) {
+    const rel = out.clone().sub(body.center);
+    const minD = body.radius + 2.1;
+    if (rel.length() < minD) out.copy(body.center).addScaledVector(rel.normalize(), minD);
+  }
+  return out;
+}
+
+/** 直接把镜头对准玩家（位置 + 朝向），用于换关后的首帧。 */
+function snapCameraToPlayer() {
+  followAnchor(tmpSnap);
+  camera.position.copy(tmpSnap);
+  camera.up.copy(player.normal).normalize();
+  camera.lookAt(tmpSnap.copy(player.position).addScaledVector(player.normal, 1.3));
+}
+
+// ------------------------------------------------------------------ camera state
+function beginWarpCamera() {
+  // 跃迁开始：记录当时镜头状态（FOV、震动、拉近量）作为过场的权威值。
+  // 之后的 FOV 只由这里和 buildLevel 的复位决定，画质降档无权改写。
+  warpCamera = {
+    fov: camera.fov,
+    shake,
+    warpZoom,
+    levelRebuilt: false,
+    qualityChanged: false,
+  };
+}
+
+function endWarpCamera() {
+  warpCamera = null;
+}
+
+/** 过场中震动会自然衰减，每帧把冻结记录同步到实际值，便于核对。 */
+function syncWarpCamera() {
+  if (!warpCamera) return;
+  warpCamera.shake = shake;
+  warpCamera.warpZoom = warpZoom;
+}
+
+/** buildLevel 重建关卡后的镜头复位；之后的降档只能保留这个状态。 */
+function resetCameraForLevel() {
+  // 复位是权威值：FOV 回 56、震动清零、拉近量归零。
+  warpZoom = 0;
+  shake = 0;
+  camera.fov = CAMERA_BASE_FOV;
+  camera.updateProjectionMatrix();
+  if (warpCamera) {
+    warpCamera.fov = CAMERA_BASE_FOV;
+    warpCamera.shake = 0;
+    warpCamera.warpZoom = 0;
+    warpCamera.levelRebuilt = true;
+    // 换关后的复位是权威状态：如果过场里已经发生过降档，镜头立即吸附到玩家，
+    // 新星域第一帧就对准玩家，而不是从上一关的镜头位置插值过来。
+    // 未触发降档的普通跃迁保持原有插值手感。
+    if (warpCamera.qualityChanged) {
+      pendingCameraSnap = true;
+      snapCameraToPlayer();
+    }
+  } else {
+    // 标题 / 重试等普通重建：不要残留上一次跃迁的吸附请求
+    pendingCameraSnap = false;
+  }
+}
+
+/**
+ * 画质降档只拥有 DPR 与辉光强度。这里是降档与镜头状态的交接点：
+ * 即使降档路径将来直接碰了相机，也会被镜头状态的归属方按下列规则纠正回来。
+ * - 换关前：FOV 回到跃迁开始时冻结的值；震动 / 拉近量仍由过场脚本推进。
+ * - 换关后：buildLevel 的复位（56 / 0 / 0）是权威值，降档不得回写上一关。
+ * 另外，换关后来之不易的稳定首帧必须是"已对准玩家"，而不是继续插值。
+ */
+function onQualityChanged() {
+  if (!warpCamera) return;
+  warpCamera.qualityChanged = true;
+  const fovHold = warpCamera.levelRebuilt ? CAMERA_BASE_FOV : warpCamera.fov;
+  if (Math.abs(camera.fov - fovHold) > 1e-6) {
+    camera.fov = fovHold;
+    camera.updateProjectionMatrix();
+  }
+  if (warpCamera.levelRebuilt) {
+    shake = warpCamera.shake; // 复位后的 0
+    warpZoom = warpCamera.warpZoom; // 复位后的 0
+    pendingCameraSnap = true;
+    snapCameraToPlayer();
+  }
+}
 
 // ------------------------------------------------------------------ level
 function buildLevel(index) {
@@ -88,13 +191,12 @@ function buildLevel(index) {
     .addScaledVector(player.facing, -10);
   camera.up.copy(player.normal);
   camera.lookAt(player.position);
-  camera.fov = 56;
-  camera.updateProjectionMatrix();
-  shake = 0;
-  warpZoom = 0;
+  resetCameraForLevel();
 }
 
 const camera = stage.camera;
+// 降档通知：画质档位与镜头状态的交接点
+stage.onQualityChange(onQualityChanged);
 
 // ------------------------------------------------------------------ events
 function onCollect(count, total, pos) {  combo = Math.min(combo + 1, 10);
@@ -232,6 +334,8 @@ function backToTitle() {
   mode = 'title';
   busy = false;
   warpZoom = 0;
+  // 过场中途返回标题：丢弃冻结的镜头状态，回到菜单推轨
+  endWarpCamera();
   buildLevel(0);
   hud.showHUD(false);
   hud.hideHint();
@@ -260,7 +364,9 @@ function resumeGame() {
 async function completeLevel() {
   if (busy) return;
   busy = true;
-  const prevMode = mode;
+  // 跃迁开始：记录镜头状态并接管 FOV / 震动 / 拉近量的归属。
+  // 之后的画质降档只允许动 DPR 与辉光。
+  beginWarpCamera();
   mode = 'transition';
   audio.warp();
   shake = 0.15;
@@ -273,17 +379,21 @@ async function completeLevel() {
   levelIndex++;
 
   if (levelIndex >= PALETTES.length) {
+    // 通关不再换关：镜头交还给结算界面自己的推轨逻辑
+    endWarpCamera();
     showVictory();
     await hud.fade(0, 800);
     mode = 'win';
     hud.showHUD(false);
   } else {
+    // buildLevel 会复位 FOV=56 / shake=0 / warpZoom=0，并请求首帧吸附到玩家。
     buildLevel(levelIndex);
     hud.hideScreens();
     hud.showHUD(true);
     await hud.fade(0, 760);
     mode = 'playing';
     hud.toast(`第 ${levelIndex + 1} 星域 · ${PALETTES[levelIndex].name}`, 2400, 'accent');
+    endWarpCamera();
   }
   busy = false;
 }
@@ -317,7 +427,7 @@ function updateCamera(dt) {
       camera.position.y += (Math.random() - 0.5) * shake;
     }
     shake *= Math.exp(-6 * dt);
-    const fovTarget = 56;
+    const fovTarget = CAMERA_BASE_FOV;
     if (Math.abs(camera.fov - fovTarget) > 0.01) {
       camera.fov += (fovTarget - camera.fov) * (1 - Math.exp(-5 * dt));
       camera.updateProjectionMatrix();
@@ -326,22 +436,18 @@ function updateCamera(dt) {
   }
 
   const up = player.normal;
-  const dist = 10.4 * (1 - warpZoom * 0.72);
-  const height = 5.4 * (1 - warpZoom * 0.4);
-  const desired = tmpV
-    .copy(player.position)
-    .addScaledVector(up, height)
-    .addScaledVector(player.facing, -dist);
+  const desired = followAnchor(tmpV);
 
-  const body = player.body;
-  if (body) {
-    const rel = desired.clone().sub(body.center);
-    const minD = body.radius + 2.1;
-    if (rel.length() < minD) desired.copy(body.center).addScaledVector(rel.normalize(), minD);
+  // 新星域首帧直接吸附到跟随位，避免从上一关的镜头位置插值过来。
+  const snap = pendingCameraSnap;
+  pendingCameraSnap = false;
+  if (snap) {
+    camera.position.copy(desired);
+    camera.up.copy(up).normalize();
+  } else {
+    camera.position.lerp(desired, 1 - Math.exp(-5.2 * dt));
+    camera.up.lerp(up, 1 - Math.exp(-7.5 * dt)).normalize();
   }
-
-  camera.position.lerp(desired, 1 - Math.exp(-5.2 * dt));
-  camera.up.lerp(up, 1 - Math.exp(-7.5 * dt)).normalize();
 
   if (shake > 0.001) {
     camera.position.x += (Math.random() - 0.5) * shake;
@@ -353,8 +459,20 @@ function updateCamera(dt) {
   const look = player.position.clone().addScaledVector(up, 1.3).addScaledVector(player.velocity, 0.05);
   camera.lookAt(look);
 
+  // 跃迁过场期间 FOV 由过场冻结，不再跟随上一关的速度 / 冲刺拉伸；
+  // 换关后冻结值就是 buildLevel 的复位值 56。
+  if (mode === 'transition' && warpCamera) {
+    const fovHold = warpCamera.levelRebuilt ? CAMERA_BASE_FOV : warpCamera.fov;
+    if (Math.abs(camera.fov - fovHold) > 1e-6) {
+      camera.fov = fovHold;
+      camera.updateProjectionMatrix();
+    }
+    syncWarpCamera();
+    return;
+  }
+
   const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
-  const fovTarget = 56 + Math.min(8, speed * 0.22) + (player.dashTimer > 0 ? 7 : 0);
+  const fovTarget = CAMERA_BASE_FOV + Math.min(8, speed * 0.22) + (player.dashTimer > 0 ? 7 : 0);
   if (Math.abs(camera.fov - fovTarget) > 0.02) {
     camera.fov += (fovTarget - camera.fov) * (1 - Math.exp(-6 * dt));
     camera.updateProjectionMatrix();
@@ -506,6 +624,13 @@ window.__game = {
     return level;
   },
   stage,
+  camera,
+  get shake() {
+    return shake;
+  },
+  get warpZoom() {
+    return warpZoom;
+  },
   get levelIndex() {
     return levelIndex;
   },

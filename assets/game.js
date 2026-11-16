@@ -22135,6 +22135,10 @@ void main() {
     const accentTarget = new Color(6742271);
     const accent2Target = new Color(9071615);
     const rimTarget = new Color(2838440);
+    let qualityChangeListener = null;
+    const notifyQualityChange = (level2) => {
+      if (qualityChangeListener) qualityChangeListener(level2);
+    };
     return {
       renderer,
       scene,
@@ -22177,19 +22181,21 @@ void main() {
         if (level2 === 0) {
           dpr = 1;
           bloomPass.strength = 0.7;
-          resize();
         } else if (level2 === 1) {
           dpr = Math.min(window.devicePixelRatio || 1, 1.4);
           bloomPass.strength = 0.8;
-          resize();
         } else {
           dpr = Math.min(window.devicePixelRatio || 1, 1.9);
           bloomPass.strength = 0.9;
-          resize();
         }
+        resize();
+        notifyQualityChange(level2);
       },
       setBloomEnabled(on) {
         bloomPass.enabled = on;
+      },
+      onQualityChange(fn) {
+        qualityChangeListener = fn;
       }
     };
   }
@@ -23887,8 +23893,81 @@ void main() {
   var fallCooldown = 0;
   var menuT = 0;
   var hintShown = false;
+  var CAMERA_BASE_FOV = 56;
+  var warpCamera = null;
+  var pendingCameraSnap = false;
   var clock = new Clock();
   var tmpV = new Vector3();
+  var tmpSnap = new Vector3();
+  function followAnchor(out) {
+    const up = player.normal;
+    const dist = 10.4 * (1 - warpZoom * 0.72);
+    const height = 5.4 * (1 - warpZoom * 0.4);
+    out.copy(player.position).addScaledVector(up, height).addScaledVector(player.facing, -dist);
+    const body = player.body;
+    if (body) {
+      const rel = out.clone().sub(body.center);
+      const minD = body.radius + 2.1;
+      if (rel.length() < minD) out.copy(body.center).addScaledVector(rel.normalize(), minD);
+    }
+    return out;
+  }
+  function snapCameraToPlayer() {
+    followAnchor(tmpSnap);
+    camera.position.copy(tmpSnap);
+    camera.up.copy(player.normal).normalize();
+    camera.lookAt(tmpSnap.copy(player.position).addScaledVector(player.normal, 1.3));
+  }
+  function beginWarpCamera() {
+    warpCamera = {
+      fov: camera.fov,
+      shake,
+      warpZoom,
+      levelRebuilt: false,
+      qualityChanged: false
+    };
+  }
+  function endWarpCamera() {
+    warpCamera = null;
+  }
+  function syncWarpCamera() {
+    if (!warpCamera) return;
+    warpCamera.shake = shake;
+    warpCamera.warpZoom = warpZoom;
+  }
+  function resetCameraForLevel() {
+    warpZoom = 0;
+    shake = 0;
+    camera.fov = CAMERA_BASE_FOV;
+    camera.updateProjectionMatrix();
+    if (warpCamera) {
+      warpCamera.fov = CAMERA_BASE_FOV;
+      warpCamera.shake = 0;
+      warpCamera.warpZoom = 0;
+      warpCamera.levelRebuilt = true;
+      if (warpCamera.qualityChanged) {
+        pendingCameraSnap = true;
+        snapCameraToPlayer();
+      }
+    } else {
+      pendingCameraSnap = false;
+    }
+  }
+  function onQualityChanged() {
+    if (!warpCamera) return;
+    warpCamera.qualityChanged = true;
+    const fovHold = warpCamera.levelRebuilt ? CAMERA_BASE_FOV : warpCamera.fov;
+    if (Math.abs(camera.fov - fovHold) > 1e-6) {
+      camera.fov = fovHold;
+      camera.updateProjectionMatrix();
+    }
+    if (warpCamera.levelRebuilt) {
+      shake = warpCamera.shake;
+      warpZoom = warpCamera.warpZoom;
+      pendingCameraSnap = true;
+      snapCameraToPlayer();
+    }
+  }
   function buildLevel(index) {
     if (level) level.dispose();
     const palette = PALETTES[index];
@@ -23913,12 +23992,10 @@ void main() {
     camera.position.copy(player.position).addScaledVector(player.normal, 6.2).addScaledVector(player.facing, -10);
     camera.up.copy(player.normal);
     camera.lookAt(player.position);
-    camera.fov = 56;
-    camera.updateProjectionMatrix();
-    shake = 0;
-    warpZoom = 0;
+    resetCameraForLevel();
   }
   var camera = stage.camera;
+  stage.onQualityChange(onQualityChanged);
   function onCollect(count, total, pos) {
     combo = Math.min(combo + 1, 10);
     comboTimer = 2.4;
@@ -24044,6 +24121,7 @@ void main() {
     mode = "title";
     busy = false;
     warpZoom = 0;
+    endWarpCamera();
     buildLevel(0);
     hud.showHUD(false);
     hud.hideHint();
@@ -24069,7 +24147,7 @@ void main() {
   async function completeLevel() {
     if (busy) return;
     busy = true;
-    const prevMode = mode;
+    beginWarpCamera();
     mode = "transition";
     audio.warp();
     shake = 0.15;
@@ -24080,6 +24158,7 @@ void main() {
     shardsBanked += level.collected;
     levelIndex++;
     if (levelIndex >= PALETTES.length) {
+      endWarpCamera();
       showVictory();
       await hud.fade(0, 800);
       mode = "win";
@@ -24091,6 +24170,7 @@ void main() {
       await hud.fade(0, 760);
       mode = "playing";
       hud.toast(`\u7B2C ${levelIndex + 1} \u661F\u57DF \xB7 ${PALETTES[levelIndex].name}`, 2400, "accent");
+      endWarpCamera();
     }
     busy = false;
   }
@@ -24119,7 +24199,7 @@ void main() {
         camera.position.y += (Math.random() - 0.5) * shake;
       }
       shake *= Math.exp(-6 * dt);
-      const fovTarget2 = 56;
+      const fovTarget2 = CAMERA_BASE_FOV;
       if (Math.abs(camera.fov - fovTarget2) > 0.01) {
         camera.fov += (fovTarget2 - camera.fov) * (1 - Math.exp(-5 * dt));
         camera.updateProjectionMatrix();
@@ -24127,17 +24207,16 @@ void main() {
       return;
     }
     const up = player.normal;
-    const dist = 10.4 * (1 - warpZoom * 0.72);
-    const height = 5.4 * (1 - warpZoom * 0.4);
-    const desired = tmpV.copy(player.position).addScaledVector(up, height).addScaledVector(player.facing, -dist);
-    const body = player.body;
-    if (body) {
-      const rel = desired.clone().sub(body.center);
-      const minD = body.radius + 2.1;
-      if (rel.length() < minD) desired.copy(body.center).addScaledVector(rel.normalize(), minD);
+    const desired = followAnchor(tmpV);
+    const snap = pendingCameraSnap;
+    pendingCameraSnap = false;
+    if (snap) {
+      camera.position.copy(desired);
+      camera.up.copy(up).normalize();
+    } else {
+      camera.position.lerp(desired, 1 - Math.exp(-5.2 * dt));
+      camera.up.lerp(up, 1 - Math.exp(-7.5 * dt)).normalize();
     }
-    camera.position.lerp(desired, 1 - Math.exp(-5.2 * dt));
-    camera.up.lerp(up, 1 - Math.exp(-7.5 * dt)).normalize();
     if (shake > 1e-3) {
       camera.position.x += (Math.random() - 0.5) * shake;
       camera.position.y += (Math.random() - 0.5) * shake;
@@ -24146,8 +24225,17 @@ void main() {
     }
     const look = player.position.clone().addScaledVector(up, 1.3).addScaledVector(player.velocity, 0.05);
     camera.lookAt(look);
+    if (mode === "transition" && warpCamera) {
+      const fovHold = warpCamera.levelRebuilt ? CAMERA_BASE_FOV : warpCamera.fov;
+      if (Math.abs(camera.fov - fovHold) > 1e-6) {
+        camera.fov = fovHold;
+        camera.updateProjectionMatrix();
+      }
+      syncWarpCamera();
+      return;
+    }
     const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
-    const fovTarget = 56 + Math.min(8, speed * 0.22) + (player.dashTimer > 0 ? 7 : 0);
+    const fovTarget = CAMERA_BASE_FOV + Math.min(8, speed * 0.22) + (player.dashTimer > 0 ? 7 : 0);
     if (Math.abs(camera.fov - fovTarget) > 0.02) {
       camera.fov += (fovTarget - camera.fov) * (1 - Math.exp(-6 * dt));
       camera.updateProjectionMatrix();
@@ -24278,6 +24366,13 @@ void main() {
       return level;
     },
     stage,
+    camera,
+    get shake() {
+      return shake;
+    },
+    get warpZoom() {
+      return warpZoom;
+    },
     get levelIndex() {
       return levelIndex;
     },
