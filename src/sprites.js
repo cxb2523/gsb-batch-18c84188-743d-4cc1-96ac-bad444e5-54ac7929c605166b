@@ -17,6 +17,9 @@ initSprites = function () {
         sprite.visible = false;
         sprite.block = itemType.block;
         sprite.img = img;
+        // stable tie-breaker so objects at nearly the same depth
+        // keep a fixed order instead of flickering frame to frame
+        sprite.rank = i + 1;
         spritePosition[sprite.y][sprite.x] = sprite;
         sprites.push(sprite);
         screen.appendChild(img);
@@ -54,44 +57,34 @@ addItems = function () {
 
 //----------------------------------------------------------
 
-clearSprites = function () {
-    for (var i = 0; i < sprites.length; i++) {
-        var sprite = sprites[i];
-        sprite.visible = false;
-    }
-}
-
-//----------------------------------------------------------
-
 renderSprites = function () {
     for (var i = 0; i < sprites.length; i++) {
 
         var sprite = sprites[i];
+        var img = sprite.img;
+
+        // visibility is decided by the wall depth buffer:
+        // a bush behind a wall is hidden, an uncovered one is shown
+        var projection = projectObject(sprite.x + 0.5, sprite.y + 0.5);
+        sprite.visible = isObjectVisible(projection);
+
         if (sprite.visible) {
 
-            var img = sprite.img;
             img.style.display = "block";
 
-            // translate position to viewer space
-            var dx = sprite.x + 0.5 - player.x;
-            var dy = sprite.y + 0.5 - player.y;
-            var distance = Math.sqrt(dx * dx + dy * dy);
-            var angle = Math.atan2(dy, dx) - player.rotation;
-            var size = viewDist / (Math.cos(angle) * distance);
-
             // x-position on screen
-            var x = Math.tan(angle) * viewDist;
-            img.style.left = (screenWidth / 2 + x - size / 2) + "px";
+            img.style.left = projection.left + "px";
             // y is constant
-            img.style.top = ((screenHeight - size) / 2) + "px";
-            img.style.width = size + "px";
-            img.style.height = size + "px";
+            img.style.top = ((screenHeight - projection.size) / 2) + "px";
+            img.style.width = projection.size + "px";
+            img.style.height = projection.size + "px";
 
-            // fog on sprite
-            img.style.filter = "brightness(" + (100 - 15 * distance) + "%)";
-            img.style.zIndex = (size) >> 0;
+            // fog on sprite, kept based on real distance to player
+            img.style.filter = "brightness(" + (100 - 15 * projection.distance) + "%)";
+            // layer by actual corrected depth, with a stable tie-breaker
+            img.style.zIndex = depthZIndex(projection.depth, sprite.rank);
         } else {
-            sprite.img.style.display = "none";
+            img.style.display = "none";
         }
     }
 }

@@ -45,7 +45,6 @@ gameCycle = function () {
 renderCycle = function () {
 
     updateMap();
-    clearSprites();
     castRays();
     renderSprites();
     renderEnemies();

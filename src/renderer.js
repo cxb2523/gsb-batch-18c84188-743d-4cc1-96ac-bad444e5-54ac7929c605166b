@@ -45,6 +45,86 @@ var numofrays = Math.ceil(screenWidth / stripWidth);
 var viewDist = (screenWidth / 2) / Math.tan((fov / 2));
 
 //----------------------------------------------------------
+// Depth buffer: for every screen column (ray) it holds the
+// corrected perpendicular distance to the wall hit by that ray.
+// Infinity means the ray reaches the map edge without a wall.
+// Sprites and enemies are visible only where they are closer
+// than the wall stored here, so wall occlusion is decided in
+// one place for every kind of object.
+
+var zBuffer = [];
+
+// Depth values are multiplied by this factor before becoming a
+// z-index. A large factor keeps distinct depths in distinct
+// layers while the small per-object rank tie-breaker can never
+// cross into the next depth bucket (there are far fewer objects
+// than DEPTH_SCALE columns per unit of distance).
+var DEPTH_SCALE = 10000;
+
+//----------------------------------------------------------
+
+depthZIndex = function (depth, rank) {
+    return Math.round(DEPTH_SCALE / depth) + (rank || 0);
+}
+
+//----------------------------------------------------------
+// Projects a world-space point (objX, objY) onto the screen.
+// Returns null when the object is behind the camera.
+// "depth" is the fish-eye-corrected perpendicular depth, the
+// same metric used for the wall strips and the z-buffer, which
+// keeps occlusion and draw order independent of view angle.
+
+projectObject = function (objX, objY) {
+
+    var dx = objX - player.x;
+    var dy = objY - player.y;
+    var distance = Math.sqrt(dx * dx + dy * dy);
+    if (distance === 0) return null;
+
+    var angle = Math.atan2(dy, dx) - player.rotation;
+    while (angle < -Math.PI) angle += Math.PI * 2;
+    while (angle >= Math.PI) angle -= Math.PI * 2;
+
+    var cosAngle = Math.cos(angle);
+    // objects behind the camera must never be projected
+    if (cosAngle <= 0.001) return null;
+
+    var depth = distance * cosAngle;
+    if (depth <= 0.001) return null;
+
+    var size = viewDist / depth;
+    var screenX = screenWidth / 2 + Math.tan(angle) * viewDist;
+
+    return {
+        distance: distance,
+        angle: angle,
+        depth: depth,
+        size: size,
+        left: screenX - size / 2,
+        right: screenX + size / 2
+    };
+}
+
+//----------------------------------------------------------
+// An object is visible only if at least one of the screen
+// columns it covers is not blocked by a nearer wall.
+
+isObjectVisible = function (projection) {
+
+    if (!projection) return false;
+
+    var start = Math.max(0, Math.ceil(projection.left / stripWidth));
+    var end = Math.min(numofrays - 1, Math.floor(projection.right / stripWidth));
+
+    for (var i = start; i <= end; i++) {
+        if (projection.depth < zBuffer[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+//----------------------------------------------------------
 
 updateBackground = function () {
 
@@ -57,6 +137,12 @@ updateBackground = function () {
 
 castRays = function () {
     var stripIdx = 0;
+
+    // reset the depth buffer; rays that leave the map keep
+    // Infinity so nothing is occluded in those columns
+    for (var r = 0; r < numofrays; r++) {
+        zBuffer[r] = Infinity;
+    }
 
     for (var i = 0; i < numofrays; i++) {
         // where on the screen does ray go through
@@ -116,10 +202,6 @@ castRay = function (rayAngle, stripIdx) {
         wallX = (x + (right ? 0 : -1)) >> 0;
         wallY = (y) >> 0;
 
-        if (spritePosition[wallY][wallX] && !spritePosition[wallY][wallX].visible) {
-            spritePosition[wallY][wallX].visible = true;
-        }
-
         if (map[wallY][wallX] > 0) {
             var distX = x - player.x;
             var distY = y - player.y;
@@ -150,10 +232,6 @@ castRay = function (rayAngle, stripIdx) {
         wallY = (y + (up ? -1 : 0)) >> 0;
         wallX = (x) >> 0;
 
-        if (spritePosition[wallY][wallX] && !spritePosition[wallY][wallX].visible) {
-            spritePosition[wallY][wallX].visible = true;
-        }
-
         if (map[wallY][wallX] > 0) {
             var distX = x - player.x;
             var distY = y - player.y;
@@ -181,11 +259,14 @@ castRay = function (rayAngle, stripIdx) {
         // fish eye
         // distorted_dist = correct_dist / cos(relative_angle_of_ray)
         distance = distance * Math.cos(player.rotation - rayAngle);
+        // remember the corrected wall depth of this column so
+        // sprites and enemies can test their occlusion
+        zBuffer[stripIdx] = distance;
         // calc position, height and width of the wall strip
         var height = Math.round(viewDist / distance);
         // stretch the texture to a factor to make it fill the strip correctly
         var width = height * stripWidth;
-        // since everything is centered on the x-axis, move it half 
+        // since everything is centered on the x-axis, move it half
         // way down the screen and then half the wall height back up.
         var top = Math.round((screenHeight - height) / 2);
         var texX = Math.round(textureX * width);
@@ -197,7 +278,9 @@ castRay = function (rayAngle, stripIdx) {
 
         strip.style.height = height + "px";
         strip.style.top = top + "px";
-        strip.style.zIndex = height >> 0;
+        // walls and objects share the same depth scale so their
+        // stacking reflects real occlusion; strips have no rank
+        strip.style.zIndex = depthZIndex(distance, 0);
 
         if (prevStyle.height != (height * numoftex) >> 0) {
             strip.img.style.height = (height * numoftex) >> 0 + "px";
