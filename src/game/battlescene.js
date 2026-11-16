@@ -36,6 +36,12 @@
     }
     key(side) { return side.isPlayer ? 'p' : 'e'; }
     mon(k) { return k === 'p' ? this.b.mon(this.b.p) : this.b.mon(this.b.e); }
+    // The transient battle-visual fields (offs, tint, clip, scale, flash, shake, screenFx) are created, merged
+    // and restored by src/art/vfx.js -- this scene only *consumes* them: it draws with them, and it decays flash
+    // and shake a little each drawn frame so they fade. vfx never leaves a finished move's state behind, and it
+    // never flushes sc.fx, so particles keep playing across animations. If a battle is torn down while an
+    // animation was still mid-flight (its generator dropped without running its cleanup), this is the safety net.
+    exit() { if (G.vfx && G.vfx.resetVisuals) G.vfx.resetVisuals(this); }
     sprite(k) {
       const m = this.mon(k);
       const sp = this.transformed[k] || m.species;
@@ -46,6 +52,9 @@
 
     // ---------------- drawing ----------------
     draw(s) {
+      // vfx owns these values; the scene only spends them down so they fade if nothing repaints them (a flash
+      // lasts a few frames, a shake peters out). Both stop at 0, never below, so an in-flight animation can
+      // repaint the same field on the next frame without any accumulation.
       const sh = this.shake > 0 ? Math.round((Math.random() - 0.5) * this.shake * 2) : 0;
       if (this.shake > 0) { this.shake -= 0.5; if (this.shake < 0) this.shake = 0; }
       // background
@@ -89,7 +98,7 @@
       // effects under UI
       for (let i = this.fx.length - 1; i >= 0; i--) { const f = this.fx[i]; if (f.layer === 'ui') continue; if (f.draw(s, this) === false) this.fx.splice(i, 1); }
       if (this.screenFx) this.screenFx(s, this);
-      if (this.flash > 0) { const d = s.data, c = this.flashColor, a = Math.min(1, this.flash); for (let i = 0; i < 320 * 132; i++) d[i] = mix(d[i], c, a); this.flash -= 0.12; }
+      if (this.flash > 0) { const d = s.data, c = this.flashColor, a = Math.min(1, this.flash); for (let i = 0; i < 320 * 132; i++) d[i] = mix(d[i], c, a); this.flash -= 0.12; if (this.flash < 0) this.flash = 0; }
       // HP boxes
       if (this.boxes.e) this.drawEnemyBox(s);
       if (this.boxes.p) this.drawPlayerBox(s);

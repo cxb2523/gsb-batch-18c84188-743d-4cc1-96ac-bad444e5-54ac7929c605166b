@@ -11,6 +11,79 @@
   function center(sc, k) { return k === 'e' ? { x: G.E_POS.x, y: G.E_POS.y - 28 } : { x: G.P_POS.x, y: G.P_POS.y - 34 }; }
   function other(k) { return k === 'e' ? 'p' : 'e'; }
 
+  // ---------- transient visual state: ownership and cleanup ----------
+  // BattleScene (src/game/battlescene.js) only consumes these fields: it draws them, and it fades flash/shake a
+  // little each frame. Creating them, merging repeats and putting them back is vfx's job. Every animation runs
+  // in a scope token; each write remembers the token that owns the field and the baseline it had before the
+  // token first touched it. When the animation ends -- by falling off the end, through an early return, or
+  // because the driver closed/aborted the generator -- only the fields that token still owns are restored.
+  // sc.fx is deliberately untouched: those effects age out on their own, so an animation that ends early never
+  // cuts short particles that are still playing (possibly from an independent effect).
+  const FLASH_MAX = 1, SHAKE_MAX = 10;
+  const VSTATE = new WeakMap(); // scene -> { seq, active, owner, base }
+  function vstate(sc) {
+    let st = VSTATE.get(sc);
+    if (!st) { st = { seq: 0, active: null, owner: Object.create(null), base: Object.create(null) }; VSTATE.set(sc, st); }
+    return st;
+  }
+  function beginVfx(sc) { const st = vstate(sc), tok = { id: ++st.seq }; return tok; }
+  // Records a write: the first scope to touch a field captures the baseline it will be put back to; the scope
+  // that writes last owns the field, so if two animations overlap the one that painted it most recently is the
+  // one that cleans it up -- an earlier animation finishing never wipes a field another one repainted since.
+  function claim(sc, key, readBase) {
+    const st = vstate(sc), tok = st.active;
+    if (!tok) return;
+    if (st.owner[key] === undefined) st.base[key] = readBase ? readBase() : undefined;
+    st.owner[key] = tok;
+  }
+  function restoreField(sc, key, base) {
+    const i = key.indexOf(':'), kind = i < 0 ? key : key.slice(0, i), side = i < 0 ? null : key.slice(i + 1);
+    if (kind === 'flash') { sc.flash = base.flash; sc.flashColor = base.color; }
+    else if (kind === 'shake') sc.shake = base;
+    else if (kind === 'screenFx') sc.screenFx = base;
+    else if (kind === 'offs' && sc.offs && sc.offs[side]) { sc.offs[side].x = base.x; sc.offs[side].y = base.y; }
+    else if (kind === 'tint' && sc.tint) sc.tint[side] = base;
+    else if (kind === 'vis' && sc.vis) sc.vis[side] = base;
+    else if (kind === 'scale' && sc.scale) sc.scale[side] = base;
+    else if (kind === 'clip' && sc.clip) sc.clip[side] = base;
+  }
+  function endVfx(sc, tok) {
+    const st = vstate(sc);
+    for (const key in st.owner) {
+      if (st.owner[key] !== tok) continue;
+      restoreField(sc, key, st.base[key]);
+      delete st.owner[key]; delete st.base[key];
+    }
+  }
+  // Force every field any scope still owns back to its baseline and drop the scopes. Used by tests, and as a
+  // safety net after a driver abandons an animation mid-flight without closing its generator.
+  function resetVisuals(sc) {
+    const st = vstate(sc);
+    for (const key in st.owner) { restoreField(sc, key, st.base[key]); delete st.owner[key]; delete st.base[key]; }
+    st.active = null;
+  }
+  // Merge rule for repeated triggers in one move: keep the larger value, never add them, and cap a fresh value.
+  // Each field remembers what it looked like when this scope first painted it (the baseline), so the merge
+  // compares against the value actually on screen, and cleanup restores that baseline rather than clobbering a
+  // flash/shake another effect already had going.
+  function setFlash(sc, col, amt) {
+    amt = Math.min(FLASH_MAX, amt || 0.8);
+    if (amt > (sc.flash || 0)) { claim(sc, 'flash', () => ({ flash: sc.flash || 0, color: sc.flashColor })); sc.flash = amt; sc.flashColor = C(col || '#ffffff'); }
+  }
+  function setShake(sc, amt) {
+    amt = Math.min(SHAKE_MAX, amt);
+    if (amt > (sc.shake || 0)) { claim(sc, 'shake', () => sc.shake || 0); sc.shake = amt; }
+  }
+  function offsOf(sc, k) {
+    claim(sc, 'offs:' + k, () => ({ x: sc.offs[k].x, y: sc.offs[k].y }));
+    return sc.offs[k];
+  }
+  function setTint(sc, k, v) { claim(sc, 'tint:' + k, () => sc.tint[k]); sc.tint[k] = v; }
+  function setVis(sc, k, v) { claim(sc, 'vis:' + k, () => sc.vis[k]); sc.vis[k] = v; }
+  function setScale(sc, k, v) { claim(sc, 'scale:' + k, () => sc.scale[k]); sc.scale[k] = v; }
+  function setClip(sc, k, v) { claim(sc, 'clip:' + k, () => sc.clip[k]); sc.clip[k] = v; }
+  function setScreenFx(sc, fn) { claim(sc, 'screenFx', () => sc.screenFx); sc.screenFx = fn; }
+
   // ---------- particle system ----------
   function particle(sc, o) {
     const p = Object.assign({ x: 0, y: 0, vx: 0, vy: 0, ax: 0, ay: 0, drag: 1, life: 30, age: 0, size: 1, shape: 'dot', cols: [WHITE], spin: 0, rot: 0 }, o);
@@ -70,14 +143,15 @@
     const x = c.x + rand(-6, 6), y = c.y + rand(-6, 6);
     sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 8) return false; const r = (big ? 14 : 10) * (1 - Math.abs(this.age - 4) / 5); for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2 + 0.3; const L = i % 2 ? r : r * 0.55; s.lineBlend(x, y, x + Math.cos(a) * L, y + Math.sin(a) * L, i % 2 ? cc : hex('#fff4b0'), 1); } s.disc(x, y, 2.5, WHITE); return true; } });
     for (let i = 0; i < 6; i++) { const a = rand(0, Math.PI * 2); particle(sc, { x, y, vx: Math.cos(a) * rand(1, 2.5), vy: Math.sin(a) * rand(1, 2.5), drag: 0.85, life: 12, shape: 'spark', cols: [WHITE, cc] }); }
-    if (big) sc.shake = Math.max(sc.shake, 4);
+    if (big) setShake(sc, 4);
     yield* W(8);
   }
   function* lunge(sc, k, dist) {
     dist = dist || 14; const d = k === 'p' ? 1 : -1;
-    for (let i = 0; i < 5; i++) { sc.offs[k].x += d * dist / 5; sc.offs[k].y -= d * dist / 10; yield; }
-    for (let i = 0; i < 5; i++) { sc.offs[k].x -= d * dist / 5; sc.offs[k].y += d * dist / 10; yield; }
-    sc.offs[k].x = 0; sc.offs[k].y = 0;
+    const o = offsOf(sc, k);
+    for (let i = 0; i < 5; i++) { o.x += d * dist / 5; o.y -= d * dist / 10; yield; }
+    for (let i = 0; i < 5; i++) { o.x -= d * dist / 5; o.y += d * dist / 10; yield; }
+    o.x = 0; o.y = 0;
   }
   function* projectile(sc, from, to, frames, shape, cols, opts) {
     opts = opts || {};
@@ -135,16 +209,17 @@
     sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > frames) return false; const r = r0 + (r1 - r0) * this.age / frames; for (let t = 0; t < (thick || 1); t++) s.circle(c.x, c.y, r - t, cc); return true; } });
     yield* W(frames);
   }
-  function* flash(sc, col, amt) { sc.flash = amt || 0.8; sc.flashColor = C(col || '#ffffff'); yield* W(6); }
+  function* flash(sc, col, amt) { setFlash(sc, col, amt); yield* W(6); }
   function* tint(sc, k, col, frames) {
     const cc = C(col);
-    for (let i = 0; i < frames; i++) { sc.tint[k] = [cc, 0.6 * Math.sin(i / frames * Math.PI)]; yield; }
-    sc.tint[k] = null;
+    for (let i = 0; i < frames; i++) { setTint(sc, k, [cc, 0.6 * Math.sin(i / frames * Math.PI)]); yield; }
+    setTint(sc, k, null);
   }
   function* wave(sc, amp, frames) {
     let t = 0;
     const tmp = new Uint32Array(320);
-    sc.screenFx = (s) => {
+    const prev = sc.screenFx;
+    setScreenFx(sc, (s) => {
       t++;
       for (let y = 0; y < 132; y++) {
         const sh = Math.round(Math.sin(y * 0.18 + t * 0.35) * amp * Math.sin(Math.min(1, t / frames) * Math.PI));
@@ -153,9 +228,9 @@
         for (let x = 0; x < 320; x++) tmp[x] = s.data[row + Math.max(0, Math.min(319, x - sh))];
         s.data.set(tmp, row);
       }
-    };
+    });
     yield* W(frames);
-    sc.screenFx = null;
+    setScreenFx(sc, prev);
   }
   function* darken(sc, frames, col, amt) {
     const cc = C(col || '#100818');
@@ -223,7 +298,7 @@
       const c = center(sc, t);
       const arms = [[0, -1], [0, 1], [-1, 0.2], [1, 0.2], [-0.7, 0.9], [0.7, 0.9]];
       for (const [dx, dy] of arms) for (let i = 0; i < 8; i++) particle(sc, { x: c.x, y: c.y, vx: dx * i * 0.9, vy: dy * i * 0.9, drag: 0.82, life: 34, shape: 'flame', size: 4.5, cols: FIRE.map(C) });
-      sc.shake = 5; yield* flash(sc, '#f8a040', 0.5); yield* W(26);
+      setShake(sc, 5); yield* flash(sc, '#f8a040', 0.5); yield* W(26);
     },
     firespin: function* (sc, a, t) { yield* vortex(sc, t, 34, FIRE); },
     watergun: function* (sc, a, t) {
@@ -232,19 +307,19 @@
       yield* W(26); emit(sc, t, 18, { life: 20, shape: 'dot', size: 3, vy: -2.2, jy: 1, jx: 2, ay: 0.2, cols: [C('#e8f8ff'), C('#78c0f8')] }); yield* W(12);
     },
     bubble: function* (sc, a, t) { yield* projectile(sc, a, t, 22, 'bubble', [C('#d0f0ff'), C('#80c8f8')], { count: 6, gap: 4, size: 3, spread: 10, arc: 8 }); yield* W(8); },
-    hydropump: function* (sc, a, t) { yield* beam(sc, a, t, 30, WATER, 6, { wave: 2 }); emit(sc, t, 20, { life: 20, shape: 'bubble', size: 2, vy: -2, jx: 2, ay: 0.12, cols: WATER.map(C) }); sc.shake = 4; yield* W(10); },
+    hydropump: function* (sc, a, t) { yield* beam(sc, a, t, 30, WATER, 6, { wave: 2 }); emit(sc, t, 20, { life: 20, shape: 'bubble', size: 2, vy: -2, jx: 2, ay: 0.12, cols: WATER.map(C) }); setShake(sc, 4); yield* W(10); },
     surf: function* (sc, a, t) {
       sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 50) return false; const top = 132 - Math.sin(this.age / 50 * Math.PI) * 100; for (let y = Math.max(0, Math.floor(top)); y < 132; y++) for (let x = 0; x < 320; x++) { const w = Math.sin(x * 0.08 + this.age * 0.3 + y * 0.1); s.pblend(x, y, y < top + 3 + w * 2 ? WHITE : (w > 0.7 ? C('#a8d8ff') : C('#3a80e0')), 0.75); } return true; } });
-      sc.shake = 3; yield* W(50);
+      setShake(sc, 3); yield* W(50);
     },
     clamp: function* (sc, a, t) { yield* R.bite(sc, a, t); },
     thundershock: function* (sc, a, t) { const c = center(sc, t); yield* lightning(sc, c.x - 10, c.y - 30, c.x, c.y, 14, ELEC[1]); emit(sc, t, 10, { life: 14, shape: 'spark', cols: ELEC.map(C), jx: 2, jy: 2 }); yield* W(6); },
-    thunderbolt: function* (sc, a, t) { const c = center(sc, t); for (let i = 0; i < 3; i++) { sc.flash = 0.4; sc.flashColor = C('#fff8c0'); yield* lightning(sc, c.x + rand(-30, 30), c.y - 40, c.x, c.y, 8, ELEC[1]); } emit(sc, t, 16, { life: 18, shape: 'spark', cols: ELEC.map(C), jx: 3, jy: 3 }); yield* W(10); },
-    thunder: function* (sc, a, t) { const c = center(sc, t); yield* darken(sc, 12, '#000010', 0.5); sc.flash = 1; sc.flashColor = WHITE; yield* lightning(sc, c.x, 0, c.x, c.y + 10, 24, '#f8f090'); sc.shake = 6; emit(sc, t, 20, { life: 20, shape: 'spark', cols: ELEC.map(C), jx: 3, jy: 3 }); yield* W(10); },
+    thunderbolt: function* (sc, a, t) { const c = center(sc, t); for (let i = 0; i < 3; i++) { setFlash(sc, '#fff8c0', 0.4); yield* lightning(sc, c.x + rand(-30, 30), c.y - 40, c.x, c.y, 8, ELEC[1]); } emit(sc, t, 16, { life: 18, shape: 'spark', cols: ELEC.map(C), jx: 3, jy: 3 }); yield* W(10); },
+    thunder: function* (sc, a, t) { const c = center(sc, t); yield* darken(sc, 12, '#000010', 0.5); setFlash(sc, '#ffffff', 1); yield* lightning(sc, c.x, 0, c.x, c.y + 10, 24, '#f8f090'); setShake(sc, 6); emit(sc, t, 20, { life: 20, shape: 'spark', cols: ELEC.map(C), jx: 3, jy: 3 }); yield* W(10); },
     thunderwave: function* (sc, a, t) { for (let i = 0; i < 3; i++) yield* ring(sc, t, 8, ELEC[1], 2, 22); emit(sc, t, 8, { life: 12, shape: 'spark', cols: ELEC.map(C) }); yield* W(8); },
     vinewhip: function* (sc, a, t) { const c = center(sc, t); for (let k = 0; k < 2; k++) { sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 10) return false; for (let i = 0; i < 24; i++) { const x = c.x - 12 + i, y = c.y - 10 + Math.sin(i * 0.4 + this.age) * 6 + k * 8; s.pset(x, y, C('#3a9a38')); s.pset(x, y + 1, C('#1e5a24')); } return true; } }); yield* W(6); } yield* impact(sc, t); },
     razorleaf: function* (sc, a, t) { yield* projectile(sc, a, t, 20, 'leaf', [C('#98e058'), C('#58b040')], { count: 10, gap: 2, spread: 14, arc: 18, spin: 0.45, size: 3 }); yield* slash(sc, t, 2, '#c8f0a0'); yield* impact(sc, t); },
-    solarbeam: function* (sc, a, t) { yield* beam(sc, a, t, 34, ['#fff8c0', '#f8f070', '#a8e060'], 9, { sparks: 'star' }); sc.shake = 4; yield* W(6); },
+    solarbeam: function* (sc, a, t) { yield* beam(sc, a, t, 34, ['#fff8c0', '#f8f070', '#a8e060'], 9, { sparks: 'star' }); setShake(sc, 4); yield* W(6); },
     charge: function* (sc, a) { const c = center(sc, a); for (let i = 0; i < 20; i++) { const ang = rand(0, Math.PI * 2); particle(sc, { delay: i, life: 14, shape: 'spark', cols: [C('#fff8c0'), C('#f8e070')], onUpdate: p => { const r = 30 * (1 - p.age / 14); p.x = c.x + Math.cos(ang) * r; p.y = c.y + Math.sin(ang) * r; } }); } yield* tint(sc, a, '#ffffff', 30); },
     drain: function* (sc, a, t, col) {
       const A = center(sc, a), B = center(sc, t);
@@ -260,7 +335,7 @@
     blizzard: function* (sc, a, t) {
       sc.fx.push({ age: 0, layer: 'under', draw(s) { this.age++; if (this.age > 70) return false; const k = Math.sin(this.age / 70 * Math.PI) * 0.35; const d = s.data; for (let i = 0; i < 320 * 132; i++) d[i] = mix(d[i], 0xfffff0e8, k); return true; } });
       yield* screenRain(sc, 160, 56, { shape: 'snow', size: 2, vx: -4, vy: 2.6, cols: [WHITE, C('#c8f0ff')], life: 60 });
-      emit(sc, t, 16, { life: 34, shape: 'shard', cols: ICE.map(C), rx: 18, ry: 14 }); sc.shake = 4; yield* W(14);
+      emit(sc, t, 16, { life: 34, shape: 'shard', cols: ICE.map(C), rx: 18, ry: 14 }); setShake(sc, 4); yield* W(14);
     },
     aurorabeam: function* (sc, a, t) { yield* beam(sc, a, t, 30, ['#ff8080', '#f8d860', '#80f080', '#80c0ff', '#c080ff'], 5, { rainbow: true }); yield* W(4); },
     mist: function* (sc, a, t, col) { emit(sc, t || a, 24, { life: 40, shape: 'dot', size: 5, grow: 1, rx: 26, ry: 16, vx: 0.3, cols: [C(col || '#e8f0ff'), C(col || '#c8d8f0')], spreadT: 10, layer: undefined }); yield* W(46); },
@@ -273,13 +348,13 @@
     rest: function* (sc, a) { emit(sc, a, 4, { life: 40, shape: 'z', vy: -0.6, vx: 0.4, cols: [C('#e0e8ff')], spreadT: 24 }); yield* R.heal(sc, a); },
     rocks: function* (sc, a, t, n) {
       const c = center(sc, t); n = n || 4;
-      for (let i = 0; i < n; i++) { const x0 = c.x + rand(-20, 20); particle(sc, { x: x0, y: c.y - 70, vy: 4, ay: 0.35, delay: i * 5, life: 17, shape: 'rock', size: rand(4, 6.5), cols: [C('#a08868')], onUpdate: p => { if (p.age === 16) { sc.shake = Math.max(sc.shake, 3); for (let k = 0; k < 5; k++) particle(sc, { x: p.x, y: p.y + 4, vx: rand(-1.5, 1.5), vy: rand(-2, -0.5), ay: 0.2, life: 14, shape: 'dot', size: 3, cols: [C('#d8c8a8'), C('#a89878')] }); } } }); }
+      for (let i = 0; i < n; i++) { const x0 = c.x + rand(-20, 20); particle(sc, { x: x0, y: c.y - 70, vy: 4, ay: 0.35, delay: i * 5, life: 17, shape: 'rock', size: rand(4, 6.5), cols: [C('#a08868')], onUpdate: p => { if (p.age === 16) { setShake(sc, 3); for (let k = 0; k < 5; k++) particle(sc, { x: p.x, y: p.y + 4, vx: rand(-1.5, 1.5), vy: rand(-2, -0.5), ay: 0.2, life: 14, shape: 'dot', size: 3, cols: [C('#d8c8a8'), C('#a89878')] }); } } }); }
       yield* W(18 + n * 5); yield* impact(sc, t, '#d0b890', true);
     },
     earthquake: function* (sc, a, t) {
       const c = center(sc, t);
       sc.fx.push({ age: 0, layer: 'under', draw(s) { this.age++; if (this.age > 44) return false; for (let k = 0; k < 3; k++) { const r = ((this.age * 3 + k * 20) % 60) * 2.2; for (let i = 0; i < 64; i++) { const an = i / 64 * Math.PI * 2; s.pblend(c.x + Math.cos(an) * r, c.y + 26 + Math.sin(an) * r * 0.25, C('#fff0c8'), 0.5 * (1 - r / 132)); } } return true; } });
-      for (let i = 0; i < 4; i++) { sc.shake = 9; for (let k = 0; k < 10; k++) particle(sc, { x: rand(0, 320), y: rand(80, 128), vy: rand(-3.5, -1), vx: rand(-0.5, 0.5), ay: 0.25, life: 22, shape: 'rock', size: rand(2, 3.5), cols: [C('#b09070')] }); yield* W(11); }
+      for (let i = 0; i < 4; i++) { setShake(sc, 9); for (let k = 0; k < 10; k++) particle(sc, { x: rand(0, 320), y: rand(80, 128), vy: rand(-3.5, -1), vx: rand(-0.5, 0.5), ay: 0.25, life: 22, shape: 'rock', size: rand(2, 3.5), cols: [C('#b09070')] }); yield* W(11); }
     },
     fissure: function* (sc, a, t) { yield* darken(sc, 20, '#200c08', 0.5); yield* R.earthquake(sc, a, t); },
     dig: function* (sc, a, t) { emit(sc, t, 16, { life: 20, shape: 'rock', size: 1.8, vy: -3, jx: 2, ay: 0.3, cols: [C('#b08a60')] }); yield* R.bighit(sc, a, t); },
@@ -289,7 +364,7 @@
     lick: function* (sc, a, t) { const c = center(sc, t); sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 16) return false; for (let y = 0; y < 16; y++) for (let x = -3; x <= 3; x++) if (x * x / 9 + ((y - 8) * (y - 8)) / 64 < 1) s.pset(c.x + x, c.y - 12 + y + (this.age - 8), C('#f07898')); return true; } }); yield* W(16); yield* impact(sc, t); },
     nightshade: function* (sc, a, t) { yield* darken(sc, 30, '#100020', 0.7); yield* tint(sc, t, '#402060', 16); },
     confuseray: function* (sc, a, t) { yield* projectile(sc, a, t, 30, 'dot', [C('#ffffa0'), C('#f8d048')], { size: 6, arc: 12, trail: [C('#f0e080')], trailSize: 3 }); yield* W(4); },
-    dragonrage: function* (sc, a, t) { yield* vortex(sc, t, 36, ['#80a0ff', '#4060e0', '#b0c8ff']); sc.shake = 4; yield* W(6); },
+    dragonrage: function* (sc, a, t) { yield* vortex(sc, t, 36, ['#80a0ff', '#4060e0', '#b0c8ff']); setShake(sc, 4); yield* W(6); },
     wind: function* (sc, a, t) { const c = center(sc, t); for (let i = 0; i < 20; i++) { const a0 = rand(0, Math.PI * 2); particle(sc, { delay: Math.floor(rand(0, 12)), life: 18, shape: 'dot', size: 1, cols: [WHITE, C('#d0e8ff')], onUpdate: p => { const r = 18 - p.age * 0.6, an = a0 + p.age * 0.5; p.x = c.x + Math.cos(an) * r; p.y = c.y + Math.sin(an) * r * 0.5; } }); } yield* W(26); yield* impact(sc, t); },
     wing: function* (sc, a, t) { yield* lunge(sc, a, 16); yield* slash(sc, t, 2, '#e0e8ff'); },
     sound: function* (sc, a, t, col) { const A = center(sc, a); const cc = C(col || '#ffffff'); for (let i = 0; i < 5; i++) { sc.fx.push({ age: 0, delay: i * 4, draw(s) { if (this.delay > 0) { this.delay--; return true; } this.age++; if (this.age > 16) return false; const r = 6 + this.age * 3; const dir = a === 'p' ? 0 : Math.PI; for (let k = -6; k <= 6; k++) { const an = dir + k * 0.08; s.pset(Math.round(A.x + Math.cos(an) * r), Math.round(A.y + Math.sin(an) * r), cc); } return true; } }); } yield* W(36); },
@@ -298,19 +373,20 @@
     statdown: function* (sc, a, t, col) { yield* stat(sc, t, false, col); },
     swords: function* (sc, a) { const c = center(sc, a); for (let i = 0; i < 3; i++) { const a0 = i / 3 * Math.PI * 2; particle(sc, { life: 30, shape: 'needle', cols: [C('#e0e8f8')], onUpdate: p => { const an = a0 + p.age * 0.25; p.x = c.x + Math.cos(an) * 18; p.y = c.y + Math.sin(an) * 8; p.rot = Math.PI / 2; } }); } yield* W(30); yield* stat(sc, a, true); },
     glow: function* (sc, a, t, col) { yield* tint(sc, a, col || '#ffffff', 24); },
-    doubleteam: function* (sc, a) { for (let i = 0; i < 20; i++) { sc.offs[a].x = (i % 4 < 2 ? -1 : 1) * 8; sc.vis[a] = i % 2 ? 0.5 : 1; yield; } sc.offs[a].x = 0; sc.vis[a] = 1; },
-    minimize: function* (sc, a) { for (let i = 0; i < 12; i++) { sc.scale[a] = 1 - i / 24; yield; } yield* W(10); sc.scale[a] = 1; },
-    explosion: function* (sc, a, t) { const c = center(sc, a); yield* flash(sc, '#ffffff', 1); for (let i = 0; i < 40; i++) { const an = rand(0, Math.PI * 2), v = rand(1, 5); particle(sc, { x: c.x, y: c.y, vx: Math.cos(an) * v, vy: Math.sin(an) * v, drag: 0.92, life: 30, shape: 'flame', size: 3, cols: FIRE.map(C) }); } sc.shake = 10; yield* W(30); yield* impact(sc, t, '#f8a040', true); },
-    splash: function* (sc, a) { for (let k = 0; k < 3; k++) { for (let i = 0; i < 8; i++) { sc.offs[a].y = -Math.sin(i / 8 * Math.PI) * 10; yield; } } sc.offs[a].y = 0; emit(sc, a, 8, { life: 16, shape: 'dot', size: 2, vy: -2, jx: 2, ay: 0.25, ry: 2, cols: WATER.map(C) }); yield* W(8); },
+    doubleteam: function* (sc, a) { const o = offsOf(sc, a); for (let i = 0; i < 20; i++) { o.x = (i % 4 < 2 ? -1 : 1) * 8; setVis(sc, a, i % 2 ? 0.5 : 1); yield; } o.x = 0; setVis(sc, a, 1); },
+    minimize: function* (sc, a) { for (let i = 0; i < 12; i++) { setScale(sc, a, 1 - i / 24); yield; } yield* W(10); setScale(sc, a, 1); },
+    explosion: function* (sc, a, t) { const c = center(sc, a); yield* flash(sc, '#ffffff', 1); for (let i = 0; i < 40; i++) { const an = rand(0, Math.PI * 2), v = rand(1, 5); particle(sc, { x: c.x, y: c.y, vx: Math.cos(an) * v, vy: Math.sin(an) * v, drag: 0.92, life: 30, shape: 'flame', size: 3, cols: FIRE.map(C) }); } setShake(sc, 10); yield* W(30); yield* impact(sc, t, '#f8a040', true); },
+    splash: function* (sc, a) { const o = offsOf(sc, a); for (let k = 0; k < 3; k++) { for (let i = 0; i < 8; i++) { o.y = -Math.sin(i / 8 * Math.PI) * 10; yield; } } o.y = 0; emit(sc, a, 8, { life: 16, shape: 'dot', size: 2, vy: -2, jx: 2, ay: 0.25, ry: 2, cols: WATER.map(C) }); yield* W(8); },
     swift: function* (sc, a, t) { yield* projectile(sc, a, t, 16, 'star', [C('#fff8a0'), C('#f8d048')], { count: 5, gap: 3, spread: 12, arc: 10, size: 3 }); yield* impact(sc, t); },
     coins: function* (sc, a, t) { yield* R.hit(sc, a, t); emit(sc, t, 10, { life: 26, shape: 'coin', vy: -2.5, jx: 2, ay: 0.25, cols: [0] }); yield* W(16); },
     bone: function* (sc, a, t) { yield* projectile(sc, a, t, 16, 'bone', [0], { spin: 0.6, arc: 10 }); yield* impact(sc, t, null, true); },
     egg: function* (sc, a, t) { yield* projectile(sc, a, t, 18, 'egg', [0], { arc: 20 }); yield* R.explosionSmall(sc, a, t); },
-    explosionSmall: function* (sc, a, t) { const c = center(sc, t); for (let i = 0; i < 14; i++) { const an = rand(0, Math.PI * 2); particle(sc, { x: c.x, y: c.y, vx: Math.cos(an) * 2, vy: Math.sin(an) * 2, drag: 0.9, life: 18, shape: 'flame', size: 2, cols: FIRE.map(C) }); } sc.shake = 4; yield* W(14); },
+    explosionSmall: function* (sc, a, t) { const c = center(sc, t); for (let i = 0; i < 14; i++) { const an = rand(0, Math.PI * 2); particle(sc, { x: c.x, y: c.y, vx: Math.cos(an) * 2, vy: Math.sin(an) * 2, drag: 0.9, life: 18, shape: 'flame', size: 2, cols: FIRE.map(C) }); } setShake(sc, 4); yield* W(14); },
     triattack: function* (sc, a, t) { yield* R.ember(sc, a, t); yield* R.icebeam(sc, a, t); yield* R.thundershock(sc, a, t); },
     string: function* (sc, a, t) { yield* projectile(sc, a, t, 16, 'dot', [WHITE], { count: 10, gap: 1, spread: 8, trail: [C('#f0f0f0')], trailSize: 1 }); const c = center(sc, t); sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 30) return false; for (let i = -16; i <= 16; i += 4) { s.line(c.x + i, c.y - 16, c.x - i, c.y + 16, WHITE); } return true; } }); yield* W(30); },
     metronome: function* (sc, a) { const c = center(sc, a); for (let i = 0; i < 24; i++) { sc.fx.push({ age: 0, draw(s) { this.age++; if (this.age > 1) return false; const an = Math.sin(i * 0.5) * 0.8 - Math.PI / 2; s.line(c.x, c.y - 10, c.x + Math.cos(an) * 10, c.y - 10 + Math.sin(an) * 10, WHITE); return true; } }); yield; } },
     transform: function* (sc, a) { yield* tint(sc, a, '#ffffff', 20); },
+    // visibility is left off on purpose: teleport/battle-flee hides the sprite and the scene's own flee() keeps it hidden
     teleport: function* (sc, a) { emit(sc, a, 16, { life: 20, shape: 'star', cols: [C('#fff8c0')], vy: -2 }); for (let i = 0; i < 12; i++) { sc.vis[a] = i % 2; yield; } sc.vis[a] = 0; yield* W(10); },
     disable: function* (sc, a, t) { yield* ring(sc, t, 14, '#e04040', 22, 10, 2); },
     rage: function* (sc, a, t) { yield* tint(sc, a, '#ff4040', 12); yield* R.hit(sc, a, t); },
@@ -320,15 +396,15 @@
     fly: function* (sc, a, t) { yield* lunge(sc, a, 30); yield* impact(sc, t, null, true); },
     skyattack: function* (sc, a, t) { yield* tint(sc, a, '#ffffff', 10); yield* lunge(sc, a, 34); yield* impact(sc, t, '#fff0a0', true); yield* flash(sc, '#ffffff', 0.6); },
     leer: function* (sc, a, t) { const c = center(sc, a); emit(sc, a, 2, { life: 20, shape: 'star', size: 3, rx: 6, ry: 4, cols: [C('#ffe0e0'), C('#f06060')] }); yield* W(20); yield* stat(sc, t, false); },
-    tailwhip: function* (sc, a, t) { for (let i = 0; i < 16; i++) { sc.offs[a].x = Math.sin(i * 0.8) * 5; yield; } sc.offs[a].x = 0; yield* stat(sc, t, false); },
+    tailwhip: function* (sc, a, t) { const o = offsOf(sc, a); for (let i = 0; i < 16; i++) { o.x = Math.sin(i * 0.8) * 5; yield; } o.x = 0; yield* stat(sc, t, false); },
     haze: function* (sc, a) { yield* R.mist(sc, a, 'p', '#a0a0b0'); },
     conversion: function* (sc, a) { yield* tint(sc, a, '#80f0ff', 20); },
     mimic: function* (sc, a) { yield* tint(sc, a, '#f0f0ff', 16); },
     recharge: function* () { yield* W(10); },
     healitem: function* (sc, a) { yield* R.heal(sc, a); },
     safariRock: function* (sc, a, t) { yield* projectile(sc, 'p', 'e', 16, 'rock', [C('#a09078')], { arc: 20, size: 3 }); yield* impact(sc, 'e'); },
-    fly_charge: function* (sc, a) { for (let i = 0; i < 14; i++) { sc.offs[a].y -= 5; yield; } sc.offs[a].y = 0; },
-    dig_charge: function* (sc, a) { emit(sc, a, 14, { life: 18, shape: 'rock', size: 1.8, vy: -2, jx: 2, ay: 0.25, cols: [C('#b08a60')] }); for (let i = 0; i < 12; i++) { sc.clip[a] = 1 - i / 12; yield; } sc.clip[a] = 1; },
+    fly_charge: function* (sc, a) { const o = offsOf(sc, a); for (let i = 0; i < 14; i++) { o.y -= 5; yield; } o.y = 0; },
+    dig_charge: function* (sc, a) { emit(sc, a, 14, { life: 18, shape: 'rock', size: 1.8, vy: -2, jx: 2, ay: 0.25, cols: [C('#b08a60')] }); for (let i = 0; i < 12; i++) { setClip(sc, a, 1 - i / 12); yield; } setClip(sc, a, 1); },
   };
   // move -> [recipe, arg]
   const MOVES = {
@@ -364,34 +440,57 @@
     FLY_CHARGE: ['fly_charge'], DIG_CHARGE: ['dig_charge'], BIDE_HIT: ['counter'], HORN: ['needles', 2],
   };
 
-  function* move(sc, id, k, hit) {
-    const m = MOVES[id] || ['hit'];
-    const t = other(k);
-    if (hit > 0 && !['needles', 'claw'].includes(m[0])) { yield* impact(sc, t); return; }
-    const f = R[m[0]] || R.hit;
-    const ar = m[1];
-    if (m[0] === 'drain' && id === 'DRAIN') { yield* R.drain(sc, k, t); return; }
-    yield* f(sc, k, t, ar);
-    // make sure transient states are reset
-    sc.offs[k].x = 0; sc.offs[k].y = 0;
-  }
-  function* status(sc, k, st) {
-    switch (st) {
-      case 'PSN': emit(sc, k, 10, { life: 24, shape: 'bubble', size: 2, vy: -0.8, cols: POIS.map(C), spreadT: 14 }); yield* tint(sc, k, '#b060d0', 24); break;
-      case 'BRN': emit(sc, k, 10, { life: 20, shape: 'flame', size: 2, vy: -0.8, cols: FIRE.map(C), spreadT: 12 }); yield* tint(sc, k, '#f86030', 24); break;
-      case 'PAR': emit(sc, k, 12, { life: 12, shape: 'spark', cols: ELEC.map(C), spreadT: 18 }); yield* tint(sc, k, '#f8e040', 24); break;
-      case 'SLP': emit(sc, k, 3, { life: 36, shape: 'z', vy: -0.6, vx: 0.5, cols: [C('#e0e8ff')], spreadT: 20, rx: 4, ry: 4 }); yield* W(36); break;
-      case 'FRZ': emit(sc, k, 10, { life: 24, shape: 'shard', cols: ICE.map(C), spreadT: 10 }); yield* tint(sc, k, '#a0e0ff', 24); break;
-      case 'CONF': { const c = center(sc, k); for (let i = 0; i < 3; i++) { const a0 = i / 3 * Math.PI * 2; particle(sc, { life: 36, shape: 'star', size: 2, cols: [C('#fff8a0')], onUpdate: p => { const an = a0 + p.age * 0.25; p.x = c.x + Math.cos(an) * 14; p.y = c.y - 18 + Math.sin(an) * 4; } }); } yield* W(36); break; }
+  // Runs one animation inside a scope token: however the generator finishes -- falling off the end, an early
+  // `return`, or the driver calling .return() to close/abort it mid-flight -- the token's fields go back to
+  // their baselines. sc.fx is deliberately left alone: those effects age out on their own, so a move that ends
+  // early doesn't cut short particles (or another independent effect) still on screen.
+  function* scoped(sc, body) {
+    const st = vstate(sc), tok = beginVfx(sc), outer = st.active;
+    const inner = body();
+    st.active = tok;
+    try {
+      // Drive the body by hand rather than `yield*`: the active token is set before every resume, so ownership
+      // stays right even if two animations are advanced alternately in the same frame.
+      for (let r = inner.next(); !r.done; r = inner.next()) { yield r.value; st.active = tok; }
+    }
+    finally {
+      if (typeof inner.return === 'function') inner.return(); // cascade an abort through nested recipes
+      endVfx(sc, tok);
+      st.active = outer;
     }
   }
-  function* stat(sc, k, up, col) {
-    const c = center(sc, k);
-    const cols = up ? [C(col || '#fff0a0'), C('#f8a040'), C('#e05030')] : [C('#c0e0ff'), C('#6090e0'), C('#3050a0')];
-    for (let i = 0; i < 18; i++) particle(sc, { x: c.x + rand(-20, 20), y: c.y + (up ? 20 : -26) + rand(-6, 6), vy: up ? -2 : 2, delay: Math.floor(rand(0, 16)), life: 16, shape: 'dot', size: 1, cols,
-      onUpdate: p => { /* streak */ } });
-    for (let i = 0; i < 24; i++) { sc.tint[k] = [cols[1], 0.4 * Math.sin(i / 24 * Math.PI)]; yield; }
-    sc.tint[k] = null;
+  function* move(sc, id, k, hit) {
+    yield* scoped(sc, function* () {
+      const m = MOVES[id] || ['hit'];
+      const t = other(k);
+      if (hit > 0 && !['needles', 'claw'].includes(m[0])) { yield* impact(sc, t); return; }
+      const f = R[m[0]] || R.hit;
+      const ar = m[1];
+      if (m[0] === 'drain' && id === 'DRAIN') { yield* R.drain(sc, k, t); return; }
+      yield* f(sc, k, t, ar);
+    });
   }
-  G.vfx = { move, status, stat, burst, sparkle, particle, MOVES, R };
+  function* status(sc, k, st) {
+    yield* scoped(sc, function* () {
+      switch (st) {
+        case 'PSN': emit(sc, k, 10, { life: 24, shape: 'bubble', size: 2, vy: -0.8, cols: POIS.map(C), spreadT: 14 }); yield* tint(sc, k, '#b060d0', 24); break;
+        case 'BRN': emit(sc, k, 10, { life: 20, shape: 'flame', size: 2, vy: -0.8, cols: FIRE.map(C), spreadT: 12 }); yield* tint(sc, k, '#f86030', 24); break;
+        case 'PAR': emit(sc, k, 12, { life: 12, shape: 'spark', cols: ELEC.map(C), spreadT: 18 }); yield* tint(sc, k, '#f8e040', 24); break;
+        case 'SLP': emit(sc, k, 3, { life: 36, shape: 'z', vy: -0.6, vx: 0.5, cols: [C('#e0e8ff')], spreadT: 20, rx: 4, ry: 4 }); yield* W(36); break;
+        case 'FRZ': emit(sc, k, 10, { life: 24, shape: 'shard', cols: ICE.map(C), spreadT: 10 }); yield* tint(sc, k, '#a0e0ff', 24); break;
+        case 'CONF': { const c = center(sc, k); for (let i = 0; i < 3; i++) { const a0 = i / 3 * Math.PI * 2; particle(sc, { life: 36, shape: 'star', size: 2, cols: [C('#fff8a0')], onUpdate: p => { const an = a0 + p.age * 0.25; p.x = c.x + Math.cos(an) * 14; p.y = c.y - 18 + Math.sin(an) * 4; } }); } yield* W(36); break; }
+      }
+    });
+  }
+  function* stat(sc, k, up, col) {
+    yield* scoped(sc, function* () {
+      const c = center(sc, k);
+      const cols = up ? [C(col || '#fff0a0'), C('#f8a040'), C('#e05030')] : [C('#c0e0ff'), C('#6090e0'), C('#3050a0')];
+      for (let i = 0; i < 18; i++) particle(sc, { x: c.x + rand(-20, 20), y: c.y + (up ? 20 : -26) + rand(-6, 6), vy: up ? -2 : 2, delay: Math.floor(rand(0, 16)), life: 16, shape: 'dot', size: 1, cols,
+        onUpdate: p => { /* streak */ } });
+      for (let i = 0; i < 24; i++) { setTint(sc, k, [cols[1], 0.4 * Math.sin(i / 24 * Math.PI)]); yield; }
+      setTint(sc, k, null);
+    });
+  }
+  G.vfx = { move, status, stat, burst, sparkle, particle, MOVES, R, beginVfx, endVfx, resetVisuals };
 })(window.G);
