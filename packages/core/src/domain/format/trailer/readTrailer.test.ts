@@ -8,7 +8,9 @@ import {
   FOOTER_VERSION_OFFSET,
   INDEX_SLOT_OFFSET_OFFSET,
   INDEX_SLOT_SIZE,
+  INDEX_SLOT_SIZE_OFFSET,
   InfoRecordFormat,
+  RECORD_HEADER_ID_OFFSET,
   RECORD_HEADER_SIZE,
   RECORD_HEADER_SIZE_OFFSET,
   RecordType,
@@ -45,6 +47,46 @@ function syntheticRecords(): TrailerFixtureBuilder {
 
 function footerSizeFieldOffset(fileSize: number): number {
   return fileSize - TRAILER_FOOTER_SIZE + FOOTER_TRAILER_SIZE_OFFSET;
+}
+
+/**
+ * An index record whose only slot points outside the trailer: damaged enough to fail the index
+ * path, harmless to a walk that never reads index payloads.
+ */
+const DAMAGED_INDEX = ((): Uint8Array => {
+  const index = new Uint8Array(INDEX_SLOT_SIZE);
+  const view = new DataView(index.buffer);
+  view.setUint32(INDEX_SLOT_SIZE_OFFSET, 100, true);
+  view.setUint32(INDEX_SLOT_OFFSET_OFFSET, 0xff_ff_ff_ff, true);
+  return index;
+})();
+
+/**
+ * A walkable trailer — contiguous records with their headers — that still carries an index
+ * record before the footer, so a read starts down the index path and can fall back from it.
+ */
+function contiguousWithIndexRecord(index: Uint8Array): {
+  bytes: Uint8Array;
+  records: ReturnType<TrailerFixtureBuilder['buildContiguous']>['records'];
+  indexOffset: number;
+} {
+  const base = syntheticRecords().buildContiguous();
+  const indexOffset = base.bytes.byteLength - TRAILER_FOOTER_SIZE;
+  const header = new Uint8Array(RECORD_HEADER_SIZE);
+  const headerView = new DataView(header.buffer);
+  headerView.setUint8(RECORD_HEADER_ID_OFFSET, RecordType.Index);
+  headerView.setUint32(RECORD_HEADER_SIZE_OFFSET, index.byteLength, true);
+  const bytes = new Uint8Array(base.bytes.byteLength + index.byteLength + RECORD_HEADER_SIZE);
+  bytes.set(base.bytes.subarray(0, indexOffset), 0);
+  bytes.set(index, indexOffset);
+  bytes.set(header, indexOffset + index.byteLength);
+  bytes.set(base.bytes.subarray(indexOffset), indexOffset + index.byteLength + RECORD_HEADER_SIZE);
+  new DataView(bytes.buffer).setUint32(
+    footerSizeFieldOffset(bytes.byteLength),
+    base.bytes.byteLength - base.payloadStart + index.byteLength + RECORD_HEADER_SIZE,
+    true,
+  );
+  return { bytes, records: base.records, indexOffset };
 }
 
 function footerVersionOffset(fileSize: number): number {
@@ -142,6 +184,66 @@ describe('readTrailer with synthetic layouts', () => {
     await expect(readTrailer(new InMemoryRandomAccessSource(file.bytes))).rejects.toMatchObject({
       code: 'invalid-trailer',
     });
+  });
+
+  it('falls back to walking backwards when the index is damaged, keeping why', async () => {
+    const file = contiguousWithIndexRecord(DAMAGED_INDEX);
+    const trailer = await readTrailer(new InMemoryRandomAccessSource(file.bytes));
+    expect(trailer.fallback?.indexError).toContain('outside the trailer');
+    expect(trailer.records.map((record) => record.id)).toEqual([
+      RecordType.Info,
+      RecordType.Gyro,
+      RecordType.Exposure,
+      RecordType.Index,
+    ]);
+    for (const expected of file.records) {
+      expect(trailer.locationOf(expected.id)).toMatchObject({
+        format: expected.format,
+        payload: { offset: expected.offset, length: expected.size },
+      });
+    }
+    expect(trailer.locationOf(RecordType.Index)?.payload).toMatchObject({
+      offset: file.indexOffset,
+      length: DAMAGED_INDEX.byteLength,
+    });
+  });
+
+  it('names both the index and the walk failure when neither can locate the records', async () => {
+    const file = contiguousWithIndexRecord(DAMAGED_INDEX);
+    const view = new DataView(file.bytes.buffer);
+    const gyro = file.records.find((record) => record.id === RecordType.Gyro)!;
+    view.setUint32(gyro.offset + gyro.size + RECORD_HEADER_SIZE_OFFSET, 0xff_ff_ff_ff, true);
+    let error: unknown;
+    try {
+      await readTrailer(new InMemoryRandomAccessSource(file.bytes));
+    } catch (error_) {
+      error = error_;
+    }
+    expect(error).toMatchObject({ code: 'invalid-trailer' });
+    expect((error as Error).message).toContain('outside the trailer');
+    expect((error as Error).message).toContain('not contiguous');
+  });
+
+  it('reports no fallback when the index holds up', async () => {
+    const file = syntheticRecords().buildIndexed({ alignment: 4096 });
+    const trailer = await readTrailer(new InMemoryRandomAccessSource(file.bytes));
+    expect(trailer.fallback).toBeUndefined();
+  });
+
+  it('lets a source failure through untouched instead of falling back', async () => {
+    const file = syntheticRecords().buildIndexed({ alignment: 1 });
+    const inner = new InMemoryRandomAccessSource(file.bytes);
+    const failure = new Error('the disk went away');
+    let reads = 0;
+    const failingSource: RandomAccessSource = {
+      size: () => inner.size(),
+      read: (range) => {
+        reads += 1;
+        return reads === 2 ? Promise.reject(failure) : inner.read(range);
+      },
+    };
+    await expect(readTrailer(failingSource)).rejects.toBe(failure);
+    expect(reads).toBe(2);
   });
 
   it('walks contiguous records backwards when there is no index', async () => {

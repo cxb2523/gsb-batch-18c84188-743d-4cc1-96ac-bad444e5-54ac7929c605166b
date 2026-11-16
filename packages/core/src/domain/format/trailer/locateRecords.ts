@@ -1,24 +1,56 @@
 import { RecordHeader } from './RecordHeader';
 import { parseRecordIndex } from './parseRecordIndex';
 import type { RecordLocation } from './RecordLocation';
+import type { TrailerContents } from './Trailer';
 import type { TrailerLayout } from './TrailerLayout';
 import { RECORD_HEADER_SIZE, RecordType, TRAILER_FOOTER_SIZE } from '../constants';
 import type { RandomAccessSource } from '../../../ports/RandomAccessSource';
 import { ByteRange } from '../../../shared/binary/ByteRange';
-import { GyroViewError } from '../../../shared/errors/GyroViewError';
+import { GyroViewError, hasErrorCode, messageOf } from '../../../shared/errors/GyroViewError';
 
 /**
  * Finds every record payload. Newer firmware writes an index record before the footer and pads
  * records to aligned offsets; older firmware writes records back to back, which can only be
  * walked backwards from the footer. The header before the footer tells which case applies.
  */
-export function locateRecords(
+export async function locateRecords(
   source: RandomAccessSource,
   layout: TrailerLayout,
-): Promise<readonly RecordLocation[]> {
+): Promise<TrailerContents> {
   return layout.lastHeader.id === RecordType.Index
-    ? locateThroughIndex(source, layout)
-    : locateByWalkingBackwards(source, layout);
+    ? locateThroughIndexOrWalk(source, layout)
+    : { records: await locateByWalkingBackwards(source, layout) };
+}
+
+/**
+ * The index is a convenience, not a necessity: the records sit behind it all the same, so an
+ * index that fails to parse or validate falls back to the backward walk. Only trailer
+ * corruption falls back — a source that fails to read fails the read as it always has.
+ */
+async function locateThroughIndexOrWalk(
+  source: RandomAccessSource,
+  layout: TrailerLayout,
+): Promise<TrailerContents> {
+  let indexError: string;
+  try {
+    return { records: await locateThroughIndex(source, layout) };
+  } catch (error) {
+    if (!hasErrorCode(error, 'invalid-trailer')) throw error;
+    indexError = messageOf(error);
+  }
+  try {
+    return {
+      records: await locateByWalkingBackwards(source, layout),
+      fallback: { indexError },
+    };
+  } catch (walkError) {
+    if (!hasErrorCode(walkError, 'invalid-trailer')) throw walkError;
+    throw new GyroViewError(
+      'invalid-trailer',
+      `${indexError}; walking the records backwards failed too: ${messageOf(walkError)}`,
+      { cause: walkError },
+    );
+  }
 }
 
 async function locateThroughIndex(

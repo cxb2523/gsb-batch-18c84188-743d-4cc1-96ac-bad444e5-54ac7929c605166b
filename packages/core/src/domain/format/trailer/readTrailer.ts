@@ -1,9 +1,8 @@
 import { locateRecords } from './locateRecords';
 import { RecordHeader } from './RecordHeader';
-import { Trailer } from './Trailer';
+import { Trailer, type TrailerContents } from './Trailer';
 import { TrailerFooter } from './TrailerFooter';
 import type { TrailerLayout } from './TrailerLayout';
-import type { RecordLocation } from './RecordLocation';
 import { KNOWN_TRAILER_VERSION, RECORD_HEADER_SIZE, TRAILER_FOOTER_SIZE } from '../constants';
 import type { RandomAccessSource } from '../../../ports/RandomAccessSource';
 import { ByteRange } from '../../../shared/binary/ByteRange';
@@ -35,7 +34,7 @@ export async function readTrailer(source: RandomAccessSource, fileSize: number):
 async function recordsOf(
   source: RandomAccessSource,
   layout: TrailerLayout,
-): Promise<readonly RecordLocation[]> {
+): Promise<TrailerContents> {
   try {
     return await locateRecords(source, layout);
   } catch (error) {

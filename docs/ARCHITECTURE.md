@@ -51,7 +51,8 @@ sizes; every constant is named and cites its source.
   (`mp4/keyframeRules`); a fragmented file is refused. `docs/FORMAT.md` lists what it reads.
 - `trailer/readTrailer` reads the 72-byte footer and the records' table of contents, either
   through the index record or by walking record headers backwards (`locateRecords`), two
-  strategies chosen by what the file contains.
+  strategies chosen by what the file contains. A damaged index record falls back to the
+  backward walk, and the resulting `Trailer` says so through its `fallback` note.
 - `info/readInfoRecord` finds the info record through the trailer, and `info/parseInfoRecord`
   decodes it from protobuf into `RecordingInfo`: camera, firmware,
   calibration strings, timing fields, layout hints. Absent fields are `undefined`.
