@@ -6,7 +6,13 @@ import path from 'path'
 import { subprocessEnv } from './env'
 import { findFfmpeg } from './youtube'
 
-export async function saveReel(data: ArrayBuffer): Promise<string | null> {
+export interface ReelSaveResult {
+  path: string
+  /** What actually landed on disk — mp4 when transcoding worked, webm on fallback. */
+  format: 'mp4' | 'webm'
+}
+
+export async function saveReel(data: ArrayBuffer): Promise<ReelSaveResult | null> {
   const dir = path.join(app.getPath('music'), 'StemDeck Recordings')
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const mp4File = path.join(dir, `stemdeck-reel-${stamp}.mp4`)
@@ -14,11 +20,11 @@ export async function saveReel(data: ArrayBuffer): Promise<string | null> {
   const tmpFile = path.join(tmpdir(), `stemdeck-reel-${process.pid}-${Date.now()}.webm`)
   const bytes = Buffer.from(data)
 
-  const saveWebmFallback = async (): Promise<string | null> => {
+  const saveWebmFallback = async (): Promise<ReelSaveResult | null> => {
     try {
       await fs.mkdir(dir, { recursive: true })
       await fs.writeFile(webmFile, bytes)
-      return webmFile
+      return { path: webmFile, format: 'webm' }
     } catch (error) {
       console.error('Failed to save reel WebM fallback:', error)
       return null
@@ -85,7 +91,7 @@ export async function saveReel(data: ArrayBuffer): Promise<string | null> {
           (error) => (error ? reject(error) : resolve())
         )
       })
-      return mp4File
+      return { path: mp4File, format: 'mp4' }
     } catch (error) {
       console.error('Failed to transcode reel to MP4; saving WebM instead:', error)
       try {

@@ -77,6 +77,12 @@ export class ReelRecorder {
   private screenVideo: HTMLVideoElement | null = null
   private recorder: MediaRecorder | null = null
   private chunks: Blob[] = []
+  /**
+   * Resolves with the final webm once the MediaRecorder has flushed. Shared by
+   * stop() and an OS-level share end, so both paths yield the same take.
+   */
+  private finalized: Promise<Blob> | null = null
+  private starting = false
   private raf = 0
   startedAt = 0
 
@@ -92,36 +98,50 @@ export class ReelRecorder {
   }
 
   async start(): Promise<void> {
-    this.cameraStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-      audio: false
-    })
-    this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: FPS },
-      audio: false
-    })
-    this.cameraVideo = await playInto(this.cameraStream)
-    this.screenVideo = await playInto(this.screenStream)
+    // A take already running (or being set up) must not stack a second recorder.
+    if (this.starting || this.recorder) return
+    this.starting = true
+    try {
+      this.cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+        audio: false
+      })
+      this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: FPS },
+        audio: false
+      })
+      this.cameraVideo = await playInto(this.cameraStream)
+      this.screenVideo = await playInto(this.screenStream)
 
-    // Stopping the share from the OS-level indicator must end the take too.
-    this.screenStream.getVideoTracks()[0]?.addEventListener('ended', () => this.onScreenEnded?.())
+      // Stopping the share from the OS-level indicator must end the take too:
+      // finalize immediately so the recorded chunks survive, then notify.
+      this.screenStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        void this.finalize()
+        this.onScreenEnded?.()
+      })
 
-    const canvasStream = this.canvas.captureStream(FPS)
-    const audioTrack = engine.reelAudioStream.getAudioTracks()[0]
-    const mixed = new MediaStream([canvasStream.getVideoTracks()[0], ...(audioTrack ? [audioTrack] : [])])
+      const canvasStream = this.canvas.captureStream(FPS)
+      const audioTrack = engine.reelAudioStream.getAudioTracks()[0]
+      const mixed = new MediaStream([canvasStream.getVideoTracks()[0], ...(audioTrack ? [audioTrack] : [])])
 
-    this.chunks = []
-    this.recorder = new MediaRecorder(mixed, {
-      mimeType: pickMimeType(),
-      videoBitsPerSecond: 8_000_000,
-      audioBitsPerSecond: 192_000
-    })
-    this.recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) this.chunks.push(e.data)
+      this.chunks = []
+      this.recorder = new MediaRecorder(mixed, {
+        mimeType: pickMimeType(),
+        videoBitsPerSecond: 8_000_000,
+        audioBitsPerSecond: 192_000
+      })
+      this.recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) this.chunks.push(e.data)
+      }
+      this.recorder.start(1000)
+      this.startedAt = performance.now()
+      this.draw()
+    } catch (err) {
+      this.dispose()
+      throw err
+    } finally {
+      this.starting = false
     }
-    this.recorder.start(1000)
-    this.startedAt = performance.now()
-    this.draw()
   }
 
   /** Fired when the user ends the screen share from outside the app. */
@@ -158,15 +178,28 @@ export class ReelRecorder {
 
   async stop(): Promise<Blob> {
     cancelAnimationFrame(this.raf)
-    const recorder = this.recorder
-    const blob = recorder
-      ? await new Promise<Blob>((resolve) => {
-          recorder.onstop = () => resolve(new Blob(this.chunks, { type: 'video/webm' }))
-          recorder.stop()
-        })
-      : new Blob([], { type: 'video/webm' })
+    const blob = await this.finalize()
     this.dispose()
     return blob
+  }
+
+  /**
+   * Stop the MediaRecorder (if any) and resolve with everything captured so
+   * far. Idempotent: the first caller stops the recorder, later callers get
+   * the same take. With no recorder this is an empty Blob, as before.
+   */
+  private finalize(): Promise<Blob> {
+    if (!this.finalized) {
+      const recorder = this.recorder
+      this.finalized =
+        recorder && recorder.state !== 'inactive'
+          ? new Promise<Blob>((resolve) => {
+              recorder.onstop = () => resolve(new Blob(this.chunks, { type: 'video/webm' }))
+              recorder.stop()
+            })
+          : Promise.resolve(new Blob(this.chunks, { type: 'video/webm' }))
+    }
+    return this.finalized
   }
 
   private dispose(): void {

@@ -11,6 +11,12 @@ export interface StemProgressEvent {
   line: string
 }
 
+/** Where a reel take actually landed, and in which container. */
+export interface ReelSaveResult {
+  path: string
+  format: 'mp4' | 'webm'
+}
+
 export interface StemDeckApi {
   openAudioDialog(): Promise<string[]>
   readFile(filePath: string): Promise<ArrayBuffer>
@@ -21,7 +27,7 @@ export interface StemDeckApi {
   separateStems(trackPath: string, model: string): Promise<StemPaths>
   onStemProgress(callback: (event: StemProgressEvent) => void): () => void
   saveRecording(data: ArrayBuffer): Promise<string | null>
-  saveReel(data: ArrayBuffer): Promise<string | null>
+  saveReel(data: ArrayBuffer): Promise<ReelSaveResult | null>
   mediaAccess(): Promise<{ camera: string; microphone: string; screen: string }>
   requestMediaAccess(kind: 'camera' | 'microphone'): Promise<boolean>
   openPrivacySettings(kind: 'camera' | 'microphone' | 'screen'): Promise<void>

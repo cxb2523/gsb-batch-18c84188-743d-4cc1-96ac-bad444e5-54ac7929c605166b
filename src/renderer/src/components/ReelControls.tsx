@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   cameraPreviewStream,
+  dismissReelSaved,
   reelElapsedSeconds,
+  revealRecording,
   toggleCameraPreview,
   toggleReelMic,
   toggleReelRecording
@@ -37,6 +39,29 @@ function CameraPreview() {
     <div className="camera-preview">
       <video ref={videoRef} muted playsInline />
       <span>Top half of the reel</span>
+    </div>
+  )
+}
+
+/** Where the last take landed — format and full path — until the next take starts. */
+function ReelSavedNote() {
+  const saved = useStore((s) => s.reel.lastSaved)
+  if (!saved) return null
+  const name = saved.path.split(/[\\/]/).pop() ?? saved.path
+  return (
+    <div className="reel-saved" title={saved.path}>
+      <span className={`reel-format ${saved.format}`}>{saved.format.toUpperCase()}</span>
+      <span className="reel-saved-path">{name}</span>
+      <button
+        className="mini-toggle"
+        onClick={() => void revealRecording(saved.path)}
+        title={`Reveal ${saved.path} in your file manager`}
+      >
+        REVEAL
+      </button>
+      <button className="mini-toggle" onClick={() => dismissReelSaved()} title="Dismiss">
+        ✕
+      </button>
     </div>
   )
 }
@@ -79,6 +104,7 @@ export function ReelControls() {
         )}
       </div>
       {reel.preview && !reel.recording && <CameraPreview />}
+      {!reel.recording && !reel.saving && <ReelSavedNote />}
     </>
   )
 }

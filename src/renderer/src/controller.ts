@@ -921,10 +921,11 @@ export async function toggleReelRecording(): Promise<void> {
       const blob = await recorder.stop()
       const saved = await window.stemdeck.saveReel(await blob.arrayBuffer())
       if (saved) {
-        const name = saved.split('/').pop() ?? saved
-        showToast(`Reel saved as ${name}`)
+        const name = saved.path.split(/[\\/]/).pop() ?? saved.path
+        showToast(`Reel saved as ${name} (${saved.format.toUpperCase()})`)
+        updateReel({ lastSaved: saved })
         // Reels are made to be posted, so put the file in front of you.
-        void window.stemdeck.revealPath(saved)
+        void window.stemdeck.revealPath(saved.path)
       } else {
         showToast('Reel could not be saved')
       }
@@ -960,7 +961,12 @@ export async function toggleReelRecording(): Promise<void> {
     return
   }
   reel = recorder
-  updateReel({ recording: true, mic: false, preview: false })
+  updateReel({ recording: true, mic: false, preview: false, lastSaved: null })
+}
+
+/** Dismiss the "last reel saved" note in the reel controls. */
+export function dismissReelSaved(): void {
+  updateReel({ lastSaved: null })
 }
 
 /** Mic can be flipped mid-take; the stream opens on first use. */

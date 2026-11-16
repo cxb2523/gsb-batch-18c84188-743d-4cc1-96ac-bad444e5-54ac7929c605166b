@@ -33,7 +33,8 @@ const api = {
   },
   saveRecording: (data: ArrayBuffer): Promise<string | null> =>
     ipcRenderer.invoke('recording:save', data),
-  saveReel: (data: ArrayBuffer): Promise<string | null> => ipcRenderer.invoke('reel:save', data),
+  saveReel: (data: ArrayBuffer): Promise<{ path: string; format: 'mp4' | 'webm' } | null> =>
+    ipcRenderer.invoke('reel:save', data),
   mediaAccess: (): Promise<{ camera: string; microphone: string; screen: string }> =>
     ipcRenderer.invoke('media:access'),
   requestMediaAccess: (kind: 'camera' | 'microphone'): Promise<boolean> =>

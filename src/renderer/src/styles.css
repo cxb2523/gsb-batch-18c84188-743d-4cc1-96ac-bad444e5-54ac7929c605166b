@@ -425,6 +425,36 @@ button:disabled {
   opacity: 0.4;
 }
 
+/* Where the last reel take landed — format chip + file name. */
+.reel-saved {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.reel-format {
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-weight: 700;
+  background: #10301d;
+  color: var(--green);
+}
+
+.reel-format.webm {
+  background: #2d2410;
+  color: #e0b45c;
+}
+
+.reel-saved-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
 /* Floating self-view; only shown while stopped, so it never lands in a capture. */
 .camera-preview {
   position: fixed;

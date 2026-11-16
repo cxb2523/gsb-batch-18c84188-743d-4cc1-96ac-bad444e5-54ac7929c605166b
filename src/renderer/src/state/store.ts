@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { RecordingInfo, StemPaths } from '../types'
+import type { RecordingInfo, ReelSaveResult, StemPaths } from '../types'
 
 /** Sentinel active-view id for the recordings pane (not a real crate). */
 export const RECORDINGS_VIEW = '__recordings__'
@@ -136,6 +136,8 @@ export interface AppState {
     /** Self-view for framing; hidden while recording so it stays out of the capture. */
     preview: boolean
     saving: boolean
+    /** Where the last take landed (and as what), shown until the next take starts. */
+    lastSaved: ReelSaveResult | null
   }
   toast: string | null
   youtube: { available: boolean; downloading: boolean; status: string }
@@ -197,7 +199,7 @@ export const useStore = create<AppState>(() => ({
   crossfader: 0.5,
   masterGain: 1,
   recording: false,
-  reel: { recording: false, mic: false, preview: false, saving: false },
+  reel: { recording: false, mic: false, preview: false, saving: false, lastSaved: null },
   toast: null,
   youtube: { available: false, downloading: false, status: '' }
 }))
