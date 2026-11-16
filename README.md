@@ -89,3 +89,25 @@ export default {
 
 📄 License
 MIT License
+
+🧪 Local Verification (Seek / Replay)
+The progress-bar seek logic lives in `src/playback.mjs` as pure functions, so it can be verified without a browser:
+
+```bash
+npm test                    # 31 assertions: normal seek, boundary seek, replay, preload start
+node tests/verify-manual.mjs # prints a readable trace using the sample data from src/data.js
+```
+
+What the tests cover:
+
+| Case | Behaviour |
+| --- | --- |
+| Normal seek | Maps global time to segment index + in-segment offset; the video is positioned at `playPoint.start + offset`, and the progress bar keeps the same value |
+| Boundary: `0` | First segment, offset `0` |
+| Boundary: cumulative end | Exactly on a segment's cumulative end goes to the **next** segment's start (offset `0`) |
+| Boundary: total time / beyond | Stops at the **last** segment's end, sets the ended flag, never addresses a non-existent segment |
+| Paused seek | Clicking/dragging the bar while paused stays paused after the jump |
+| Replay after end | Playing again after all segments finish restarts from segment 0 with progress `0` and clears the ended flag |
+| Preload after seek | Both the current segment start and the preload start for the next segment are recomputed from the target segment |
+
+The sample playlist in `src/data.js` keeps four non-contiguous ranges of the same source (durations `3.12 / 5.88 / 8.92 / 3.20`, cumulative ends `3.12 / 9.00 / 17.92 / 21.12`), which makes offset mistakes visible during manual testing.
