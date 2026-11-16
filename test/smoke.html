@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VoxelWeave smoke harness</title>
+</head>
+<body>
+<!-- Loads the exact production page in an iframe, then drives the real UI. -->
+<iframe id="app" src="../index.html" width="1100" height="900"></iframe>
+<script>
+(function () {
+  'use strict';
+  var results = [];
+  function check(name, fn) {
+    try { fn(); results.push({ name: name, ok: true }); }
+    catch (e) { results.push({ name: name, ok: false, error: String(e && e.message || e) }); }
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+
+  var frame = document.getElementById('app');
+  frame.addEventListener('load', function () {
+    var doc = frame.contentDocument;
+    var win = frame.contentWindow;
+    var $ = function (id) { return doc.getElementById(id); };
+
+    var rows = $('rowsInput'), cols = $('columnsInput'),
+        size = $('cellSizeInput'), palette = $('paletteInput'),
+        weave = $('weaveBtn'), exportBtn = $('exportBtn'),
+        canvas = $('canvas'), message = $('message'),
+        snapshotInfo = $('snapshotInfo');
+
+    // ---------------------------------------------------------------
+    check('page boots with no external/network resources (offline capable)', function () {
+      var scripts = Array.prototype.slice.call(doc.querySelectorAll('script[src]'))
+        .map(function (s) { return s.getAttribute('src'); });
+      assert(scripts.every(function (s) { return /^voxelweave\.js($|\?)/.test(s); }),
+        'unexpected external script: ' + scripts.join(','));
+      assert(doc.querySelectorAll('link[rel="stylesheet"][href], img[src], iframe[src]').length === 0,
+        'external subresource found');
+      assert(typeof win.VoxelWeave === 'object', 'core module not loaded');
+    });
+
+    check('initial state: export disabled, empty canvas placeholder shown', function () {
+      assert(exportBtn.disabled === true, 'export should start disabled');
+      assert(win.VoxelWeaveApp.getLastGood() === null, 'no snapshot before first weave');
+      assert(canvas.style.display === 'none', 'canvas hidden until first success');
+    });
+
+    // --- Successful baseline generation ------------------------------
+    check('valid weave renders a canvas matching the parameters', function () {
+      rows.value = '4'; cols.value = '6'; size.value = '8';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === true, 'weave returned false');
+      assert(canvas.width === 48 && canvas.height === 32,
+        'canvas should be 48x32, got ' + canvas.width + 'x' + canvas.height);
+      assert(canvas.style.display !== 'none', 'canvas should be visible');
+      assert($('emptyNote').style.display === 'none', 'placeholder should hide');
+
+      // Pixel-level geometry: each cell is an 8x8 solid block and adjacent
+      // cells differ (palette cycles). No gaps -> seamless tiling.
+      var ctx = canvas.getContext('2d');
+      var data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      function px(x, y) {
+        var i = (y * canvas.width + x) * 4;
+        return [data[i], data[i + 1], data[i + 2]].join(',');
+      }
+      // Whole 8x8 block at (0,0) is one uniform color.
+      var first = px(0, 0);
+      assert(px(7, 7) === first, 'cell interior should be uniform');
+      // Next cell starts exactly at x=8 with a different color.
+      assert(px(8, 0) !== first, 'neighbor cell should start at x=8');
+      assert(px(7, 0) !== px(8, 0), 'cells must be flush, no padding column');
+      // Edge cells reach the exact border (tileable edge-to-edge).
+      assert(px(47, 31) && px(47, 31) === px(47, 31), 'border pixel readable');
+
+      var snap = win.VoxelWeaveApp.getLastGood().snapshot;
+      assert(snap.rows === 4 && snap.columns === 6 && snap.cellSize === 8, 'snapshot params');
+      assert(snap.cellCount === 24, 'snapshot cellCount');
+      assert(exportBtn.disabled === false, 'export enabled after success');
+    });
+
+    var baselineDataUrl = canvas.toDataURL();
+    var baselineSnapshot = JSON.parse(JSON.stringify(win.VoxelWeaveApp.getLastGood().snapshot));
+
+    // --- Illegal input fallback: cell size 0 --------------------------
+    check('cell size 0 is rejected, named, and keeps the previous canvas', function () {
+      size.value = '0';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false, 'weave should reject cellSize 0');
+      assert(message.className.indexOf('error') !== -1, 'error banner visible');
+      assert(/cell size/i.test(message.textContent), 'banner should name the item: ' + message.textContent);
+      assert($('field-cellSize').classList.contains('invalid'), 'cellSize field marked invalid');
+      assert($('error-cellSize').textContent.length > 0, 'inline field message shown');
+      assert(canvas.toDataURL() === baselineDataUrl, 'canvas pixels must be unchanged');
+      assert(canvas.width === 48 && canvas.height === 32, 'canvas dimensions must be unchanged');
+      var snap = win.VoxelWeaveApp.getLastGood().snapshot;
+      assert(snap.cellSize === 8, 'snapshot must not be overwritten by failed weave');
+    });
+
+    // --- Illegal input fallback: non-numeric / blank ------------------
+    check('blank rows and huge decimals are rejected without clearing the canvas', function () {
+      rows.value = '';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false);
+      assert($('field-rows').classList.contains('invalid'));
+      assert(/rows/i.test($('error-rows').textContent));
+      assert(canvas.toDataURL() === baselineDataUrl, 'canvas retained after blank rows');
+      rows.value = '4'; // restore
+    });
+
+    // --- Over-limit rejection: total pixels ---------------------------
+    check('combined total-pixel overrun is rejected and identifies the limit', function () {
+      rows.value = '200'; cols.value = '200'; size.value = '32'; // 40.96M px > 16.77M
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false, 'overrun must be rejected');
+      assert(/pixels/i.test(message.textContent), 'banner must state pixels are the problem');
+      assert(/16,777,216/.test(message.textContent), 'banner must show the threshold');
+      assert(canvas.toDataURL() === baselineDataUrl, 'no half-written canvas');
+      assert(canvas.width === 48 && canvas.height === 32, 'old canvas kept');
+    });
+
+    // --- Over-limit rejection: cell count -----------------------------
+    check('cell-count overrun names rows/columns as the offending item', function () {
+      rows.value = '300'; cols.value = '300'; size.value = '1'; // 90k cells > 65,536
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false);
+      assert(/cells/i.test(message.textContent), 'banner must state cell count: ' + message.textContent);
+      assert(canvas.toDataURL() === baselineDataUrl, 'canvas retained');
+    });
+
+    // --- Per-field cap ------------------------------------------------
+    check('a per-field cap (columns > 512) is rejected at the field', function () {
+      rows.value = '4'; cols.value = '600'; size.value = '8';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false);
+      assert($('field-columns').classList.contains('invalid'));
+      assert(/maximum of 512/.test($('error-columns').textContent));
+      assert(canvas.toDataURL() === baselineDataUrl);
+    });
+
+    // --- Bad palette ---------------------------------------------------
+    check('an invalid palette is rejected and the old canvas survives', function () {
+      rows.value = '4'; cols.value = '6'; size.value = '8';
+      palette.value = 'not-a-color, 12345';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === false);
+      assert($('field-palette').classList.contains('invalid'));
+      assert(canvas.toDataURL() === baselineDataUrl);
+      palette.value = baselineSnapshot.palette.join(', ');
+    });
+
+    // --- Manifest consistency after editing without regenerating ------
+    check('editing inputs without re-weaving does not change the export manifest', function () {
+      // Inputs now differ from the successful baseline...
+      rows.value = '10'; cols.value = '10'; size.value = '5';
+      assert(win.VoxelWeaveApp.getLastGood().snapshot.cellSize === 8,
+        'snapshot must ignore un-committed input edits');
+      var exported = win.VoxelWeaveApp.exportBundle();
+      assert(exported && exported.manifest, 'export should return manifest');
+      assert(exported.manifest.rows === baselineSnapshot.rows, 'manifest rows must come from snapshot');
+      assert(exported.manifest.columns === baselineSnapshot.columns);
+      assert(exported.manifest.cellSize === baselineSnapshot.cellSize);
+      assert(exported.manifest.cellCount === baselineSnapshot.cellCount);
+      assert(exported.manifest.widthPx === baselineSnapshot.widthPx);
+      assert(JSON.stringify(exported.manifest.palette) === JSON.stringify(baselineSnapshot.palette));
+      assert(/4/.test(snapshotInfo.textContent), 'snapshot panel still shows last-good params');
+    });
+
+    // --- Re-weave commits new params to a fresh shared snapshot --------
+    check('a successful re-weave updates the snapshot and canvas together', function () {
+      rows.value = '3'; cols.value = '3'; size.value = '4';
+      var ok = win.VoxelWeaveApp.weave();
+      assert(ok === true);
+      assert(canvas.width === 12 && canvas.height === 12, 'new canvas 12x12');
+      var snap = win.VoxelWeaveApp.getLastGood().snapshot;
+      assert(snap.rows === 3 && snap.columns === 3 && snap.cellSize === 4);
+      var exported = win.VoxelWeaveApp.exportBundle();
+      assert(exported.manifest.rows === 3 && exported.manifest.cellSize === 4,
+        'export follows the new snapshot');
+    });
+
+    var failed = results.filter(function (r) { return !r.ok; });
+    document.title = 'SMOKE_DONE ' + (results.length - failed.length) + '/' + results.length;
+    document.body.setAttribute('data-smoke-results', JSON.stringify(results));
+  });
+})();
+</script>
+</body>
+</html>

