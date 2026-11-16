@@ -6,6 +6,7 @@ import { toReading } from '../history/fetch';
 import { boundaries, wallTime, zonedTime } from '../history/timezone';
 import type { Zone } from '../history/timezone';
 import type { Range } from '../history/types';
+import type { Point } from '../history/types';
 import { localize } from '../localize';
 import type { ChartContext } from '../styles/index';
 import type { Band, CardConfig, HomeAssistant, ResolvedBand } from '../types';
@@ -423,6 +424,27 @@ function seriesFor(a: Annotation, series: readonly ChartSeries[]): ChartSeries |
   return (a.entity && series.find((s) => s.entity.entityId === a.entity!.trim())) || series[0];
 }
 
+/**
+ * A stepped line's readings cut to a picture's window: those taken in it, and the one in force
+ * when the window opens (moved to its start), so the step runs in from the left edge. Readings
+ * after the window's end are dropped.
+ */
+export function steppedFor(points: Point[], view: Range): Point[] {
+  // The last reading taken at or before the window opens: the value in force as it does.
+  let before = -1;
+  for (let i = 0; i < points.length && points[i].t <= view.start; i++) before = i;
+  const out: Point[] = [];
+  if (before >= 0) {
+    const head = points[before];
+    // It enters at the window's start, held; a gap there has nothing to hold, so the step begins
+    // at the first reading inside the window (if any).
+    if (head.v !== null) out.push(head.t < view.start ? { ...head, t: view.start, carried: true } : head);
+  }
+  const from = before + 1;
+  for (let i = Math.max(0, from); i < points.length && points[i].t <= view.end; i++) out.push(points[i]);
+  return out;
+}
+
 /** The reading a point label sits on. */
 export function pointFor(series: ChartSeries, at: PointAt, range: Range, grouped: boolean) {
   // Carried values at the edges aren't readings taken in the span (groups always are).
@@ -451,13 +473,15 @@ function zoneRects(bands: ResolvedBand[], scales: PlotScales): SVGTemplateResult
 /**
  * Everything the card's annotations draw on a history chart: zones and bands behind, threshold
  * and time lines in front, and their labels and point marks over the plot. `plotWidth` is in px,
- * for spacing time labels.
+ * for spacing time labels. `pictured` is the times an exported picture covers: marks and labels
+ * outside it are left out, so a zoomed chart's picture carries only what is on show.
  */
 export function annotationLayers(
   ctx: ChartContext,
   frame: HistoryFrame,
   scales: PlotScales,
   plotWidth: number,
+  pictured?: Range,
 ): AnnotationLayers {
   const list = annotationsOf(ctx.raw);
   const zones = ctx.raw.zones === true && frame.series[0] ? zoneRects(frame.series[0].entity.bands, scales) : [];
@@ -472,10 +496,12 @@ export function annotationLayers(
   const steps = thresholdSteps(ctx, frame);
   const until = Math.min(range.end, Date.now());
   const unit = annotationUnit(frame);
+  // What the picture may carry: its times.
+  const within = (t: number) => pictured === undefined || (t >= pictured.start && t <= pictured.end);
 
   const pending: { t: number; label: string; color: string }[] = [];
   const marks = (a: Annotation, color: string, times: number[], kind: string) => {
-    const shown = times.slice(0, 2000);
+    const shown = times.filter(within).slice(0, 2000);
     front.push(
       svg`${shown.map((t) => svg`<line class="mark-line ${kind}" x1=${x(t)} x2=${x(t)} y1="0" y2=${VIEW_H} stroke=${color}></line>`)}`,
     );
@@ -483,12 +509,12 @@ export function annotationLayers(
       for (const t of shown) pending.push({ t, label: a.label, color });
     }
   };
-
   for (const a of list) {
     const color = baseColor(a.color ?? DEFAULT_COLOR[a.type]);
     const stepped = a.type === 'line' ? steps.get(historyEntity(a) ?? '') : undefined;
-    const step =
-      stepped && steppedThreshold(stepped, scales, color, a.dash !== false, a.zone, zoneBands(a, ctx.hass, unit));
+    // A picture draws a stepped line only over the times it shows (see `steppedThreshold`).
+    const cut = stepped && pictured ? steppedFor(stepped, pictured) : stepped;
+    const step = cut && steppedThreshold(cut, scales, color, a.dash !== false, a.zone, zoneBands(a, ctx.hass, unit));
     if (step) {
       // A line through the entity's history: stepped, with its label where it ends.
       if (step.zone) behind.push(step.zone);
@@ -541,21 +567,37 @@ export function annotationLayers(
       marks(a, color, markTimes(timeList(a.times), range, frame.zone), 'time');
     } else if (a.type === 'state') {
       const spans = stateSpans(states.get(a.entity!.trim()) ?? [], a.state, range, until);
+      // A picture shades only the part of a stretch inside its window.
+      const visible = pictured
+        ? spans
+            .map((s) => ({ ...s, start: Math.max(s.start, pictured.start), end: Math.min(s.end, pictured.end) }))
+            .filter((s) => s.end > s.start)
+        : spans;
       if (a.shade) {
         behind.push(
-          svg`${spans.map((s) => svg`<rect class="state-shade" x=${x(s.start)} width=${Math.max(0, x(s.end) - x(s.start))} y="0" height=${VIEW_H} fill=${color}></rect>`)}`,
+          svg`${visible.map((s) => svg`<rect class="state-shade" x=${x(s.start)} width=${Math.max(0, x(s.end) - x(s.start))} y="0" height=${VIEW_H} fill=${color}></rect>`)}`,
         );
       }
       // A stretch already going when the chart starts has no start to mark.
       marks(
         a,
         color,
-        spans.map((s) => s.start).filter((t) => t > range.start),
+        visible.map((s) => s.start).filter((t) => t > range.start),
         'state',
       );
     } else if (a.type === 'point') {
       const s = seriesFor(a, frame.series);
-      const p = s && pointFor(s, a.at ?? 'max', range, frame.group !== undefined);
+      // A picture marks the reading it shows: the highest (or lowest…) one within its window.
+      const p =
+        s &&
+        (pictured
+          ? pointFor(
+              { ...s, points: s.points.filter((pt) => pt.t >= pictured.start && pt.t <= pictured.end) },
+              a.at ?? 'max',
+              pictured,
+              frame.group !== undefined,
+            )
+          : pointFor(s, a.at ?? 'max', range, frame.group !== undefined));
       if (!s || !p) continue;
       const left = x(p.t) / VIEW_W;
       const top = scales.y(p.v as number) / VIEW_H;

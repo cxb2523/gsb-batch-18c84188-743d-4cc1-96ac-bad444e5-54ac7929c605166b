@@ -405,6 +405,43 @@ describe('the export menu on a card', () => {
     ).toEqual(['sensor.in,21,°C']);
   });
 
+  it('leaves a legend-hidden series out of the copied CSV', async () => {
+    const copied: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async (t: string) => void copied.push(t) } });
+    const card = await mount({ entities: ['sensor.in', 'sensor.out'], legend_toggle: true });
+    // Hide Outside (the second series) from its name in the header.
+    const off = qa(card, 'button.series-toggle')[1];
+    off.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    off.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flush(card);
+    q(card, '.export-button')!.click();
+    await card.updateComplete;
+    q(card, '.export-item[data-action="csv"]')!.click();
+    await flush(card);
+    const rows = copied[0].trim().split('\r\n');
+    expect(rows[0]).toBe('timestamp,entity,value,unit');
+    expect(rows.some((r) => r.includes('sensor.out'))).toBe(false);
+    expect(rows.some((r) => r.includes('sensor.in'))).toBe(true);
+  });
+
+  it('leaves a legend-hidden series out of a chart of current values, too', async () => {
+    const copied: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async (t: string) => void copied.push(t) } });
+    // A box plot draws each item's current value but shares the header's toggles.
+    const card = await mount({ style: 'box', entities: ['sensor.in', 'sensor.out'], legend_toggle: true });
+    const off = qa(card, 'button.series-toggle')[1];
+    off.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    off.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flush(card);
+    q(card, '.export-button')!.click();
+    await card.updateComplete;
+    q(card, '.export-item[data-action="csv"]')!.click();
+    await flush(card);
+    const rows = copied[0].trim().split('\r\n');
+    expect(rows.some((r) => r.includes('sensor.out'))).toBe(false);
+    expect(rows.some((r) => r.includes('sensor.in'))).toBe(true);
+  });
+
   it('saves a file when the clipboard is out of reach, and says when nothing works', async () => {
     vi.stubGlobal('navigator', {});
     const saved: string[] = [];
@@ -467,6 +504,122 @@ describe('the export menu on a card', () => {
     expect(() =>
       card.setConfig({ type: 'x', style: 'line', entities: ['sensor.in'], export: 'yes' } as unknown as CardConfig),
     ).toThrow('"export" must be true or false');
+  });
+});
+
+/** jsdom measures nothing: give the card's parts the boxes a browser would, so a picture has content. */
+function layOut(card: Card): void {
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height }) as DOMRect;
+  const content = card.shadowRoot!.querySelector<HTMLElement>('.content')!;
+  content.getBoundingClientRect = () => rect(0, 0, 420, 280);
+  for (const el of card.shadowRoot!.querySelectorAll<HTMLElement>('.series-header, .series-header *')) {
+    el.getBoundingClientRect = () => rect(16, 8, 110, 18);
+  }
+  for (const el of card.shadowRoot!.querySelectorAll<HTMLElement>('svg, .axis-label')) {
+    el.getBoundingClientRect = () => rect(24, 44, 380, 150);
+  }
+}
+
+/** Take the SVG the card saves, without touching a real download or clipboard. */
+async function captureSvg(card: Card): Promise<string> {
+  const saved: string[] = [];
+  vi.stubGlobal(
+    'URL',
+    Object.assign(function () {}, { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} }),
+  );
+  vi.stubGlobal(
+    'Blob',
+    class {
+      constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+        if (options?.type === 'image/svg+xml') saved.push(String(parts[0]));
+      }
+      type = 'application/octet-stream';
+    } as unknown as typeof Blob,
+  );
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  vi.stubGlobal('navigator', {});
+  layOut(card);
+  card.shadowRoot!.querySelector<HTMLElement>('.export-button')!.click();
+  await card.updateComplete;
+  card.shadowRoot!.querySelector<HTMLElement>('.export-item[data-action="svg"]')!.click();
+  await flush(card);
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  return saved[0] ?? '';
+}
+
+describe('the picture carries only what is on show', () => {
+  it('leaves a legend-hidden series (name, value and line) out of the picture', async () => {
+    const card = await mount({
+      entities: ['sensor.in', 'sensor.out', 'sensor.loft'],
+      legend_toggle: true,
+      animate: false,
+    });
+    // Both series are in the picture until one is hidden.
+    const all = await captureSvg(card);
+    expect(all).toContain('Outside');
+    expect(all).toContain('data-series="1"');
+    // Hide Outside from its name, then picture the chart again.
+    const off = qa(card, 'button.series-toggle')[1];
+    off.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    off.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await flush(card);
+    const picture = await captureSvg(card);
+    expect(picture).not.toContain('Outside');
+    expect(picture).not.toContain('data-series="1"');
+    expect(picture).toContain('Inside');
+    // The chart on screen still lists both names, either side of the export's redraw.
+    expect(qa(card, 'button.series-toggle')).toHaveLength(3);
+    expect(q(card, 'button.series-toggle.off')).not.toBeNull();
+  });
+
+  it('draws a zoomed chart to its window: no line or label from outside it', async () => {
+    const card = await mount({ zoom: true, animate: false });
+    const area = q(card, '.plot-area')!;
+    // A plot 1000 px wide, so a fraction of it is 1000 × that many px.
+    area.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 1000, height: 160, right: 1000, bottom: 160 }) as DOMRect;
+    const drag = (type: string, frac: number) => {
+      const ev = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: frac * 1000, button: 0 });
+      Object.defineProperty(ev, 'pointerType', { value: 'mouse' });
+      Object.defineProperty(ev, 'pointerId', { value: 1 });
+      area.dispatchEvent(ev);
+    };
+    // Zoom into a middle span by dragging across a quarter of the plot.
+    drag('pointerdown', 0.3);
+    drag('pointermove', 0.7);
+    drag('pointerup', 0.7);
+    await flush(card);
+    expect(q(card, '.zoom-reset')).not.toBeNull();
+
+    const picture = await captureSvg(card);
+    // In the plot's own 1000-wide coordinate box, every line stays within 0…1000: the window's
+    // readings are cut at its edges, rather than a point either side running past them.
+    const paths = [...picture.matchAll(/<path[^>]*\sd="([^"]+)"/g)].map((m) =>
+      (m[1].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number),
+    );
+    expect(paths.length).toBeGreaterThan(0);
+    for (const coords of paths) {
+      expect(Math.min(...coords)).toBeGreaterThanOrEqual(0);
+      expect(Math.max(...coords)).toBeLessThanOrEqual(1000);
+    }
+    // The chart on screen still draws a point either side of the window, so its line meets the
+    // edges as it pans.
+    const onScreen = qa(card, 'path.line').map((p) => p.getAttribute('d') ?? '');
+    expect(
+      onScreen.some((d) => (d.match(/-?\d+(?:\.\d+)?/g) ?? []).some((n) => Number(n) < 0 || Number(n) > 1000)),
+    ).toBe(true);
+  });
+
+  it('draws the whole chart when it has not been zoomed', async () => {
+    const card = await mount({ zoom: true, animate: false });
+    const picture = await captureSvg(card);
+    // The same chart as the screen shows: every series and both names are there.
+    expect(picture).toContain('Inside');
+    expect(picture).toContain('Outside');
+    expect(picture).toContain('data-series="0"');
+    expect(picture).toContain('data-series="1"');
   });
 });
 

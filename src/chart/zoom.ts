@@ -9,6 +9,7 @@ import { VIEW_W } from './frame';
 import type { ChartSeries, HistoryFrame } from './frame';
 import type { Gestures } from './grid';
 import { runs } from './paths';
+import type { Curve } from './paths';
 import { extent, linear, padDomain } from './scale';
 import { downsample } from './downsample';
 import type { Hover } from './tooltip';
@@ -144,6 +145,50 @@ export function visiblePoints(points: Point[], view: Range): Point[] {
   while (last < points.length && points[last].t <= view.end) last++;
   const out = points.slice(first, Math.min(points.length, last + 1));
   return out.length === points.length ? points : out;
+}
+
+/** The value at `t` along the segment between `a` and `b`; a gap either side stays a gap. */
+function valueBetween(a: Point, b: Point, t: number): number | null {
+  if (a.v === null || b.v === null || b.t === a.t) return null;
+  return a.v + ((b.v - a.v) * (t - a.t)) / (b.t - a.t);
+}
+
+/**
+ * The readings a zoomed chart shows in `view`, for a picture that carries only what is on show:
+ * readings wholly outside are dropped and, for an ungrouped series, where the line crosses an
+ * edge the crossing is worked out from its neighbours, so the drawing runs exactly to the edges
+ * and no further. Those crossings are marked `carried`: the chart was never told them, they are
+ * where the line leaves the window. A gap at an edge stays a gap. `curve` matters at an edge: a
+ * `step` line holds the reading before it, while the others are read between the two.
+ * Grouped readings (each covering `t` to `end`) are kept when any of them overlaps the window;
+ * they are not interpolated, since a group is one reading.
+ */
+export function clipPoints(points: Point[], view: Range, curve: Curve = 'straight'): Point[] {
+  if (points.length === 0) return points;
+  // A window that already holds the whole series needs no cutting at all.
+  if ((points[0].end ?? points[0].t) >= view.start && points[points.length - 1].t <= view.end) return points;
+  // A grouped point covers `t` to `end`: it is in view while any of it is.
+  const first = points.findIndex((p) => (p.end ?? p.t) >= view.start && p.t <= view.end);
+  if (first < 0) return [];
+  let last = points.length - 1;
+  while (last > first && !((points[last].end ?? points[last].t) >= view.start && points[last].t <= view.end)) last--;
+  const inside = points.slice(first, last + 1);
+  if (points.some((p) => p.end !== undefined)) return inside;
+  const out: Point[] = [...inside];
+  const before = first > 0 ? points[first - 1] : undefined;
+  const after = last + 1 < points.length ? points[last + 1] : undefined;
+  // Where the line enters: a step holds the reading before the window; the others run between it
+  // and the first reading inside.
+  if (before && out[0].t > view.start && before.v !== null && out[0].v !== null) {
+    const v = curve === 'step' ? before.v : valueBetween(before, out[0], view.start);
+    if (v !== null) out.unshift({ t: view.start, v, carried: true });
+  }
+  // Where it leaves: a step holds the last reading inside; the others run on to the one after.
+  if (after && out[out.length - 1].t < view.end && after.v !== null && out[out.length - 1].v !== null) {
+    const v = curve === 'step' ? out[out.length - 1].v : valueBetween(out[out.length - 1], after, view.end);
+    if (v !== null) out.push({ t: view.end, v, carried: true });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- state

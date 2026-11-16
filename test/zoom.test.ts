@@ -3,6 +3,7 @@ import '../src/chartdeck-card';
 import {
   FULL,
   clampWindow,
+  clipPoints,
   isZoomed,
   minZoomMs,
   panBy,
@@ -74,6 +75,50 @@ describe('zoom maths', () => {
     expect(visiblePoints(groups, { start: 15, end: 16 }).map((p) => p.t)).toEqual([0, 10, 20]);
     expect(minZoomMs({ group: undefined })).toBe(300_000);
     expect(minZoomMs({ group: { unit: 'day', aggregate: 'mean' } })).toBe(2 * 86_400_000);
+  });
+
+  it('cuts a series to a zoomed window, drawing to each edge and no further', () => {
+    const pts = [0, 10, 20, 30, 40].map((t) => ({ t, v: t }));
+    // Readings at 10, 20, 30 stay; the crossings at 15 and 25 are read between neighbours.
+    const cut = clipPoints(pts, { start: 15, end: 25 });
+    expect(cut.map((p) => p.t)).toEqual([15, 20, 25]);
+    expect(cut.map((p) => p.v)).toEqual([15, 20, 25]);
+    expect(cut[0].carried).toBe(true);
+    expect(cut[2].carried).toBe(true);
+    // Nothing outside the window is kept, so a spike just past an edge leaves no geometry.
+    const spike = [
+      { t: 0, v: 1 },
+      { t: 10, v: 1 },
+      { t: 11, v: 900 },
+      { t: 12, v: 1 },
+      { t: 20, v: 1 },
+    ];
+    expect(clipPoints(spike, { start: 0, end: 10 }).every((p) => p.t <= 10)).toBe(true);
+    expect(clipPoints(spike, { start: 0, end: 10 }).map((p) => p.v)).toEqual([1, 1]);
+    // A window that already holds the whole series is left as it is.
+    expect(clipPoints(pts, { start: -5, end: 50 })).toBe(pts);
+    // A window past every reading leaves nothing to draw.
+    expect(clipPoints(pts, { start: 100, end: 200 })).toEqual([]);
+  });
+
+  it('holds a step reading at a window edge, and keeps a gap a gap', () => {
+    const step = [0, 10, 20, 30].map((t) => ({ t, v: t }));
+    // A step holds the reading before the window: 10, not the interpolated 15.
+    expect(clipPoints(step, { start: 15, end: 25 }, 'step').map((p) => p.v)).toEqual([10, 20, 20]);
+    const gap = [
+      { t: 0, v: 1 },
+      { t: 10, v: null },
+      { t: 20, v: 3 },
+    ];
+    // Entering through a gap adds no crossing: there is no line to run in from the edge.
+    expect(clipPoints(gap, { start: 5, end: 15 }).map((p) => p.v)).toEqual([null]);
+  });
+
+  it('keeps a grouped reading that overlaps the window, without interpolating', () => {
+    const groups = [0, 10, 20, 30].map((t) => ({ t, v: t, end: t + 10 }));
+    // 0–10 and 20–30 overlap 8…25; 30–40 starts past it and is dropped whole.
+    expect(clipPoints(groups, { start: 8, end: 25 }).map((p) => p.t)).toEqual([0, 10, 20]);
+    expect(clipPoints(groups, { start: 8, end: 25 }).every((p) => p.carried === undefined)).toBe(true);
   });
 });
 

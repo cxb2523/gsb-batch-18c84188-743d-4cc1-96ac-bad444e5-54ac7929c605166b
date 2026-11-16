@@ -5,6 +5,7 @@ import type { ResolvedEntity } from '../resolve';
 import type { CardConfig, HomeAssistant } from '../types';
 import { shownValue } from '../history/energy';
 import type { Point } from '../history/types';
+import { beginExport, endExport } from './export-mode';
 import { embedFonts, withGeneric } from './export-fonts';
 
 /*
@@ -30,9 +31,21 @@ export interface PlottedSeries {
 
 const plotted = new WeakMap<HTMLElement, PlottedSeries[]>();
 
+/** Which of a card's items a chart drew (by their place in the card), for charts that draw values. */
+const shown = new WeakMap<HTMLElement, ReadonlySet<number>>();
+
 /** Remember what a history chart drew, so the CSV can list it. */
 export function rememberPlotted(host: HTMLElement, series: PlottedSeries[]): void {
   plotted.set(host, series);
+}
+
+/**
+ * Remember which of the card's items a chart drew, by their place in it, so a CSV of current
+ * values leaves out the ones hidden with `legend_toggle` (the names' toggles). Charts that draw
+ * readings record the series themselves, and don't need this.
+ */
+export function rememberShown(host: HTMLElement, places: Iterable<number>): void {
+  shown.set(host, new Set(places));
 }
 
 /**
@@ -41,6 +54,7 @@ export function rememberPlotted(host: HTMLElement, series: PlottedSeries[]): voi
  */
 export function forgetPlotted(host: HTMLElement): void {
   plotted.delete(host);
+  shown.delete(host);
 }
 
 /** One CSV field: quoted when it holds a comma, quote or line break. */
@@ -56,11 +70,15 @@ export function toCsv(rows: (string | number)[][]): string {
 /**
  * The values a chart drew as CSV (timestamp, entity, value, unit): every reading of a history
  * chart, or each entity's current value for a chart of current values. Gaps are left out.
+ * `only` names the items a chart of current values drew, by their place in `items`, so the ones
+ * its names hide are left out too; a history chart records its drawn series itself, so its rows
+ * already match what is on show.
  */
 export function plottedCsv(
   series: PlottedSeries[] | undefined,
   items: Pick<ResolvedEntity, 'entityId' | 'unit' | 'value'>[],
   now = Date.now(),
+  only?: ReadonlySet<number>,
 ): string {
   const rows: (string | number)[][] = [['timestamp', 'entity', 'value', 'unit']];
   if (series) {
@@ -74,7 +92,10 @@ export function plottedCsv(
     }
   } else {
     const at = new Date(now).toISOString();
-    for (const e of items) if (e.value !== null) rows.push([at, e.entityId, e.value, e.unit]);
+    items.forEach((e, i) => {
+      if (e.value === null || (only && !only.has(i))) return;
+      rows.push([at, e.entityId, e.value, e.unit]);
+    });
   }
   return toCsv(rows);
 }
@@ -197,7 +218,13 @@ function inlineSvg(source: SVGSVGElement, x: number, y: number, w: number, h: nu
   const to = [copy, ...copy.querySelectorAll('*')];
   from.forEach((el, i) => {
     const style = getComputedStyle(el);
-    const props = SVG_PROPS.map((p) => [p, style.getPropertyValue(p)] as const).filter(([, v]) => v !== '');
+    // The plot's draw-in clip starts at scaleX(0) and grows once the card is ready; the copy never
+    // animates, so an export taken mid-animation (or before `ready`) would carry an empty plot.
+    // The picture shows the chart fully drawn.
+    const drawn = el.classList.contains('draw-in');
+    const props = SVG_PROPS.map(
+      (p) => [p, drawn && p === 'transform' ? 'none' : style.getPropertyValue(p)] as const,
+    ).filter(([, v]) => v !== '');
     const target = to[i] as Element;
     target.removeAttribute('class');
     if (props.length) target.setAttribute('style', props.map(([p, v]) => `${p}:${v}`).join(';'));
@@ -458,23 +485,53 @@ async function copyOrSave(ctx: ExportContext, text: string, type: string, ext: s
   report(ctx, 'export_failed');
 }
 
+/**
+ * Draw the card once for the picture, take it, and draw it again as usual: a chart that leaves
+ * things out of a picture (readings scrolled out of a zoomed window, a hidden series' name) can
+ * then draw exactly what the export should carry. The redraw is forced to lay out before anything
+ * is measured.
+ */
+async function drawForExport(ctx: ExportContext, root: HTMLElement): Promise<void> {
+  beginExport(ctx.host);
+  ctx.requestUpdate();
+  try {
+    await (ctx.host as HTMLElement & { updateComplete?: Promise<unknown> }).updateComplete;
+  } catch {
+    // No updateComplete (a plain element in a test): the picture is taken from what is there.
+  }
+  // Reading the box flushes style and layout, so what follows measures the redrawn chart.
+  root.getBoundingClientRect();
+}
+
 /** Run one of the menu's actions. */
 export async function runExport(ctx: ExportContext, action: ExportAction): Promise<void> {
   try {
     if (action === 'csv') {
-      return await copyOrSave(ctx, plottedCsv(plotted.get(ctx.host), ctx.items), 'text/csv', 'csv');
+      return await copyOrSave(
+        ctx,
+        plottedCsv(plotted.get(ctx.host), ctx.items, Date.now(), shown.get(ctx.host)),
+        'text/csv',
+        'csv',
+      );
     }
     if (action === 'yaml') {
       return await copyOrSave(ctx, toYaml(ctx.raw), 'text/yaml', 'yaml');
     }
     const root = ctx.content();
     if (!root) return report(ctx, 'export_failed');
-    const theme = themeColors(ctx.host);
-    const picture = snapshotSvg(root, {
-      title: ctx.raw.title,
-      ...theme,
-      skip: (el) => el.classList.contains('export'),
-    });
+    // The card draws for the picture first, so what the window has scrolled past stays out of it.
+    await drawForExport(ctx, root);
+    let picture: { svg: string; width: number; height: number };
+    try {
+      picture = snapshotSvg(root, {
+        title: ctx.raw.title,
+        ...themeColors(ctx.host),
+        skip: (el) => el.classList.contains('export'),
+      });
+    } finally {
+      endExport(ctx.host);
+      ctx.requestUpdate();
+    }
     // The card's font goes into the picture when the page can hand it over (see export-fonts.ts).
     const svg = await embedFonts(picture.svg, getComputedStyle(root).fontFamily);
     if (action === 'svg') {
@@ -485,6 +542,7 @@ export async function runExport(ctx: ExportContext, action: ExportAction): Promi
     const ok = png !== null && saveFile(png, exportFileName(ctx.raw.title, 'png'));
     report(ctx, ok ? 'export_saved' : 'export_failed');
   } catch {
+    endExport(ctx.host);
     report(ctx, 'export_failed');
   }
 }

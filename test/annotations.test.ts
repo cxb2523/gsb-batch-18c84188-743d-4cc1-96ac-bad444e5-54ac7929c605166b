@@ -10,6 +10,7 @@ import {
   pointFor,
   resolveValue,
   stateSpans,
+  steppedFor,
   timeList,
   validateAnnotations,
 } from '../src/chart/annotations';
@@ -161,6 +162,30 @@ describe('marks in time', () => {
     expect(pointFor(s, 'last', range, false)!.t).toBe(10);
     expect(pointFor(s, 'first', range, true)!.t).toBe(0);
     expect(pointFor({ points: [] } as unknown as ChartSeries, 'max', range, false)).toBeUndefined();
+  });
+
+  it('cuts a stepped line to a picture window, holding the reading in force at its start', () => {
+    const steps = [0, 10, 20, 30, 40].map((t) => ({ t, v: t * 2 }));
+    // The window opens between 10 and 20: the held reading (10) enters at its start.
+    expect(steppedFor(steps, { start: 15, end: 35 }).map((p) => [p.t, p.v])).toEqual([
+      [15, 20],
+      [20, 40],
+      [30, 60],
+    ]);
+    // Readings after the window's end are dropped; one exactly at the end is kept.
+    expect(steppedFor(steps, { start: 0, end: 20 }).map((p) => p.t)).toEqual([0, 10, 20]);
+    // A gap in force at the window's start is no held value: the step begins at the next reading.
+    const gap = [
+      { t: 0, v: 1 },
+      { t: 10, v: null },
+      { t: 20, v: 3 },
+      { t: 30, v: 4 },
+    ];
+    expect(steppedFor(gap, { start: 15, end: 35 }).map((p) => [p.t, p.v])).toEqual([
+      [20, 3],
+      [30, 4],
+    ]);
+    expect(steppedFor([], { start: 0, end: 10 })).toEqual([]);
   });
 });
 

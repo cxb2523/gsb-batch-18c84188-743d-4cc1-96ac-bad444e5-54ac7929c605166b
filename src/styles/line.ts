@@ -31,6 +31,7 @@ import {
 } from '../chart/tooltip';
 import { extent } from '../chart/scale';
 import {
+  clipPoints,
   overviewLines,
   overviewStrip,
   stopZoom,
@@ -42,6 +43,7 @@ import {
   zoomStyles,
   zoomView,
 } from '../chart/zoom';
+import { isExporting } from '../chart/export-mode';
 import {
   annotationEntities,
   annotationLayers,
@@ -134,7 +136,9 @@ export function seriesPath(s: ChartSeries, scales: PlotScales, stroke: string, r
     )
     .join('');
   // Dots mark real readings: not the carried value at the edges, and not on a crowded series.
-  const readings = style.dots ? thinned.filter((p) => p.v !== null && p.t !== range.start && p.t !== range.end) : [];
+  const readings = style.dots
+    ? thinned.filter((p) => p.v !== null && !p.carried && p.t !== range.start && p.t !== range.end)
+    : [];
   const dots =
     readings.length > 0 && readings.length <= MAX_DOTS
       ? svg`<path
@@ -166,7 +170,9 @@ function pointLabels(
   options: NonNullable<ReturnType<typeof labelOptions>>,
   compact: boolean,
   ctx: Parameters<ChartStyleModule['render']>[0],
+  pictured = false,
 ) {
+  // The chart's own span, and the times it is drawn over (a zoomed window, or a picture's cut).
   const { range } = frame;
   return dataLabels(
     series.map((s) => ({
@@ -180,8 +186,14 @@ function pointLabels(
       width: plotWidth(ctx),
       // The plot's height less its time labels, roughly.
       height: compact ? 96 : 162,
-      // The points at either edge are carried readings, not new ones (groups are all real).
-      skip: (p) => frame.group === undefined && (p.t === range.start || p.t === range.end),
+      // The points at either edge are carried readings, not new ones (groups are all real). A
+      // picture draws the crossings at its window's edges too, which are not readings either.
+      skip: (p) =>
+        frame.group === undefined &&
+        (p.carried === true ||
+          p.t === range.start ||
+          p.t === range.end ||
+          (pictured && (p.t === view.start || p.t === view.end))),
     },
     ctx.hass,
   );
@@ -367,19 +379,31 @@ export const line: ChartStyleModule = {
     const zoom = zoomView(ctx, frame);
     const view = zoom.range;
     const log = ctx.raw.y_scale === 'log';
+    // A picture of a zoomed chart carries only what the window shows: the lines are cut to its
+    // edges, and marks and labels the window has scrolled past are left out. Outside a picture
+    // the chart keeps drawing a point either side, so its lines reach the edges as it pans.
+    const cut = zoom.zoomed && isExporting(ctx.host);
+    // A cut series also runs straight where it meets an edge: its edge reading was worked out
+    // along the segment, and a smooth curve through the cut points would bow away from the line
+    // the chart shows.
+    const cutSeries = (s: ChartSeries): ChartSeries =>
+      cut ? { ...s, points: clipPoints(s.points, view, s.curve), curve: s.curve === 'step' ? 'step' : 'straight' } : s;
     const shown = zoom.zoomed
-      ? frame.series.map((s) => ({
-          ...s,
-          points: visiblePoints(s.points, view),
-          ...(s.hidden ? { hidden: visiblePoints(s.hidden, view) } : {}),
-        }))
+      ? frame.series.map((s) => {
+          const out = cutSeries(s);
+          if (!s.hidden) return out;
+          const hidden = cut ? clipPoints(s.hidden, view, s.curve) : visiblePoints(s.hidden, view);
+          return { ...out, hidden };
+        })
       : frame.series;
-    const forecasts = ahead.series.map((s) => ({
-      ...s,
-      points: (log ? positivePoints : (p: typeof s.points) => p)(
-        zoom.zoomed ? visiblePoints(s.points, view) : s.points,
-      ),
-    }));
+    const forecasts = ahead.series.map((s) => {
+      const points = zoom.zoomed
+        ? cut
+          ? clipPoints(s.points, view, s.curve)
+          : visiblePoints(s.points, view)
+        : s.points;
+      return { ...s, points: (log ? positivePoints : (p: typeof s.points) => p)(points) };
+    });
     // A log axis has no place for zero or below: those readings are gaps in the drawing (the tooltip still reads them).
     const drawn = log
       ? shown.map((s) => ({
@@ -389,7 +413,11 @@ export const line: ChartStyleModule = {
         }))
       : shown;
     const behind = ghosts.map((g) => {
-      const points = zoom.zoomed ? visiblePoints(g.points, view) : g.points;
+      const points = zoom.zoomed
+        ? cut
+          ? clipPoints(g.points, view, g.curve)
+          : visiblePoints(g.points, view)
+        : g.points;
       return { ...g, points: log ? positivePoints(points) : points };
     });
     // Threshold lines widen the value axis, so a target off the readings' range still shows.
@@ -428,7 +456,10 @@ export const line: ChartStyleModule = {
           [...shown, ...forecasts].map((s) => s.points),
         )
       : undefined;
-    const notes = annotationLayers(ctx, frame, scales, plotWidth(ctx));
+    // A picture carries only the window's own marks: the picture's times, or nothing outside the
+    // whole span when the chart isn't zoomed.
+    const pictured = isExporting(ctx.host) && zoom.zoomed ? view : undefined;
+    const notes = annotationLayers(ctx, frame, scales, plotWidth(ctx), pictured);
     const labels = labelOptions(ctx.raw);
     const width = plotWidth(ctx);
     const marks = extremesLayer({
@@ -474,7 +505,7 @@ export const line: ChartStyleModule = {
         label,
         defs,
         overlay: html`${layout.header === 'over' ? headerOver(header) : nothing}
-        ${labels ? pointLabels(frame, drawn, view, scales, labels, layout.compact, ctx) : nothing}
+        ${labels ? pointLabels(frame, drawn, view, scales, labels, layout.compact, ctx, !!pictured) : nothing}
         ${zoomLayer(ctx, zoom)} ${notes.overlay} ${marks.overlay} ${anomalies.overlay}
         ${nowMarkerLayer(ctx, frame, view, scales, width)}
         ${forecasts.length ? forecastLabel(ctx, forecasts, scales) : nothing}

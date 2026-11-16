@@ -7,6 +7,8 @@ import { localize } from '../localize';
 import type { ResolvedEntity } from '../resolve';
 import type { ChartContext } from '../styles/index';
 import type { CardConfig } from '../types';
+import { rememberShown } from './export';
+import { isExporting } from './export-mode';
 import type { ChartSeries } from './frame';
 
 /*
@@ -148,13 +150,26 @@ export function withLegend<F extends { series: ChartSeries[] }>(
   ctx: ChartContext,
   locked: (s: ChartSeries) => boolean = () => false,
 ): F & { legend?: LegendItems } {
-  if (!legendToggleActive(ctx)) return frame;
+  // Charts of current values (the pie, the heatmap, the boxes) have no frame stored for the CSV;
+  // this says which of the card's items they drew, so a hidden one stays out of the CSV too.
+  if (!legendToggleActive(ctx)) {
+    rememberShown(
+      ctx.host,
+      frame.series.map((s) => s.index),
+    );
+    return frame;
+  }
   const hidden = hiddenSeries(ctx);
   const lockedSet = new Set(frame.series.filter(locked).map((s) => s.index));
+  const kept = frame.series.filter((s) => lockedSet.has(s.index) || !hidden.has(seriesKey(s.entity)));
+  rememberShown(
+    ctx.host,
+    kept.map((s) => s.index),
+  );
   return {
     ...frame,
     legend: { all: frame.series, locked: lockedSet },
-    series: frame.series.filter((s) => lockedSet.has(s.index) || !hidden.has(seriesKey(s.entity))),
+    series: kept,
   };
 }
 
@@ -176,8 +191,12 @@ export function legendToggleHeader(legend: LegendItems, ctx: ChartContext, group
   };
   const isolate = (key: string) => update(ctx, isolated(stateFor(ctx).hidden, keys, key));
   const hint = localize(ctx.hass, 'legend_toggle_hint');
+  // A picture carries what is on show: a hidden series' name (and the value it still reads) is
+  // left out of the exported header, as it is out of the drawing.
+  const pictured = isExporting(ctx.host);
+  const series = pictured ? legend.all.filter((s) => !state.hidden.has(seriesKey(s.entity))) : legend.all;
   return html`<div class="series-header legend-toggles">
-    ${legend.all.map((s) => {
+    ${series.map((s) => {
       // As in the plain header: an Energy dashboard series reads its total over the span.
       const value = energyValueText(s.entity, s.points, group, ctx.hass) ?? s.entity.display;
       const body = html`<span class="swatch" style="background:${s.color}"></span>
