@@ -13,7 +13,13 @@
 <body>
     <div class="game-container">
         <h1>JavaScript <span class="green-text"> Snake </span> Game <img src="assets/snakelogo.jpg" alt="Snake game logo"></h1>
-        <canvas id="canvas"></canvas>
+        <div class="board">
+            <canvas id="canvas"></canvas>
+            <div id="gameOver" class="game-over" hidden>
+                <p id="gameOverTitle" class="game-over-title">Game Over</p>
+                <p class="game-over-score">Final score: <span id="finalScore">1</span></p>
+            </div>
+        </div>
         <div class="text">
             <p class="score">Snake Size: <span id="snakeSize">1</span></p>
             <p>Developed by: <a href="https://leandrols.github.io" target="_blank" rel="noopener noreferrer">Leandro L.</a></p>

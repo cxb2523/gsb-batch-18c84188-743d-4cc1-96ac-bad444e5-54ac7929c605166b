@@ -3,21 +3,41 @@
 <head>
     <meta charset="utf-8">
     <title>Mocha Tests</title>
-    <link href="https://cdn.rawgit.com/mochajs/mocha/2.2.5/mocha.css" rel="stylesheet" />
+    <link href="https://unpkg.com/mocha@10.7.3/mocha.css" rel="stylesheet" />
 </head>
 
 <body>
     <div id="mocha"></div>
-    <script src="https://cdn.rawgit.com/mochajs/mocha/2.2.5/mocha.js"></script>
-    <script src="https://www.chaijs.com/chai.js"></script>
-    <canvas id="canvas" width="400px" height="400px"></canvas>
+    <script src="https://unpkg.com/mocha@10.7.3/mocha.js"></script>
+    <script src="https://unpkg.com/chai@4.4.1/chai.js"></script>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <div id="gameOver" hidden>
+        <p id="gameOverTitle">Game Over</p>
+        <span id="finalScore">1</span>
+    </div>
+    <span id="snakeSize">1</span>
     <script>
-        mocha.setup('bdd')
+        mocha.setup('bdd');
+        // Impede que o jogo real inicie junto com os testes.
+        window.__SNAKE_DISABLE_AUTO_START__ = true;
     </script>
+    <script src="../config.js"></script>
     <script src="../objects/World.js"></script>
     <script src="../objects/Snake.js"></script>
     <script src="../objects/Food.js"></script>
     <script src="../game.js"></script>
+    <script>
+        // Classes expostas para a suíte compartilhada (test.snake.js).
+        window.__snakeTestContext = {
+            World,
+            Snake,
+            Food,
+            SnakeGame,
+            GAME_STATE,
+            GAME_CONFIG,
+            DIRECTION,
+        };
+    </script>
     <script src="test.snake.js"></script>
     <script>
         mocha.checkLeaks();

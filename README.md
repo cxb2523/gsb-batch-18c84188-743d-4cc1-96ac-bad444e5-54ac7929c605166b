@@ -12,8 +12,9 @@ Jogo da cobrinha (Snake) feito com JavaScript e HTML Canvas.
 
 **Regras**
 - Comer a comida (quadrado vermelho) faz a cobra crescer e aumenta a pontuação, mostrada em *Snake Size*.
-- Ao sair por uma borda, a cobra reaparece na borda oposta.
-- Se a cabeça encostar no próprio corpo, o jogo termina (*Game Over*) e reinicia.
+- A comida nunca aparece sobre o corpo da cobra. Se o tabuleiro ficar cheio, a partida termina com a mensagem *You Win!*.
+- Ao sair por uma borda, a cobra reaparece na borda oposta com o corpo contínuo (sem espaços).
+- Se a cabeça encostar no próprio corpo, o jogo termina: o loop para, o painel *Game Over* mostra a pontuação final e a página **não** recarrega. Depois disso, as setas não mudam mais a direção.
 - A cobra não pode dar meia-volta de uma vez (por exemplo, ir de "direita" direto para "esquerda").
 
 ## Estrutura do projeto
@@ -40,9 +41,43 @@ game.js ──cria──▶ World ◀──usa── Snake
    └────cria──▶ Food┘        config.js é lido por todos
 ```
 
-- `game.js` cria `World`, `Snake` e `Food` e, a cada 120 ms, redesenha o tabuleiro, move a cobra e verifica se ela comeu.
+- `SnakeGame` (em `game.js`) cria `World`, `Snake` e `Food` e, a cada 120 ms, redesenha o tabuleiro, move a cobra e verifica se ela comeu.
 - `Snake` e `Food` não mexem direto no canvas: pedem ao `World` para pintar (`fillBox`).
 - **A ordem dos scripts no `index.html` importa**: `config.js` deve vir primeiro, pois os demais dependem dele.
+
+### Fim de partida
+
+`SnakeGame` controla o ciclo com `GAME_STATE`:
+
+| Estado | Quando acontece | O que o jogo faz |
+|---|---|---|
+| `running` | Partida em andamento | Move a cobra e aceita setas |
+| `game-over` | Cabeça toca o próprio corpo | Para o loop, mostra *Game Over* e a pontuação final |
+| `board-full` | Tabuleiro sem célula livre para a comida | Para o loop e mostra *You Win!* |
+
+A comida é sorteada a partir da lista de células livres (`Food.getFreeCells`), então não existe laço de tentativas: se a lista estiver vazia, o sorteio retorna `null` imediatamente e o `game.js` decide encerrar.
+
+## Testes
+
+A suíte fica em `test/test.snake.js` e roda em dois ambientes:
+
+```bash
+# Node.js (sem navegador, sem dependências)
+node --test test/snake.test.js
+```
+
+Ou abra `test/test.html` no navegador (Mocha via CDN). `test/browser-check.html`
+executa uma verificação de integração no DOM real (painel de fim de jogo, loop
+parado e teclas ignoradas) e pode ser aberto no navegador ou rodado com o Chrome
+headless.
+
+Os testes cobrem, entre outros pontos:
+
+- a comida nunca é sorteada sobre uma célula ocupada pela cobra;
+- tabuleiro cheio retorna “sem posição” (`null`) sem travar;
+- após atravessar uma borda, o corpo continua contínuo e dentro do canvas;
+- a colisão com o próprio corpo usa a posição real pós-teletransporte;
+- ao colidir, o loop para, o painel aparece, a pontuação é preservada e as setas são ignoradas.
 
 ## Configuração
 
@@ -74,12 +109,8 @@ Este projeto passou por uma refatoração baseada em princípios de código limp
 
 ## Pontos de melhoria futuros
 
-Itens identificados, mas mantidos para não alterar o comportamento original:
-
-- `Food.isColliding` verifica a colisão e também sorteia nova posição; as duas ações poderiam ser separadas.
-- A comida pode surgir sobre o corpo da cobra.
-- Alguns nomes (`dontColideWithEndOfCanvas`, `getSnakeTrail`) poderiam ser mais claros e ter a grafia corrigida.
-- Adicionar testes automatizados para `Snake`, `Food` e `World`.
+- Alguns nomes (`dontColideWithEndOfCanvas`, `getSnakeTrail`) ainda são herança da versão original, embora já documentem o novo comportamento.
+- Extrair o sorteio de comida e a colisão para módulos separados, caso o projeto cresça.
 
 ## Créditos
 

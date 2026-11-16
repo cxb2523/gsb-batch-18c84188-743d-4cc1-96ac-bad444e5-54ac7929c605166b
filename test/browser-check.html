@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8">
+    <title>RUNNING</title>
+    <style>
+        #gameOver { display: none; }
+        #gameOver.is-visible { display: flex; }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas" width="400" height="400"></canvas>
+    <span id="snakeSize">1</span>
+    <div id="gameOver" hidden>
+        <p id="gameOverTitle">Game Over</p>
+        <span id="finalScore">1</span>
+    </div>
+    <pre id="results"></pre>
+
+    <script>window.__SNAKE_DISABLE_AUTO_START__ = true;</script>
+    <script src="../config.js"></script>
+    <script src="../objects/World.js"></script>
+    <script src="../objects/Snake.js"></script>
+    <script src="../objects/Food.js"></script>
+    <script src="../game.js"></script>
+    <script>
+        (function () {
+            const results = [];
+            let failures = 0;
+
+            function check(name, condition, detail) {
+                if (condition) {
+                    results.push("PASS " + name);
+                } else {
+                    failures += 1;
+                    results.push("FAIL " + name + (detail ? " :: " + detail : ""));
+                }
+            }
+
+            function makeScheduler() {
+                const timers = new Map();
+                let nextId = 1;
+                return {
+                    timers,
+                    setInterval(callback) {
+                        const id = nextId++;
+                        timers.set(id, callback);
+                        return id;
+                    },
+                    clearInterval(id) {
+                        timers.delete(id);
+                    },
+                };
+            }
+
+            function buildGame(overrides) {
+                const scheduler = makeScheduler();
+                const beep = { count: 0, play() { this.count += 1; } };
+                const options = {
+                    canvas: document.getElementById("canvas"),
+                    context: document.getElementById("canvas").getContext("2d"),
+                    scoreElement: document.getElementById("snakeSize"),
+                    overlayElement: document.getElementById("gameOver"),
+                    overlayTitleElement: document.getElementById("gameOverTitle"),
+                    finalScoreElement: document.getElementById("finalScore"),
+                    beepSound: beep,
+                    scheduler,
+                    eventTarget: document,
+                };
+                Object.assign(options, overrides || {});
+                return { game: new SnakeGame(options), scheduler, beep };
+            }
+
+            // 1) Comida nunca nasce sobre a cobra (muitas partidas reais).
+            (function () {
+                let ok = true;
+                for (let attempt = 0; attempt < 50; attempt++) {
+                    const built = buildGame();
+                    built.game.start();
+                    const occupied = built.game.snake.getOccupiedCells();
+                    const onSnake = occupied.some(
+                        (cell) => cell.x === built.game.food.positionX
+                            && cell.y === built.game.food.positionY,
+                    );
+                    if (onSnake) { ok = false; }
+                    built.game.stop();
+                }
+                check("food never spawns on snake", ok);
+            })();
+
+            // 2) Tabuleiro cheio: retorna null e encerra visivelmente.
+            (function () {
+                const built = buildGame();
+                const size = built.game.world.boxSizeInPx;
+                const cells = [];
+                for (let y = 0; y < built.game.world.canvasHeight; y += size) {
+                    for (let x = 0; x < built.game.world.canvasWidth; x += size) {
+                        cells.push({ x, y });
+                    }
+                }
+                built.game.snake.tail = cells;
+                built.game.snake.positionX = built.game.world.canvasWidth - size;
+                built.game.snake.positionY = built.game.world.canvasHeight - size;
+                built.game.snake.size = cells.length;
+
+                built.game.start();
+
+                const overlay = document.getElementById("gameOver");
+                check(
+                    "full board ends without loop",
+                    built.game.state === GAME_STATE.BOARD_FULL
+                        && !built.game.isRunning
+                        && built.scheduler.timers.size === 0,
+                    "state=" + built.game.state,
+                );
+                check(
+                    "full board overlay visible",
+                    !overlay.hidden && overlay.classList.contains("is-visible"),
+                );
+                check(
+                    "full board score preserved",
+                    document.getElementById("finalScore").textContent === String(cells.length),
+                );
+            })();
+
+            // 3) Teletransporte: corpo contínuo e dentro do canvas.
+            (function () {
+                const world = new World(
+                    400, 400, 20,
+                    document.getElementById("canvas").getContext("2d"),
+                    document.getElementById("canvas"),
+                );
+                const snake = new Snake(world);
+                snake.size = 3;
+                snake.positionX = 380;
+                snake.positionY = 0;
+                snake.direction = DIRECTION.RIGHT;
+                snake.lastDirection = DIRECTION.RIGHT;
+                snake.tail = [{ x: 340, y: 0 }, { x: 360, y: 0 }, { x: 380, y: 0 }];
+
+                snake.drawSnake();
+
+                const allInside = snake.tail.every(
+                    (cell) => cell.x >= 0 && cell.x < 400 && cell.y >= 0 && cell.y < 400,
+                );
+                check("wrap head crosses to opposite edge", snake.positionX === 0);
+                check("wrap body stays continuous/inside", allInside
+                    && snake.tail.length === 3);
+                check("wrap does not false-positive self collision", !snake.isGameOver);
+            })();
+
+            // 4) Colisão no lado oposto é detectada com a posição real.
+            (function () {
+                const world = new World(
+                    400, 400, 20,
+                    document.getElementById("canvas").getContext("2d"),
+                    document.getElementById("canvas"),
+                );
+                const snake = new Snake(world);
+                snake.size = 5;
+                snake.positionX = 380;
+                snake.positionY = 0;
+                snake.direction = DIRECTION.RIGHT;
+                snake.lastDirection = DIRECTION.RIGHT;
+                snake.tail = [
+                    { x: 60, y: 0 },
+                    { x: 0, y: 0 },
+                    { x: 100, y: 0 },
+                    { x: 120, y: 0 },
+                    { x: 380, y: 0 },
+                ];
+                snake.drawSnake();
+                check("wrap self-collision detected at real cell", snake.isGameOver);
+            })();
+
+            // 5) Game over real: para loop, mostra painel, mantém placar e ignora teclas.
+            (function () {
+                const built = buildGame();
+                const { game } = built;
+                const overlay = document.getElementById("gameOver");
+                game.start();
+                game.snake.positionX = 80;
+                game.snake.positionY = 80;
+                game.snake.size = 4;
+                game.snake.direction = DIRECTION.LEFT;
+                game.snake.lastDirection = DIRECTION.LEFT;
+                game.snake.tail = [
+                    { x: 0, y: 80 },
+                    { x: 60, y: 80 },
+                    { x: 40, y: 80 },
+                    { x: 80, y: 80 },
+                ];
+
+                game.tick();
+
+                check("game over stops the loop", !game.isRunning
+                    && built.scheduler.timers.size === 0 && game.timerId === null);
+                check("game over overlay visible", !overlay.hidden
+                    && overlay.classList.contains("is-visible"));
+                check("game over title shown",
+                    document.getElementById("gameOverTitle").textContent === "Game Over");
+                check("game over final score preserved",
+                    document.getElementById("finalScore").textContent === "4"
+                        && document.getElementById("snakeSize").textContent === "4");
+
+                const directionBefore = game.snake.direction;
+                game.onKeyDown({ key: DIRECTION.UP });
+                game.onKeyDown({ key: DIRECTION.LEFT });
+                check("arrow keys ignored after game over",
+                    game.snake.direction === directionBefore);
+
+                game.stop();
+            })();
+
+            document.getElementById("results").textContent = results.join("\n");
+            document.title = failures === 0 ? "PASS" : "FAIL:" + failures;
+        })();
+    </script>
+</body>
+
+</html>
