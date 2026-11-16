@@ -67,7 +67,10 @@ const drawOrbCore = (context, model, phase) => {
     const centerX = Math.round(bounds.width / 2);
     const centerY = Math.round(bounds.height / 2);
     const pulse = Math.sin(phase * Math.PI * 2);
-    const radius = Math.max(4, config.visuals.startSize * 1.6 + Math.round(pulse));
+    // Rays and blocks reach up to ~14px past the core radius; converge the
+    // radius at render time so no core pixel can land on the canvas edge.
+    const maxRadius = Math.max(2, Math.min(bounds.width, bounds.height) / 2 - 15);
+    const radius = Math.min(Math.max(4, config.visuals.startSize * 1.6 + Math.round(pulse)), maxRadius);
 
     for (let ray = 0; ray < 10; ray += 1) {
         const angle = ray / 10 * Math.PI * 2 + Math.sin(phase * Math.PI * 2 + ray) * 0.14;
@@ -98,8 +101,11 @@ const drawRingCore = (context, model, phase) => {
     const centerX = Math.round(bounds.width / 2);
     const centerY = Math.round(bounds.height / 2);
     const baseRadius = config.shape.radius || config.visuals.startSize * 4;
-    const radius = Math.max(5, baseRadius + Math.sin(phase * Math.PI * 2) * 1.25);
     const block = Math.max(1, Math.round(config.visuals.startSize / 3));
+    // Ring pixels (plus ripple, block and shadow) must stay inside the canvas;
+    // shrink the radius at render time instead of clipping at the edge.
+    const maxRadius = Math.max(2, Math.min(bounds.width, bounds.height) / 2 - block - 4);
+    const radius = Math.min(Math.max(5, baseRadius + Math.sin(phase * Math.PI * 2) * 1.25), maxRadius);
     const segments = Math.max(40, Math.round(radius * 5));
 
     for (let index = 0; index < segments; index += 1) {

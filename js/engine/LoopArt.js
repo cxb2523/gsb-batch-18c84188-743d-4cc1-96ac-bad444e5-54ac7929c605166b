@@ -137,13 +137,19 @@ const colors = (recipe) => Array.isArray(recipe.palette) && recipe.palette.lengt
 const turns = (recipe) => (recipe.direction || 1) * (recipe.loopTurns || 1);
 const points = (recipe) => clamp(Math.round(recipe.symmetry || 6), 3, 12);
 const motifRadius = (recipe) => clamp((recipe.radius || 55) * (recipe.scale || 1) * 0.77, 31, 57);
+// Global oscillators (terms shared by every dot in a frame) must be stationary
+// at the loop seam: a sine peaks in velocity exactly at angle 0, which makes the
+// last-to-first frame step larger than any other. Cosine-phased equivalents keep
+// the same amplitude and period but sit at a turning point on the seam. Breath
+// styles bottom out at the seam so the pattern is smallest (and moves the fewest
+// pixels) exactly where the loop wraps.
 const pulse = (recipe, angle) => {
     const style = recipe.temporalStyle;
-    if (style === 'double-pulse') return 0.78 + 0.22 * Math.cos(angle * 2);
-    if (style === 'staggered') return 0.82 + 0.18 * Math.sin(angle * 3);
-    if (style === 'echo') return 0.86 + 0.14 * Math.cos(angle * 3);
+    if (style === 'double-pulse') return 0.78 - 0.22 * Math.cos(angle * 2);
+    if (style === 'staggered') return 0.82 - 0.18 * Math.cos(angle * 3);
+    if (style === 'echo') return 0.86 - 0.14 * Math.cos(angle * 3);
     if (style === 'slow-build') return 0.66 + 0.34 * (0.5 - 0.5 * Math.cos(angle));
-    return 0.84 + 0.16 * Math.cos(angle);
+    return 0.84 - 0.16 * Math.cos(angle);
 };
 
 const polygon = (context, sides, radius, rotation, color, alpha, size, gaps = false) => {
@@ -215,7 +221,7 @@ const drawOrbit = (context, recipe, angle) => {
         const y = Math.sin(satellite) * radius * flat;
         mark(context, 80 + x * Math.cos(tilt) - y * Math.sin(tilt), 80 + x * Math.sin(tilt) + y * Math.cos(tilt), 3, c[0], 1, 'diamond');
     }
-    polygon(context, 6, 10 + 2 * Math.sin(angle), -angle, c[2], 0.9, 2);
+    polygon(context, 6, 10 - 2 * Math.cos(angle), -angle, c[2], 0.9, 2);
     mark(context, 80, 80, 3, c[0], 1, 'spark');
 };
 
@@ -247,7 +253,7 @@ const drawPrism = (context, recipe, angle) => {
     const c = colors(recipe);
     const cube = [-1, 1].flatMap((x) => [-1, 1].flatMap((y) => [-1, 1].map((z) => [x, y, z])));
     const radius = motifRadius(recipe) * 0.54;
-    const projected = cube.map((point) => rotateProject(point, angle * turns(recipe) + recipe.tilt, 0.48 + 0.12 * Math.sin(angle), radius));
+    const projected = cube.map((point) => rotateProject(point, angle * turns(recipe) + recipe.tilt, 0.48 - 0.12 * Math.cos(angle), radius));
     for (let first = 0; first < cube.length; first += 1) {
         for (let second = first + 1; second < cube.length; second += 1) {
             const differing = cube[first].filter((coordinate, index) => coordinate !== cube[second][index]).length;
@@ -537,7 +543,7 @@ const drawTetrahedron = (ctx, recipe, angle) => {
 const drawOctahedron = (ctx, recipe, angle) => {
     const c = colors(recipe); const r = motifRadius(recipe) * 0.67;
     const raw = [[0, -1.35, 0], [0, 1.35, 0], [1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 0, -1]];
-    const v = raw.map((p) => rotateProject(p, angle * turns(recipe), 0.28 + 0.22 * Math.sin(angle), r));
+    const v = raw.map((p) => rotateProject(p, angle * turns(recipe), 0.28 - 0.22 * Math.cos(angle), r));
     for (let i = 2; i < 6; i += 1) {
         for (const apex of [0, 1]) line(ctx, v[i].x, v[i].y, v[apex].x, v[apex].y, c[i % 3], 0.86, 2);
         const next = 2 + (i - 1) % 4;
@@ -601,7 +607,7 @@ const drawBladeWheel = (ctx, recipe, angle) => {
 };
 
 const drawDaisy = (ctx, recipe, angle) => {
-    const c = colors(recipe); const r = motifRadius(recipe); const spin = Math.sin(angle) * 0.13;
+    const c = colors(recipe); const r = motifRadius(recipe); const spin = -Math.cos(angle) * 0.13;
     for (let petal = 0; petal < 8; petal += 1) {
         const theta = petal * TAU / 8 + spin;
         const center = polar(theta, r * 0.52);
@@ -619,12 +625,12 @@ const drawRose = (ctx, recipe, angle) => {
             return polar(theta, 4 + unit * r * (0.5 + curl * 0.08));
         }, c[curl % 3], 0.87, 2);
     }
-    leaf(ctx, 47, 110, Math.PI * 0.72 + Math.sin(angle) * 0.12, 30, 10, c[2], 0.72, 2);
-    leaf(ctx, 112, 107, Math.PI * 0.28 - Math.sin(angle) * 0.12, 30, 10, c[1], 0.72, 2);
+    leaf(ctx, 47, 110, Math.PI * 0.72 - Math.cos(angle) * 0.12, 30, 10, c[2], 0.72, 2);
+    leaf(ctx, 112, 107, Math.PI * 0.28 + Math.cos(angle) * 0.12, 30, 10, c[1], 0.72, 2);
 };
 
 const drawLotus = (ctx, recipe, angle) => {
-    const c = colors(recipe); const r = motifRadius(recipe); const sway = Math.sin(angle) * 0.1;
+    const c = colors(recipe); const r = motifRadius(recipe); const sway = -Math.cos(angle) * 0.1;
     for (let layer = 0; layer < 2; layer += 1) {
         for (let petal = -3; petal <= 3; petal += 1) {
             const theta = -Math.PI / 2 + petal * (layer ? 0.28 : 0.36) + sway;
@@ -649,7 +655,7 @@ const drawLeafVortex = (ctx, recipe, angle) => {
 };
 
 const drawVine = (ctx, recipe, angle) => {
-    const c = colors(recipe); const sway = Math.sin(angle * turns(recipe)) * 5;
+    const c = colors(recipe); const sway = -Math.cos(angle * turns(recipe)) * 5;
     curve(ctx, 130, (unit) => ({ x: 80 + Math.sin(unit * TAU * 1.6 + angle) * 15 + sway * unit, y: 25 + unit * 110 }), c[2], 0.85, 2);
     for (let i = 0; i < 8; i += 1) {
         const unit = (i + 0.7) / 9;
@@ -819,7 +825,11 @@ const drawLissajous = (ctx, recipe, angle) => {
 };
 
 const drawInfinity = (ctx, recipe, angle) => {
-    const c = colors(recipe); const r = motifRadius(recipe); const spin = angle * turns(recipe);
+    const c = colors(recipe); const r = motifRadius(recipe);
+    // The lemniscate's deformation velocity peaks at spin 0 and pi (its two
+    // symmetry axes) and bottoms out a quarter turn later; offsetting the spin
+    // parks the loop seam at the calmest point of the cycle.
+    const spin = angle * turns(recipe) + Math.PI / 2;
     curve(ctx, 300, (unit) => {
         const theta = unit * TAU;
         const denominator = 1 + Math.cos(theta) ** 2;
@@ -860,7 +870,7 @@ const drawGlitch = (ctx, recipe, angle) => {
 };
 
 const drawLattice = (ctx, recipe, angle) => {
-    const c = colors(recipe); const sway = Math.sin(angle * turns(recipe)) * 3;
+    const c = colors(recipe); const sway = -Math.cos(angle * turns(recipe)) * 3;
     for (let row = 0; row < 7; row += 1) for (let column = 0; column < 7; column += 1) {
         const x = 38 + column * 14 + Math.sin(row + angle) * sway;
         const y = 38 + row * 14 + Math.cos(column + angle) * sway;
@@ -871,7 +881,7 @@ const drawLattice = (ctx, recipe, angle) => {
 };
 
 const drawChecker = (ctx, recipe, angle) => {
-    const c = colors(recipe); const beat = Math.sin(angle * 2);
+    const c = colors(recipe); const beat = -Math.cos(angle * 2);
     for (let row = 0; row < 9; row += 1) for (let column = 0; column < 9; column += 1) {
         const distance = Math.hypot(row - 4, column - 4);
         if (distance > 4.5 || (row + column) % 2) continue;

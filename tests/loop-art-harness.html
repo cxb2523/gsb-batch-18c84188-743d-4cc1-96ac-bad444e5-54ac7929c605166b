@@ -11,6 +11,11 @@ const failures = [];
 const samples = [];
 const size = 160;
 const framesPerLoop = 24;
+const seeds = [1001, 2002, 3003, 41789, 260663];
+// Off-grid phases (not aligned with exported frames) so boundary safety is
+// verified at arbitrary sampled phases, not just at exported frame times.
+const extraBoundaryPhases = [0.037, 0.131, 0.289, 0.443, 0.541, 0.682, 0.806, 0.953];
+const WRAP_RATIO_LIMIT = 1.5;
 const motifKeys = Object.keys(LOOP_MOTIFS);
 if (motifKeys.length !== 50) failures.push(`expected 50 motifs, found ${motifKeys.length}`);
 const generatedMotifs = new Set(Array.from({ length: 2500 }, (_, index) =>
@@ -31,8 +36,18 @@ const difference = (left, right) => {
     return total / left.length;
 };
 
+const boundaryPixels = (data, dimension) => {
+    let count = 0;
+    for (let y = 0; y < dimension; y += 1) for (let x = 0; x < dimension; x += 1) {
+        if (x !== 0 && x !== dimension - 1 && y !== 0 && y !== dimension - 1) continue;
+        if (data[(y * dimension + x) * 4 + 3] > 0) count += 1;
+    }
+    return count;
+};
+
+let edgeSafeFrames = 0;
 for (const [motifIndex, motif] of motifKeys.entries()) {
-    for (const seed of [1001, 2002, 3003]) {
+    for (const seed of seeds) {
         const recipe = { ...createEffectRecipe({ seed: seed + motifIndex * 100, element: 'storm' }), motif };
         const effect = new AbilityEffect(recipe);
         const frames = Array.from({ length: framesPerLoop }, (_, index) => pixelsAt(effect, effect.duration * index / framesPerLoop));
@@ -41,18 +56,23 @@ for (const [motifIndex, motif] of motifKeys.entries()) {
         const wrap = transitions.at(-1);
         const period = difference(frames[0], pixelsAt(effect, effect.duration));
         const occupied = frames[0].filter((value, index) => index % 4 === 3 && value > 0).length;
-        let boundaryPixels = 0;
-        for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
-            if (x !== 0 && x !== size - 1 && y !== 0 && y !== size - 1) continue;
-            if (frames[0][(y * size + x) * 4 + 3] > 0) boundaryPixels += 1;
-        }
         const ratio = mean ? wrap / mean : 0;
-        if (period !== 0) failures.push(`${motif}/${seed}: first and period frame differ`);
-        if (ratio > 1.8) failures.push(`${motif}/${seed}: wrap jump is ${ratio.toFixed(2)}x normal motion`);
+        if (period !== 0) failures.push(`${motif}/${seed}: first and period frame differ by ${period.toFixed(4)}`);
+        if (ratio > WRAP_RATIO_LIMIT) failures.push(`${motif}/${seed}: wrap jump is ${ratio.toFixed(2)}x normal motion`);
         if (occupied < 20) failures.push(`${motif}/${seed}: nearly empty first frame`);
-        if (boundaryPixels) failures.push(`${motif}/${seed}: ${boundaryPixels} occupied edge pixels`);
+        frames.forEach((frame, frameIndex) => {
+            const edges = boundaryPixels(frame, size);
+            if (edges) failures.push(`${motif}/${seed} frame ${frameIndex}: ${edges} occupied edge pixels`);
+            else edgeSafeFrames += 1;
+        });
+        for (const phase of extraBoundaryPhases) {
+            const edges = boundaryPixels(pixelsAt(effect, effect.duration * phase), size);
+            if (edges) failures.push(`${motif}/${seed} phase ${phase}: ${edges} occupied edge pixels`);
+            else edgeSafeFrames += 1;
+        }
         samples.push({ motif, seed, occupied, period, wrapRatio: Number(ratio.toFixed(3)) });
     }
+    await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 const fixedRecipe = createEffectRecipe({ seed: 919191, element: 'arcane' });
@@ -74,10 +94,16 @@ if (difference(frames[0].getContext('2d').getImageData(0, 0, 128, 128).data,
     frames.at(-1).getContext('2d').getImageData(0, 0, 128, 128).data) === 0) {
     failures.push('export repeats the first frame instead of sampling the cycle');
 }
+frames.forEach((frame, frameIndex) => {
+    const edges = boundaryPixels(frame.getContext('2d').getImageData(0, 0, 128, 128).data, 128);
+    if (edges) failures.push(`export frame ${frameIndex}: ${edges} occupied edge pixels`);
+});
 
 const result = { passed: failures.length === 0, motifCount: motifKeys.length,
     generatedMotifCount: generatedMotifs.size,
-    distinctFixedSeedFrames: new Set(signatures).size, failures, samples };
+    distinctFixedSeedFrames: new Set(signatures).size,
+    seeds, framesPerLoop, wrapRatioLimit: WRAP_RATIO_LIMIT, edgeSafeFrames,
+    failures, samples };
 document.body.dataset.status = result.passed ? 'passed' : 'failed';
 document.querySelector('#result').textContent = JSON.stringify(result, null, 2);
 </script>

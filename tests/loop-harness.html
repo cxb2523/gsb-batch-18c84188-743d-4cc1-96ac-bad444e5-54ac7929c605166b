@@ -12,15 +12,16 @@
 
         const size = 160;
         const frameCount = 8;
+        const WRAP_RATIO_LIMIT = 1.6;
+        const failures = [];
         const model = createLoopModel(presets.fireball, { width: size, height: size });
 
-        const render = (phase) => {
+        const render = (loopModel, phase, dimension = size) => {
             const canvas = document.createElement('canvas');
-            canvas.width = size;
-            canvas.height = size;
+            canvas.width = canvas.height = dimension;
             const context = canvas.getContext('2d');
-            drawLoopPhase(context, model, phase);
-            return context.getImageData(0, 0, size, size).data;
+            drawLoopPhase(context, loopModel, phase);
+            return context.getImageData(0, 0, dimension, dimension).data;
         };
 
         const difference = (left, right) => {
@@ -31,13 +32,47 @@
             return total / left.length;
         };
 
-        const frames = Array.from({ length: frameCount }, (_, index) => render(index / frameCount));
+        const boundaryPixels = (data, dimension) => {
+            let count = 0;
+            for (let y = 0; y < dimension; y += 1) for (let x = 0; x < dimension; x += 1) {
+                if (x !== 0 && x !== dimension - 1 && y !== 0 && y !== dimension - 1) continue;
+                if (data[(y * dimension + x) * 4 + 3] > 0) count += 1;
+            }
+            return count;
+        };
+
+        const frames = Array.from({ length: frameCount }, (_, index) => render(model, index / frameCount));
         const transitions = frames.map((frame, index) => difference(frame, frames[(index + 1) % frameCount]));
-        const exactPeriodDifference = difference(frames[0], render(1));
+        const exactPeriodDifference = difference(frames[0], render(model, 1));
         const meanTransition = transitions.reduce((sum, value) => sum + value, 0) / transitions.length;
         const wrapDifference = transitions.at(-1);
         const wrapRatio = meanTransition === 0 ? 0 : wrapDifference / meanTransition;
-        const passed = exactPeriodDifference === 0 && wrapRatio < 1.6;
+
+        // Every preset must loop exactly, keep its wrap transition in line with
+        // normal inter-frame motion, and never paint the outermost pixel rows or
+        // columns at any sampled phase.
+        const presetReports = [];
+        let edgeSafeFrames = 0;
+        for (const [name, preset] of Object.entries(presets)) {
+            const presetModel = createLoopModel(preset, { width: size, height: size });
+            const presetFrames = Array.from({ length: frameCount }, (_, index) => render(presetModel, index / frameCount));
+            const presetTransitions = presetFrames.map((frame, index) => difference(frame, presetFrames[(index + 1) % frameCount]));
+            const presetMean = presetTransitions.reduce((sum, value) => sum + value, 0) / presetTransitions.length;
+            const presetWrap = presetTransitions.at(-1);
+            const presetPeriod = difference(presetFrames[0], render(presetModel, 1));
+            const presetRatio = presetMean === 0 ? 0 : presetWrap / presetMean;
+            if (presetPeriod !== 0) failures.push(`${name}: first and period frame differ by ${presetPeriod.toFixed(4)}`);
+            if (presetRatio > WRAP_RATIO_LIMIT) failures.push(`${name}: wrap jump is ${presetRatio.toFixed(2)}x normal motion`);
+            presetFrames.forEach((frame, frameIndex) => {
+                const edges = boundaryPixels(frame, size);
+                if (edges) failures.push(`${name} frame ${frameIndex}: ${edges} occupied edge pixels`);
+                else edgeSafeFrames += 1;
+            });
+            presetReports.push({ name, period: presetPeriod, wrapRatio: Number(presetRatio.toFixed(3)) });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+
+        const passed = exactPeriodDifference === 0 && wrapRatio < WRAP_RATIO_LIMIT && failures.length === 0;
         const result = {
             passed,
             frameCount,
@@ -46,7 +81,12 @@
             meanTransition: Number(meanTransition.toFixed(4)),
             wrapDifference: Number(wrapDifference.toFixed(4)),
             wrapRatio: Number(wrapRatio.toFixed(4)),
-            transitions: transitions.map((value) => Number(value.toFixed(4)))
+            transitions: transitions.map((value) => Number(value.toFixed(4))),
+            wrapRatioLimit: WRAP_RATIO_LIMIT,
+            presetCount: presetReports.length,
+            edgeSafeFrames,
+            failures,
+            presetReports
         };
 
         document.body.dataset.status = passed ? 'passed' : 'failed';

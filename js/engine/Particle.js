@@ -251,11 +251,19 @@ export default class Particle {
 
         if (size <= 0) return;
 
+        // Painted pixels reach past (this.x, this.y): the glow layer is size + 4,
+        // the drop shadow is offset by (1, 1), and luminous trails extend up to
+        // 1.3 * size behind the particle. The fade must hit zero while the whole
+        // extent is still inside the canvas, otherwise faint pixels land on the
+        // outermost rows and columns and get clipped by sprite-sheet slicers.
+        const luminous = this.renderStyle === 'luminous';
+        const trailReach = luminous && size >= 3 ? size * 1.3 + (size - 4) / 2 : 0;
+        const extent = Math.max(size / 2 + 2, trailReach) + 2;
         const boundaryAlpha =
-            clamp(this.x / BOUNDARY_FADE_PX, 0, 1) *
-            clamp((this.canvasWidth - this.x) / BOUNDARY_FADE_PX, 0, 1) *
-            clamp(this.y / BOUNDARY_FADE_PX, 0, 1) *
-            clamp((this.canvasHeight - this.y) / BOUNDARY_FADE_PX, 0, 1);
+            clamp((this.x - extent) / BOUNDARY_FADE_PX, 0, 1) *
+            clamp((this.canvasWidth - this.x - extent) / BOUNDARY_FADE_PX, 0, 1) *
+            clamp((this.y - extent) / BOUNDARY_FADE_PX, 0, 1) *
+            clamp((this.canvasHeight - this.y - extent) / BOUNDARY_FADE_PX, 0, 1);
 
         const alpha = fadeIn * fadeOut * boundaryAlpha;
         const baseColor = mixColor(this.startColor, this.endColor, normalizedAge);
@@ -277,7 +285,6 @@ export default class Particle {
         const speed = Math.hypot(this.vx, this.vy) || 1;
         const trailX = -this.vx / speed;
         const trailY = -this.vy / speed;
-        const luminous = this.renderStyle === 'luminous';
 
         if (luminous && size >= 3) {
             for (let step = 2; step >= 1; step -= 1) {

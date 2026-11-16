@@ -1,4 +1,4 @@
-import { LOOP_MOTIFS, createLoopArtModel, drawLoopArt } from './engine/LoopArt.js?v=3';
+import { LOOP_MOTIFS, createLoopArtModel, drawLoopArt } from './engine/LoopArt.js?v=4';
 
 const TAU = Math.PI * 2;
 const BASE_SIZE = 160;
