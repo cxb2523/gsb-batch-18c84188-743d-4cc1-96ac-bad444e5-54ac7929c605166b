@@ -12,6 +12,11 @@ const ITEM_COLORS: Record<ItemType, number> = {
 
 type Particle = { p: THREE.Vector3; v: THREE.Vector3; life: number; total: number };
 
+/** Low quality emits one nitro flame particle per interval instead of three every frame. */
+const BOOST_EMIT_INTERVAL = 1 / 30;
+/** Low quality keeps half of the camera pull-back and FOV kick; high quality is unchanged. */
+const BOOST_CAMERA_REACH_LOW = 0.5;
+
 export class RaceRenderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -34,6 +39,10 @@ export class RaceRenderer {
   private particleTexture: THREE.CanvasTexture;
   private particleCursor = 0;
   private highQuality = true;
+  private boostBlend = 0;
+  private boostEmitAccum = 0;
+  /** Nitro flame particles emitted so far; lets quality scaling be verified from outside. */
+  boostFlamesEmitted = 0;
   private readonly tex = new Map<ItemType, THREE.CanvasTexture>();
   private readonly targetPosition = new THREE.Vector3();
   private readonly targetLook = new THREE.Vector3();
@@ -151,6 +160,8 @@ export class RaceRenderer {
 
   setQuality(high: boolean) {
     this.highQuality = high;
+    // Drop any accumulated low-quality emission credit so a switch never bursts particles.
+    this.boostEmitAccum = 0;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, high ? 1.6 : 1));
     this.renderer.shadowMap.enabled = high;
     this.resize();
@@ -279,6 +290,17 @@ export class RaceRenderer {
     const ps = sampleTrack(pd);
     const playerPosition = trackPosition(pd, pl);
 
+    // Low quality throttles nitro flames to one particle per interval; the clamp
+    // keeps a long frame or a quality switch from releasing a catch-up burst.
+    let lowBoostReady = false;
+    if (!frozen && !this.highQuality) {
+      this.boostEmitAccum = Math.min(this.boostEmitAccum + dt, BOOST_EMIT_INTERVAL);
+      if (this.boostEmitAccum >= BOOST_EMIT_INTERVAL) {
+        this.boostEmitAccum = 0;
+        lowBoostReady = true;
+      }
+    }
+
     for (const racer of state.racers) {
       let car = this.cars.get(racer.id);
       if (!car) {
@@ -316,8 +338,17 @@ export class RaceRenderer {
         const dust = trackPosition(distance - 2.3, lateral + (Math.random() - 0.5) * 2.2, 0.5);
         this.emit(dust, this.highQuality ? 3 : 1, racer.driftTime > 0.15 ? (racer.charge >= 0.99 ? 0x65efda : 0xffbe61) : 0xd8b392, 2.4, 0.7);
       }
-      if (boosted && !frozen) this.emit(trackPosition(distance - 3, lateral, 0.75), 3,
-        racer.isPlayer ? SKINS[this.selectedSkin].glow : 0x84f0f7, 1.5, 0.4);
+      if (boosted && !frozen) {
+        const flamePosition = trackPosition(distance - 3, lateral, 0.75);
+        const flameColor = racer.isPlayer ? SKINS[this.selectedSkin].glow : 0x84f0f7;
+        if (this.highQuality) {
+          this.emit(flamePosition, 3, flameColor, 1.5, 0.4);
+          this.boostFlamesEmitted += 3;
+        } else if (lowBoostReady) {
+          this.emit(flamePosition, 1, flameColor, 1.5, 0.4);
+          this.boostFlamesEmitted += 1;
+        }
+      }
     }
 
     for (const pickup of state.pickups) {
@@ -364,11 +395,16 @@ export class RaceRenderer {
       this.targetLook.set(playerPosition.x + ps.nx * (mobile ? 0 : 7.4), playerPosition.y + (mobile ? 3.5 : 1.2), playerPosition.z + ps.nz * (mobile ? 0 : 7.4));
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, 53, 0.08);
     } else {
+      // Ease the boost factor so pull-back and FOV widen and settle smoothly;
+      // the quality tier only scales its reach, so switching tiers never jumps.
+      const boostTarget = player.boostTime > 0 ? 1 : 0;
+      if (!frozen) this.boostBlend += (boostTarget - this.boostBlend) * (1 - Math.exp(-dt * 6));
+      const boostReach = this.boostBlend * (this.highQuality ? 1 : BOOST_CAMERA_REACH_LOW);
       const ahead = trackPosition(pd + 12, pl * 0.35, 1.3);
-      const behind = trackPosition(pd - (player.boostTime > 0 ? 9.2 : 7.8), pl * 0.95, 4.6);
+      const behind = trackPosition(pd - (7.8 + boostReach * 1.4), pl * 0.95, 4.6);
       this.targetPosition.copy(behind);
       this.targetLook.copy(ahead);
-      const fov = 59 + Math.min(player.speed / 80, 1) * 7 + (player.boostTime > 0 ? 6 : 0);
+      const fov = 59 + Math.min(player.speed / 80, 1) * 7 + boostReach * 6;
       this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, fov, 1 - Math.exp(-dt * 5));
     }
     if (this.lastPhase === '') {
