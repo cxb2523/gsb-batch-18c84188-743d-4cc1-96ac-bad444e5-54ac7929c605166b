@@ -64,6 +64,9 @@ const KEYS = [
 const smooth = (t) => t * t * (3 - 2 * t);
 const lerp = (a, b, t) => a + (b - a) * t;
 
+// 缓降余量时长，与 player.js 中 glideT = 2.0 保持一致
+const GLIDE_DUR = 2.0;
+
 export class Daylight {
   constructor(stage, city) {
     this.stage = stage;
@@ -80,7 +83,21 @@ export class Daylight {
       groundPlane: new THREE.Color(),
     };
     this._n = {};
+    // 缓降偏移：叠加在里程基线之上的临时量，不回写里程/档位
+    this._glideW = 0; // 当前偏移权重 0..1（已平滑）
+    this._next = null; // 当前档位的下一档关键帧（最后一档为 null）
     this.update(0);
+  }
+
+  // 主循环每帧告知缓降状态：remain 为缓降剩余秒数（<=0 表示不在缓降）。
+  // 权重随剩余时间连续衰减；落地/主动收伞/超时结束时 remain 归零，
+  // 这里只做平滑释放，几帧内回到基线，不跳变、不残留。
+  setGlide(remain, dt) {
+    const target = remain > 0 ? Math.min(1, remain / GLIDE_DUR) : 0;
+    // 进入快、退出柔：被打断时也能看得到"回到当前天色"的过程
+    const rate = target > this._glideW ? 12 : 6;
+    this._glideW = lerp(this._glideW, target, 1 - Math.exp(-rate * dt));
+    if (target === 0 && this._glideW < 0.002) this._glideW = 0; // 收敛归零，杜绝残留
   }
 
   // dist 为累计里程；超过最后一档就固定在蓝调时刻
@@ -106,6 +123,8 @@ export class Daylight {
       'exposure', 'bloomS', 'bloomR', 'bloomT', 'env', 'emissive', 'rainA']) {
       n[k] = lerp(a[k], b[k], t);
     }
+    // 缓降偏移的目标档：当前档位的下一档；最后一档（1200m+）没有下一档，不偏移
+    this._next = i < K.length - 1 ? K[i + 1] : null;
     this._apply();
   }
 
@@ -122,7 +141,14 @@ export class Daylight {
     u.uSunGain.value = n.sunGain;
     s.setLightDir(this._lightDir.x, this._lightDir.y, this._lightDir.z);
 
+    // 缓降临时偏移：把泛光/雨丝/雾色朝下一档推 w 比例。
+    // 只写数值通道——bloom.enabled 由自适应画质独占，这里绝不触碰，
+    // 降档关闭泛光后偏移不会把它重新打开；w 归零时各项精确回到里程基线。
+    const w = this._glideW;
+    const nx = w > 0 ? this._next : null;
+
     s.scene.fog.color.copy(c.fog);
+    if (nx) s.scene.fog.color.lerp(nx.fog, w);
     s.scene.fog.near = n.fogNear;
     s.scene.fog.far = n.fogFar;
     // 远景地面跟着天色走，避免夜里地面比雾还黑、地平线出现生硬的缝
@@ -137,11 +163,11 @@ export class Daylight {
     s.ambient.intensity = n.ambInt;
 
     s.renderer.toneMappingExposure = n.exposure;
-    s.bloom.strength = n.bloomS;
+    s.bloom.strength = nx ? lerp(n.bloomS, nx.bloomS, w) : n.bloomS;
     s.bloom.radius = n.bloomR;
     s.bloom.threshold = n.bloomT;
     if ('environmentIntensity' in s.scene) s.scene.environmentIntensity = n.env;
-    if (s.rainMat) s.rainMat.uniforms.uAlpha.value = n.rainA;
+    if (s.rainMat) s.rainMat.uniforms.uAlpha.value = nx ? lerp(n.rainA, nx.rainA, w) : n.rainA;
     if (this.city && this.city.setEmissive) this.city.setEmissive(n.emissive);
   }
 }

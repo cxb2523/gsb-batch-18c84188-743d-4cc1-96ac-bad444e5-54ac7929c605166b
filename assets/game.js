@@ -1,5 +1,5 @@
 (() => {
-  // ../node_modules/three/build/three.module.js
+  // node_modules/three/build/three.module.js
   var REVISION = "169";
   var CullFaceNone = 0;
   var CullFaceBack = 1;
@@ -21797,7 +21797,7 @@ void main() {
     }
   }
 
-  // ../node_modules/three/examples/jsm/shaders/CopyShader.js
+  // node_modules/three/examples/jsm/shaders/CopyShader.js
   var CopyShader = {
     name: "CopyShader",
     uniforms: {
@@ -21837,7 +21837,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/Pass.js
+  // node_modules/three/examples/jsm/postprocessing/Pass.js
   var Pass = class {
     constructor() {
       this.isPass = true;
@@ -21881,7 +21881,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/ShaderPass.js
+  // node_modules/three/examples/jsm/postprocessing/ShaderPass.js
   var ShaderPass = class extends Pass {
     constructor(shader, textureID) {
       super();
@@ -21921,7 +21921,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/MaskPass.js
+  // node_modules/three/examples/jsm/postprocessing/MaskPass.js
   var MaskPass = class extends Pass {
     constructor(scene, camera) {
       super();
@@ -21978,7 +21978,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/EffectComposer.js
+  // node_modules/three/examples/jsm/postprocessing/EffectComposer.js
   var EffectComposer = class {
     constructor(renderer, renderTarget) {
       this.renderer = renderer;
@@ -22100,7 +22100,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/RenderPass.js
+  // node_modules/three/examples/jsm/postprocessing/RenderPass.js
   var RenderPass = class extends Pass {
     constructor(scene, camera, overrideMaterial = null, clearColor = null, clearAlpha = null) {
       super();
@@ -22151,7 +22151,7 @@ void main() {
     }
   };
 
-  // ../node_modules/three/examples/jsm/shaders/LuminosityHighPassShader.js
+  // node_modules/three/examples/jsm/shaders/LuminosityHighPassShader.js
   var LuminosityHighPassShader = {
     name: "LuminosityHighPassShader",
     shaderID: "luminosityHighPass",
@@ -22204,7 +22204,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/UnrealBloomPass.js
+  // node_modules/three/examples/jsm/postprocessing/UnrealBloomPass.js
   var UnrealBloomPass = class _UnrealBloomPass extends Pass {
     constructor(resolution, strength, radius, threshold) {
       super();
@@ -22460,7 +22460,7 @@ void main() {
   UnrealBloomPass.BlurDirectionX = new Vector2(1, 0);
   UnrealBloomPass.BlurDirectionY = new Vector2(0, 1);
 
-  // ../node_modules/three/examples/jsm/shaders/OutputShader.js
+  // node_modules/three/examples/jsm/shaders/OutputShader.js
   var OutputShader = {
     name: "OutputShader",
     uniforms: {
@@ -22544,7 +22544,7 @@ void main() {
     )
   };
 
-  // ../node_modules/three/examples/jsm/postprocessing/OutputPass.js
+  // node_modules/three/examples/jsm/postprocessing/OutputPass.js
   var OutputPass = class extends Pass {
     constructor() {
       super();
@@ -24551,6 +24551,7 @@ void main() {
   ];
   var smooth = (t) => t * t * (3 - 2 * t);
   var lerp3 = (a, b, t) => a + (b - a) * t;
+  var GLIDE_DUR = 2;
   var Daylight = class {
     constructor(stage2, city2) {
       this.stage = stage2;
@@ -24572,7 +24573,18 @@ void main() {
         groundPlane: new Color()
       };
       this._n = {};
+      this._glideW = 0;
+      this._next = null;
       this.update(0);
+    }
+    // 主循环每帧告知缓降状态：remain 为缓降剩余秒数（<=0 表示不在缓降）。
+    // 权重随剩余时间连续衰减；落地/主动收伞/超时结束时 remain 归零，
+    // 这里只做平滑释放，几帧内回到基线，不跳变、不残留。
+    setGlide(remain, dt) {
+      const target = remain > 0 ? Math.min(1, remain / GLIDE_DUR) : 0;
+      const rate = target > this._glideW ? 12 : 6;
+      this._glideW = lerp3(this._glideW, target, 1 - Math.exp(-rate * dt));
+      if (target === 0 && this._glideW < 2e-3) this._glideW = 0;
     }
     // dist 为累计里程；超过最后一档就固定在蓝调时刻
     update(dist2) {
@@ -24607,6 +24619,7 @@ void main() {
       ]) {
         n[k] = lerp3(a[k], b[k], t);
       }
+      this._next = i < K.length - 1 ? K[i + 1] : null;
       this._apply();
     }
     _apply() {
@@ -24621,7 +24634,10 @@ void main() {
       u.uSunDir.value.copy(this._sunDir);
       u.uSunGain.value = n.sunGain;
       s.setLightDir(this._lightDir.x, this._lightDir.y, this._lightDir.z);
+      const w = this._glideW;
+      const nx = w > 0 ? this._next : null;
       s.scene.fog.color.copy(c.fog);
+      if (nx) s.scene.fog.color.lerp(nx.fog, w);
       s.scene.fog.near = n.fogNear;
       s.scene.fog.far = n.fogFar;
       if (s.ground) s.ground.color.copy(c.groundPlane);
@@ -24633,11 +24649,11 @@ void main() {
       s.ambient.color.copy(c.ambCol);
       s.ambient.intensity = n.ambInt;
       s.renderer.toneMappingExposure = n.exposure;
-      s.bloom.strength = n.bloomS;
+      s.bloom.strength = nx ? lerp3(n.bloomS, nx.bloomS, w) : n.bloomS;
       s.bloom.radius = n.bloomR;
       s.bloom.threshold = n.bloomT;
       if ("environmentIntensity" in s.scene) s.scene.environmentIntensity = n.env;
-      if (s.rainMat) s.rainMat.uniforms.uAlpha.value = n.rainA;
+      if (s.rainMat) s.rainMat.uniforms.uAlpha.value = nx ? lerp3(n.rainA, nx.rainA, w) : n.rainA;
       if (this.city && this.city.setEmissive) this.city.setEmissive(n.emissive);
     }
   };
@@ -25912,6 +25928,7 @@ void main() {
         stage.camera.fov = 62;
         stage.camera.updateProjectionMatrix();
       }
+      daylight.setGlide(0, rawDt);
       daylight.update(0);
       stage.update(dt, stage.camera.position);
       stage.render();
@@ -26010,6 +26027,7 @@ void main() {
       mode === "race" ? Math.max(player.pos.z, race.maxZ()) : player.pos.z,
       player.pos.z
     );
+    daylight.setGlide(player.glideT, rawDt);
     daylight.update(dist);
     if (mode === "run" && daylight.phase !== lastPhase) {
       lastPhase = daylight.phase;

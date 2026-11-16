@@ -638,6 +638,7 @@ function animate() {
       stage.camera.fov = 62;
       stage.camera.updateProjectionMatrix();
     }
+    daylight.setGlide(0, rawDt); // 标题画面无缓降，权重平滑归零
     daylight.update(0);
     stage.update(dt, stage.camera.position);
     stage.render();
@@ -758,6 +759,8 @@ function animate() {
     player.pos.z
   );
   // 日光推进：每 400m 一档，纯视觉，不参与物理
+  // 缓降期间叠加临时偏移（朝下一档天色），落地/收伞/超时后平滑回基线
+  daylight.setGlide(player.glideT, rawDt);
   daylight.update(dist);
   if (mode === 'run' && daylight.phase !== lastPhase) {
     lastPhase = daylight.phase;
