@@ -356,8 +356,8 @@ describe('block compiler: modulation nodes', () => {
   it('LFO follows the LFO processor math', () => {
     const rate = 1000;
     const { run } = runner(graph(
-      [['LFO', { _shape: 'triangle', _rate: rate, _depth: 0.5, _offset: 0.25, _phase: 0.1, _sync: 0 }], OUT()],
-      [[[0, 5], [1, 0]]]
+      [['LFO', { _shape: 'triangle', _rate: rate, _depth: 0.5, _offset: 0.25, _phase: 0.1, _sync: 0, _seed: 0 }], OUT()],
+      [[[0, 6], [1, 0]]]
     ));
 
     var phase = 0;
@@ -372,10 +372,36 @@ describe('block compiler: modulation nodes', () => {
 
   it('LFO with an unknown shape plays a sine and never puts the shape into code', () => {
     const shape = '"); fetch("x"); ("';
-    const { result, run } = runner(graph([['LFO', { _shape: shape, _rate: 0, _depth: 1, _offset: 0, _phase: 0.25, _sync: 0 }], OUT()], [[[0, 5], [1, 0]]]));
+    const { result, run } = runner(graph([['LFO', { _shape: shape, _rate: 0, _depth: 1, _offset: 0, _phase: 0.25, _sync: 0, _seed: 0 }], OUT()], [[[0, 6], [1, 0]]]));
 
     expect(result.source).not.toContain('fetch');
     expect(run(1)).toEqual([[1]]);
+  });
+
+  it('seeded LFO is deterministic and matches the modulation RNG', () => {
+    const config = { _shape: 'random', _rate: SR / 4, _depth: 1, _offset: 0, _phase: 0, _sync: 0, _seed: 321 };
+    const first = runner(graph([['LFO', config], OUT()], [[[0, 6], [1, 0]]]));
+    const second = runner(graph([['LFO', config], OUT()], [[[0, 6], [1, 0]]]));
+
+    const outA = first.run(16)[0];
+    const outB = second.run(16)[0];
+
+    expect(outB).toEqual(outA);
+
+    // Эталон на чистых функциях библиотеки: по одной ступени на период из 4 сэмплов
+    let rng = modulation.seedRandom(config._seed);
+    const expected: number[] = [];
+
+    for (let k = 0; k < 4; k++) {
+      rng = modulation.randomNext(rng);
+      const held = F(modulation.randomUnit(rng) * 2 - 1);
+
+      for (let i = 0; i < 4; i++)
+        expected.push(held);
+    }
+
+    expect(outA).toEqual(expected);
+    expect(new Set(outA).size).toBe(4);
   });
 
   it('ADSR follows adsrStep', () => {

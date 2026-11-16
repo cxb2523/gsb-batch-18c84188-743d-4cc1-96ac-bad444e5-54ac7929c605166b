@@ -217,6 +217,66 @@ describe('randomIn', () => {
   });
 });
 
+describe('seeded random', () => {
+  it('coerces seeds to 32-bit integers and keeps 0 as 0', () => {
+    expect(m.seedRandom(42)).toBe(42);
+    expect(m.seedRandom(-7)).toBe(-7);
+    expect(m.seedRandom(12.9)).toBe(12);
+    expect(m.seedRandom(0)).toBe(0);
+  });
+
+  it('advances deterministically and never leaves the 32-bit range', () => {
+    const seqA = [m.seedRandom(1234)];
+    const seqB = [m.seedRandom(1234)];
+
+    for (let i = 0; i < 32; i++) {
+      seqA.push(m.randomNext(seqA[i]));
+      seqB.push(m.randomNext(seqB[i]));
+    }
+
+    expect(seqA).toEqual(seqB);
+    for (const state of seqA.slice(1)) {
+      expect(Number.isInteger(state)).toBe(true);
+      expect(state).toBeGreaterThanOrEqual(-2147483648);
+      expect(state).toBeLessThanOrEqual(2147483647);
+    }
+  });
+
+  it('gives different streams for different seeds', () => {
+    const stream = (seed: number) => {
+      const out: number[] = [];
+      let state = m.seedRandom(seed);
+
+      for (let i = 0; i < 16; i++) {
+        state = m.randomNext(state);
+        out.push(m.randomUnit(state));
+      }
+
+      return out;
+    };
+
+    expect(stream(1)).not.toEqual(stream(2));
+    expect(stream(-5)).not.toEqual(stream(5));
+  });
+
+  it('maps states into [0, 1)', () => {
+    let state = m.seedRandom(99);
+
+    for (let i = 0; i < 64; i++) {
+      state = m.randomNext(state);
+      const r = m.randomUnit(state);
+
+      expect(r).toBeGreaterThanOrEqual(0);
+      expect(r).toBeLessThan(1);
+    }
+  });
+
+  it('pins the zero state to zero', () => {
+    expect(m.randomNext(0)).toBe(0);
+    expect(m.randomUnit(0)).toBe(0);
+  });
+});
+
 describe('counter', () => {
   it('counts without modulo', () => {
     expect(m.counterStep(0, 1, 0)).toBe(1);
@@ -259,6 +319,23 @@ describe('worklet serialization', () => {
     for (let r = 0; r < 1; r += 0.07) {
       expect(copy.randomIn(r, -1, 3, 0.5)).toBe(m.randomIn(r, -1, 3, 0.5));
       expect(copy.counterStep(r * 10, 1, 4)).toBe(m.counterStep(r * 10, 1, 4));
+    }
+  });
+
+  it('matches the library for the seeded RNG after toString() serialization', () => {
+    for (const seed of [0, 1, 42, -7, 12.9]) {
+      let a = copy.seedRandom(seed);
+      let b = m.seedRandom(seed);
+
+      expect(a).toBe(b);
+
+      for (let i = 0; i < 24; i++) {
+        a = copy.randomNext(a);
+        b = m.randomNext(b);
+
+        expect(a).toBe(b);
+        expect(copy.randomUnit(a)).toBe(m.randomUnit(b));
+      }
     }
   });
 });

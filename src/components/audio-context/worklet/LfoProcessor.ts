@@ -20,6 +20,11 @@ export default await defineWorklet({
     sync: {
       defaultValue: 0
     },
+    // 0 — прежнее нерепродуцируемое поведение на Math.random();
+    // ненулевое зерно полностью определяет последовательность S&H
+    seed: {
+      defaultValue: 0
+    },
   },
   functions: modulation,
   props: {
@@ -29,7 +34,13 @@ export default await defineWorklet({
     phase: 0,
     sync: 0,
     held: 0,
-    seeded: false as boolean,
+    // Зерно, под которое инициализирован rng; смена значения (и [RESET])
+    // запускает последовательность заново
+    curSeed: 0,
+    // Текущее 32-битное состояние детерминированного ГПСЧ
+    rng: 0,
+    // Состояние ещё не инициализировалось на этом жизненном цикле
+    started: false as boolean,
   },
   options: {
     numberOfInputs: 0,
@@ -40,10 +51,15 @@ export default await defineWorklet({
     var c = this.context;
     var shape = this.props.shape;
 
-    if (!c.seeded) {
-      c.held = Math.random() * 2 - 1;
-      c.seeded = true;
-    }
+    // Следующая ступень S&H: из зерна — детерминированно, иначе через Math.random()
+    var draw = () => {
+      if (c.curSeed !== 0) {
+        c.rng = f.randomNext(c.rng);
+        c.held = f.randomUnit(c.rng) * 2 - 1;
+      } else {
+        c.held = Math.random() * 2 - 1;
+      }
+    };
 
     for (var i = 0; i < this.numFrames; i++) {
       var rate = this.param('rate', i);
@@ -51,11 +67,20 @@ export default await defineWorklet({
       var offset = this.param('offset', i);
       var phase = this.param('phase', i);
       var sync = this.param('sync', i);
+      var seed = this.param('seed', i);
 
-      // Фронт sync сбрасывает фазу на этом же сэмпле
+      // Первая инициализация или смена зерна: последовательность начинается с начала
+      if (!c.started || c.curSeed !== seed) {
+        c.curSeed = seed;
+        c.rng = f.seedRandom(seed);
+        draw();
+        c.started = true;
+      }
+
+      // Фронт sync сбрасывает фазу на этом же сэмпле и сразу берёт новую ступень
       if (f.rising(c.sync, sync)) {
         c.phase = 0;
-        c.held = Math.random() * 2 - 1;
+        draw();
       }
 
       c.sync = sync;
@@ -66,7 +91,7 @@ export default await defineWorklet({
 
       // S&H: новое значение на каждом новом периоде
       if (f.lfoWrapped(c.phase, inc, phase))
-        c.held = Math.random() * 2 - 1;
+        draw();
 
       c.phase = f.wrap(c.phase + inc);
     }

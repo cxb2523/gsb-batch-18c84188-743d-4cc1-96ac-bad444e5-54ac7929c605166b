@@ -115,6 +115,97 @@ describe('LFO worklet', () => {
     }
   });
 
+  it('reproduces the same S&H stairs with a fixed seed across separate runs', () => {
+    const params = { rate: 250, depth: 1, offset: 0, phase: 0, seed: 1234 };
+    const first = lfo();
+    first.processor.props.shape = 'random';
+    const outA = [
+      ...first.run(8, params),
+      ...first.run(8, { ...params, sync: pulses(8, [2]) }),
+    ];
+
+    const second = lfo();
+    second.processor.props.shape = 'random';
+    const outB = [
+      ...second.run(8, params),
+      ...second.run(8, { ...params, sync: pulses(8, [2]) }),
+    ];
+
+    expect(outB).toEqual(outA);
+
+    // Ступень держится до границы периода, где draw срабатывает на этом же сэмпле:
+    // 0–3, 4–7, затем sync-фронт разбивает третий период на 8–9 и 10–13, хвост 14–15
+    const stairStarts = [0, 4, 8, 10, 14];
+
+    for (let k = 0; k < stairStarts.length - 1; k++) {
+      const segment = outA.slice(stairStarts[k], stairStarts[k + 1]);
+      expect(new Set(segment).size, `segment ${k}`).toBe(1);
+    }
+
+    // Sync-фронт на сэмпле 10 сразу берёт новую ступень
+    expect(outA[10]).not.toEqual(outA[9]);
+    expect(outA[10]).toEqual(outA[11]);
+
+    // Не вырожденная последовательность: за прогон встречается несколько ступеней
+    expect(new Set(outA).size).toBeGreaterThan(1);
+  });
+
+  it('keeps using Math.random when seed is 0', () => {
+    const spy = vi.spyOn(Math, 'random').mockReturnValue(0.6);
+    const { run, processor } = lfo();
+    processor.props.shape = 'random';
+
+    const out = run(8, { rate: 250, seed: 0 });
+
+    expect(spy).toHaveBeenCalled();
+    // Выходной буфер — Float32Array, значение округляется до float32
+    expect(new Set(out)).toEqual(new Set([Math.fround(0.6 * 2 - 1)]));
+
+    spy.mockRestore();
+  });
+
+  it('changes the stairs when the seed changes', () => {
+    const shape = { shape: 'random' };
+    const a = lfo();
+    a.processor.props.shape = shape.shape;
+    const outA = a.run(16, { rate: 250, seed: 111 });
+
+    const b = lfo();
+    b.processor.props.shape = shape.shape;
+    const outB = b.run(16, { rate: 250, seed: 222 });
+
+    expect(outB).not.toEqual(outA);
+  });
+
+  it('restarts the seeded sequence on [RESET]', () => {
+    const { run, processor } = lfo();
+    processor.props.shape = 'random';
+
+    const head = run(8, { rate: 250, seed: 777 });
+    run(8, { rate: 250, seed: 777 });
+    processor.port.onmessage({ data: '[RESET]' });
+
+    expect(processor.context.phase).toBe(0);
+    const replayed = run(8, { rate: 250, seed: 777 });
+
+    expect(replayed).toEqual(head);
+  });
+
+  it('restarts the seeded sequence when the seed changes mid-stream', () => {
+    const { run, processor } = lfo();
+    processor.props.shape = 'random';
+
+    run(8, { rate: 250, seed: 1 });
+    const switched = run(8, { rate: 250, seed: 2 });
+
+    const fresh = lfo();
+    fresh.processor.props.shape = 'random';
+    const expected = fresh.run(8, { rate: 250, seed: 2 });
+
+    expect(switched).toEqual(expected);
+    expect(processor.context.curSeed).toBe(2);
+  });
+
   it('resets context on [RESET]', () => {
     const { run, processor } = lfo();
     run(3, { rate: 100 });

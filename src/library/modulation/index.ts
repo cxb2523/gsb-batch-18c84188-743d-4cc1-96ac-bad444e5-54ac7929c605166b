@@ -136,6 +136,32 @@ export const modulation = {
     return from + (range < 0 ? -k : k) * step;
   },
 
+  // Детерминированный ГПСЧ (xorshift32): начальное 32-битное состояние из числа-зерна.
+  // Дробные и отрицательные зерна сводятся к 32-битному целому, ноль остаётся нулём —
+  // зерно 0 трактует вызывающий как «без воспроизведения».
+  seedRandom(seed: number): number {
+    return seed | 0;
+  },
+
+  // Следующее 32-битное состояние xorshift32; нулевое состояние закреплено за нулём
+  randomNext(state: number): number {
+    state |= 0;
+
+    if (state === 0)
+      return 0;
+
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+
+    return state | 0;
+  },
+
+  // Псевдослучайное число [0, 1) из 32-битного состояния
+  randomUnit(state: number): number {
+    return (state >>> 0) / 4294967296;
+  },
+
   // Остаток, всегда в [0, modulo); modulo ≤ 0 — без ограничения
   wrapModulo(value: number, modulo: number): number {
     if (!(modulo > 0))

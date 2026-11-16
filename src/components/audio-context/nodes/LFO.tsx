@@ -6,6 +6,7 @@ import { AudioPort } from "../ports/AudioPort";
 import { BaseNode } from "../lib/BaseNode";
 import { Canvas } from "$components/canvas";
 import LfoProcessor from "../worklet/LfoProcessor";
+import { Number } from "../lib/Number";
 import { Range } from "../lib/Range";
 import { Select } from "../lib/Select";
 import { SignalNode } from "../lib/signalNode";
@@ -42,6 +43,7 @@ export default class extends BaseNode {
   @store _offset = new SignalNode(this.#processor.offset, { min: -1, max: 1, default: 0 });
   @store _phase = new SignalNode(this.#processor.phase, { min: 0, max: 1, default: 0 });
   @store _sync = new SignalNode(this.#processor.sync, { min: 0, max: 1, default: 0 });
+  @store _seed = new SignalNode(this.#processor.seed, { min: 0, default: 0 });
 
   _connect = () => dispose(
     effect(() => {
@@ -87,6 +89,7 @@ export default class extends BaseNode {
       <Range label="Offset" value={this._offset} accuracy={2} />
       <Range label="Phase" value={this._phase} accuracy={2} strict />
       <Pulse label="Sync" value={this._sync} text="Restart" />
+      <Number label="Seed" value={this._seed} />
     </>
   );
 }

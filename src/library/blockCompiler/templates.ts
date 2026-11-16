@@ -177,14 +177,17 @@ export const templates: Record<string, TTemplate> = {
 
   LFO: {
     structural: ['_shape'],
-    ports: simple(['_rate', '_depth', '_offset', '_phase', '_sync']),
-    emit({ inputs: [rate, depth, offset, phase, sync], config, state, local, use }) {
+    ports: simple(['_rate', '_depth', '_offset', '_phase', '_sync', '_seed']),
+    emit({ inputs: [rate, depth, offset, phase, sync, seed], config, state, local, use }) {
       const value = configValue(config, '_shape');
       // В код идёт строка из нашего списка, не из конфига; неизвестная форма — синус, как в процессоре
       const shape = lfoShapes.find(item => item === value) ?? 'sine';
       const p = state('phase', '0');
       const s = state('sync', '0');
       const held = state('held', 'Math.random() * 2 - 1');
+      const curSeed = state('curSeed', '0');
+      const rng = state('rng', '0');
+      const started = state('started', 'false');
       const inc = local('inc');
       const out = local('out');
 
@@ -192,11 +195,12 @@ export const templates: Record<string, TTemplate> = {
 
       return {
         code: [
-          `if ($f.rising(${s}, ${sync})) { ${p} = 0; ${held} = Math.random() * 2 - 1; }`,
+          `if (!${started} || ${curSeed} !== ${seed}) { ${curSeed} = ${seed}; ${rng} = $f.seedRandom(${seed}); ${rng} = $f.randomNext(${rng}); ${held} = $f.randomUnit(${rng}) * 2 - 1; ${started} = true; }`,
+          `if ($f.rising(${s}, ${sync})) { ${p} = 0; if (${curSeed} !== 0) { ${rng} = $f.randomNext(${rng}); ${held} = $f.randomUnit(${rng}) * 2 - 1; } else ${held} = Math.random() * 2 - 1; }`,
           `${s} = ${sync};`,
           `const ${out} = ${offset} + ${depth} * $f.lfoShape(${JSON.stringify(shape)}, ${p} + ${phase}, ${held});`,
           `const ${inc} = ${rate} / sr;`,
-          `if ($f.lfoWrapped(${p}, ${inc}, ${phase})) ${held} = Math.random() * 2 - 1;`,
+          `if ($f.lfoWrapped(${p}, ${inc}, ${phase})) { if (${curSeed} !== 0) { ${rng} = $f.randomNext(${rng}); ${held} = $f.randomUnit(${rng}) * 2 - 1; } else ${held} = Math.random() * 2 - 1; }`,
           `${p} = $f.wrap(${p} + ${inc});`,
         ],
         out,
