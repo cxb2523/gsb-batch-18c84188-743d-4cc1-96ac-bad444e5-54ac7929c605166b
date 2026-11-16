@@ -41,7 +41,7 @@ import {
     WkMaxZ,
     WkXyz,
 } from './WkConstants';
-import { isMobile, QualityLevels, SortTypes } from '../../utils/GlobalConstants';
+import { isMobile, normalizeQualityLevel, QualityLevels, SortTypes } from '../../utils/GlobalConstants';
 
 const worker: Worker = self as any;
 let texture0: SplatTexdata = { index: 0, version: 0 };
@@ -629,7 +629,7 @@ worker.onmessage = (e: any) => {
         cameraPos = data[WkCameraPosition];
         throttledSort();
     } else if (data[WkA09UpdateParams]) {
-        qualityLevel = Math.max(QualityLevels.L1, Math.min(data[WkQualityLevel] || QualityLevels.Default5, QualityLevels.L9)); // 限制1~9,默认5
+        qualityLevel = normalizeQualityLevel(data[WkQualityLevel]); // 限制1~9的整数,默认5
         sortType = data[WkSortType] || sortType;
         depthNearRate = data[WkDepthNearRate] || depthNearRate;
         depthNearValue = data[WkDepthNearValue] || depthNearValue;
@@ -637,7 +637,7 @@ worker.onmessage = (e: any) => {
         poolSplatIndexPush(data[WkDepthIndex] as Uint32Array);
     } else if (data[WkA09Init]) {
         maxRenderCount = data[WkMaxRenderCount];
-        qualityLevel = Math.max(QualityLevels.L1, Math.min(data[WkQualityLevel] || QualityLevels.Default5, QualityLevels.L9)); // 限制1~9,默认5
+        qualityLevel = normalizeQualityLevel(data[WkQualityLevel]); // 限制1~9的整数,默认5
         sortType = data[WkSortType] || sortType;
         depthNearRate = data[WkDepthNearRate] || depthNearRate;
         depthNearValue = data[WkDepthNearValue] || depthNearValue;

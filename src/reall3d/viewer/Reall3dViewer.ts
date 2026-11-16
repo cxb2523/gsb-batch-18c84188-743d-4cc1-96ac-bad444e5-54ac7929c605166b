@@ -92,7 +92,7 @@ import { Reall3dViewerOptions } from './Reall3dViewerOptions';
 import { SplatMeshOptions } from '../meshs/splatmesh/SplatMeshOptions';
 import { MarkData } from '../meshs/mark/data/MarkData';
 import { computeCompressionRatio, getUrl, glbKhrGs2Splat, isPointCloudPly, isString, parseRgbPly } from '../utils/CommonUtils';
-import { DecoderPath, isMobile, QualityLevels, SortTypes, ViewerVersion } from '../utils/GlobalConstants';
+import { DecoderPath, isMobile, normalizeQualityLevel, QualityLevels, SortTypes, ViewerVersion } from '../utils/GlobalConstants';
 import { MetaData } from '../modeldata/MetaData';
 import { globalEv } from '../events/GlobalEV';
 import { setupPlayer } from '../scene/SetupPlayer';
@@ -181,8 +181,10 @@ export class Reall3dViewer {
         setupAllEventsVerwer(events);
 
         on(UpdateQualityLevel, (qualityLevel: number) => {
-            opts.qualityLevel = qualityLevel;
-            splatMesh.options({ qualityLevel, renderer: undefined, scene: undefined });
+            // 入口规范化档位到 1~9 的整数，越界档位夹取到端点值
+            const level = normalizeQualityLevel(qualityLevel);
+            opts.qualityLevel = level;
+            splatMesh.options({ qualityLevel: level, renderer: undefined, scene: undefined });
         });
 
         on(UpdateSortType, (sortType: number) => {
@@ -394,9 +396,10 @@ export class Reall3dViewer {
             opts.lightFactor !== undefined && fire(SplatUpdateLightFactor, opts.lightFactor);
 
             opts.debugMode !== undefined && (viewOpts.debugMode = opts.debugMode);
-            opts.qualityLevel !== undefined &&
-                (viewOpts.qualityLevel = opts.qualityLevel) &&
-                this.splatMesh.options({ qualityLevel: opts.qualityLevel } as any);
+            if (opts.qualityLevel !== undefined) {
+                viewOpts.qualityLevel = normalizeQualityLevel(opts.qualityLevel);
+                this.splatMesh.options({ qualityLevel: viewOpts.qualityLevel } as any);
+            }
             opts.sortType !== undefined && (viewOpts.sortType = opts.sortType) && this.splatMesh.options({ sortType: opts.sortType } as any);
 
             opts.markType !== undefined && (viewOpts.markType = opts.markType);
@@ -483,7 +486,7 @@ export class Reall3dViewer {
         const orgOpts: Reall3dViewerOptions = fire(GetOptions);
         const opts: Reall3dViewerOptions = { root: orgOpts.root, ...meta, ...(meta.cameraInfo || {}) };
         opts.bigSceneMode = true;
-        opts.qualityLevel = meta.qualityLevel || QualityLevels.Default5;
+        opts.qualityLevel = normalizeQualityLevel(meta.qualityLevel);
         opts.sortType = meta.sortType || SortTypes.Radial2;
         opts.viewMode = meta.viewMode;
         meta.background && (opts.background = meta.background);
@@ -606,7 +609,7 @@ export class Reall3dViewer {
         }
 
         // 优先顺序： meta -> opts -> default
-        meta.qualityLevel = meta.qualityLevel || opts.qualityLevel || QualityLevels.Default5;
+        meta.qualityLevel = normalizeQualityLevel(meta.qualityLevel || opts.qualityLevel);
         meta.sortType = meta.sortType || opts.sortType || SortTypes.Default1;
         meta.minimap && (meta.minimap.url = getUrl(meta.minimap.url, getUrl(metaUrl, location.href)));
         meta.audioMask && (meta.audioMask.audioUrl = getUrl(meta.audioMask.audioUrl, getUrl(metaUrl, location.href)));

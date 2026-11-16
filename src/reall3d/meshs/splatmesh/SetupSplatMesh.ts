@@ -166,7 +166,29 @@ import FvEffect from './shaders/chunks/FvEffect.glsl';
 import WatermarkEffect from './shaders/chunks/WatermarkEffect.glsl';
 import { SplatFile } from '../../modeldata/SplatTiles';
 import { SplatGpuCache } from './SplatGpuCache';
-import { isMobile, QualityLevels } from '../../utils/GlobalConstants';
+import { isMobile, normalizeQualityLevel, QualityLevels } from '../../utils/GlobalConstants';
+
+/** 各质量档位期望的球谐显示阶数（索引 = 档位 - 1） */
+const ShDegreesByLevel: number[] = [0, 1, 2, 3, 3, 3, 3, 3, 3];
+/** 移动端各质量档位的渲染阈值（索引 = 档位 - 1） */
+const MobileThresholdsByLevel = {
+    minPixelDiameters: [4, 3, 3, 2, 1, 1, 1, 1, 1],
+    maxPixelDiameters: [128, 128, 128, 256, 256, 256, 512, 512, 512],
+    minAlphas: [7, 6, 5, 4, 4, 3, 2, 2, 2],
+};
+/** 桌面端各质量档位的渲染阈值（索引 = 档位 - 1） */
+const PcThresholdsByLevel = {
+    minPixelDiameters: [2, 2, 2, 1, 1, 1, 1, 1, 1],
+    maxPixelDiameters: [128, 256, 256, 512, 512, 1024, 1024, 1024, 1024],
+    minAlphas: [5, 4, 3, 2, 2, 1, 1, 1, 1],
+};
+
+/**
+ * 取模型元数据中显式配置的数值，未显式配置时使用档位表的值
+ */
+function metaNumberOr(value: any, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
 
 export function setupSplatMesh(events: Events) {
     let disposed = false;
@@ -585,8 +607,10 @@ export function setupSplatMesh(events: Events) {
             material.uniformsNeedUpdate = true;
         });
         on(SplatUpdateShDegree, async (value: number) => {
-            const modelShDegree: number = await fire(GetModelShDegree);
-            currentDisplayShDegree = Math.max(0, Math.min(value, modelShDegree));
+            const modelShDegree: number = (await fire(GetModelShDegree)) || 0;
+            // 球谐显示阶数：不高于模型实际最大阶数，且不低于 0；非法值按 0 处理，避免写入无效 uniform
+            const expectedShDegree: number = Number.isFinite(value) ? value : 0;
+            currentDisplayShDegree = Math.max(0, Math.min(Math.floor(expectedShDegree), modelShDegree));
             material.uniforms[VarShDegree].value = currentDisplayShDegree;
             material.uniformsNeedUpdate = true;
             fire(Information, { shDegree: `${currentDisplayShDegree} / max ${modelShDegree}` });
@@ -669,33 +693,27 @@ export function setupSplatMesh(events: Events) {
     });
 
     on(OnQualityLevelChanged, () => {
-        if (!fire(IsSplatMeshCreated)) return;
-
         const opts: SplatMeshOptions = fire(GetOptions);
         const meta: MetaData = (fire(GetSplatMesh) as SplatMesh)?.meta || {};
-        const level: number = opts.qualityLevel || QualityLevels.Default5;
-        const maxShDegrees = [0, 1, 2, 3, 3, 3, 3, 3, 3];
-        fire(SplatUpdateShDegree, maxShDegrees[level - 1]);
-        if (isMobile) {
-            const minPixs = [4, 3, 3, 2, 1, 1, 1, 1, 1];
-            const maxPixs = [128, 128, 128, 256, 256, 256, 512, 512, 512];
-            const minAlphas = [7, 6, 5, 4, 4, 3, 2, 2, 2];
-            const minPix = meta.minPixelDiameter || minPixs[level - 1];
-            const maxPix = meta.maxPixelDiameter || maxPixs[level - 1];
-            fire(SplatUpdateMinMaxPixelDiameter, minPix, maxPix);
-            fire(SplatUpdateMinAlpha, meta.minAlpha || minAlphas[level - 1]);
-            fire(SplatUpdateUseSimilarExp, level < QualityLevels.L4);
-        } else {
-            const minPixs = [2, 2, 2, 1, 1, 1, 1, 1, 1];
-            const maxPixs = [128, 256, 256, 512, 512, 1024, 1024, 1024, 1024];
-            const minAlphas = [5, 4, 3, 2, 2, 1, 1, 1, 1];
-            const minPix = meta.minPixelDiameter || minPixs[level - 1];
-            const maxPix = meta.maxPixelDiameter || maxPixs[level - 1];
-            fire(SplatUpdateMinMaxPixelDiameter, minPix, maxPix);
-            fire(SplatUpdateMinAlpha, meta.minAlpha || minAlphas[level - 1]);
-            fire(SplatUpdateUseSimilarExp, level < QualityLevels.L2);
-        }
-        fire(WorkerUpdateParams);
+        // 入口即规范化档位到 1~9 的整数，越界时取端点档位，避免查表得到 undefined 阈值
+        const level: number = normalizeQualityLevel(opts.qualityLevel ?? meta.qualityLevel);
+
+        // 模型尚未创建完成时不写入任何 uniform；创建完成后会再次触发本回调以应用参数
+        if (!fire(IsSplatMeshCreated)) return;
+
+        // 球谐显示阶数：档位期望阶数（写入时再与模型实际最大阶数取较小值，且保证不低于 0）
+        fire(SplatUpdateShDegree, Math.max(0, ShDegreesByLevel[level - 1]));
+
+        const thresholds = isMobile ? MobileThresholdsByLevel : PcThresholdsByLevel;
+        // 模型元数据中显式配置的阈值优先于档位表
+        const minPix = metaNumberOr(meta.minPixelDiameter, thresholds.minPixelDiameters[level - 1]);
+        const maxPix = metaNumberOr(meta.maxPixelDiameter, thresholds.maxPixelDiameters[level - 1]);
+        fire(SplatUpdateMinMaxPixelDiameter, minPix, maxPix);
+        fire(SplatUpdateMinAlpha, metaNumberOr(meta.minAlpha, thresholds.minAlphas[level - 1]));
+        fire(SplatUpdateUseSimilarExp, isMobile ? level < QualityLevels.L4 : level < QualityLevels.L2);
+
+        fire(WorkerUpdateParams); // 同步排序 Worker 参数
+        fire(NotifyViewerNeedUpdate); // 触发一次重绘
     });
 
     // 小场景圆圈扩大渐进渲染

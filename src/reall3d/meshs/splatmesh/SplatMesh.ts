@@ -54,7 +54,7 @@ import { initSplatMeshOptions } from '../../utils/ViewerUtils';
 import { isInFrustum } from '../../utils/CommonUtils';
 import { MetaData } from '../../modeldata/MetaData';
 import { BoundBox } from '../boundbox/BoundBox';
-import { QualityLevels, SortTypes } from '../../utils/GlobalConstants';
+import { normalizeQualityLevel, SortTypes } from '../../utils/GlobalConstants';
 import { AudioText, AudioTextOptions } from '../media/AudioText';
 import { setupAllEventsSplatMesh } from '../../scene/SetupAllEvents';
 
@@ -170,7 +170,10 @@ export class SplatMesh extends Mesh {
         if (opts) {
             opts.pointcloudMode !== undefined && !fire(SplatUpdatePointMode, opts.pointcloudMode) && (thisOpts.pointcloudMode = opts.pointcloudMode);
             opts.lightFactor !== undefined && fire(SplatUpdateLightFactor, opts.lightFactor);
-            opts.qualityLevel !== undefined && (thisOpts.qualityLevel = opts.qualityLevel) && fire(OnQualityLevelChanged);
+            if (opts.qualityLevel !== undefined) {
+                thisOpts.qualityLevel = normalizeQualityLevel(opts.qualityLevel);
+                fire(OnQualityLevelChanged);
+            }
             !thisOpts.mapMode && opts.sortType !== undefined && (thisOpts.sortType = opts.sortType) && fire(WorkerUpdateParams);
             opts.disableTransitionEffectOnLoad !== undefined && (thisOpts.disableTransitionEffectOnLoad = opts.disableTransitionEffectOnLoad);
 
@@ -210,7 +213,8 @@ export class SplatMesh extends Mesh {
             }
         }
 
-        that.events.on(GetRenderQualityLevel, () => meta.qualityLevel || QualityLevels.Default5);
+        // 排序 Worker 使用的质量级别：以当前生效配置为准（入口规范化到 1~9）；meta 采用懒读取，避免后续模型沿用旧 meta
+        that.events.on(GetRenderQualityLevel, () => normalizeQualityLevel(that.opts?.qualityLevel ?? that.meta?.qualityLevel));
 
         that.meta = meta;
         const atOpts: AudioTextOptions = { autoPlay: meta.audio?.autoPlay, mp3: meta.audio?.mp3, textDurations: meta.audio?.textDurations };

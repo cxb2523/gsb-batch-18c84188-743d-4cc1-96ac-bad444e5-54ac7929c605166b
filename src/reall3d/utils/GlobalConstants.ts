@@ -83,6 +83,20 @@ export enum QualityLevels {
 }
 
 /**
+ * 将质量级别规范化为 1~9 的整数。
+ * 未设定或非法值（undefined / null / 空串 / NaN / 非数值）使用默认级别 Default5；
+ * 数字或数字字符串会先四舍五入为整数，超出范围的值夹取到端点级别（L1 / L9）。
+ * @param level 原始质量级别
+ * @returns 1~9 的整数级别
+ */
+export function normalizeQualityLevel(level?: number | string): number {
+    if (level === undefined || level === null || level === '') return QualityLevels.Default5;
+    const value = Math.round(Number(level));
+    if (!Number.isFinite(value)) return QualityLevels.Default5;
+    return Math.max(QualityLevels.L1, Math.min(value, QualityLevels.L9));
+}
+
+/**
  * 【排序类型】
  * 并不存在一种即性能高效又普遍适用的排序方法，这里提供默认方式作为普适性使用，以及其他多种方式供个性化场景选择使用。
  *

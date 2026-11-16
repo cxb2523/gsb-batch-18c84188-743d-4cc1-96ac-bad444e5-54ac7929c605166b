@@ -4,7 +4,7 @@
 import { PerspectiveCamera, Vector3, WebGLRenderer } from 'three';
 import { SplatMeshOptions, TransitionEffects } from '../meshs/splatmesh/SplatMeshOptions';
 import { Reall3dViewerOptions } from '../viewer/Reall3dViewerOptions';
-import { QualityLevels, SortTypes } from './GlobalConstants';
+import { normalizeQualityLevel, QualityLevels, SortTypes } from './GlobalConstants';
 import { MetaData } from '../modeldata/MetaData';
 import { getUrl } from './CommonUtils';
 import { SplatTiles } from '../modeldata/SplatTiles';
@@ -20,6 +20,7 @@ export function initSplatMeshOptions(options: SplatMeshOptions): SplatMeshOption
     opts.shDegree ??= 0;
     opts.depthTest ??= true;
     opts.debugMode ??= false;
+    opts.qualityLevel !== undefined && (opts.qualityLevel = normalizeQualityLevel(opts.qualityLevel)); // 限制1~9的整数
     opts.mapMode && (opts.sortType = SortTypes.Default1);
     opts.transitionEffect ??= TransitionEffects.ModelCenterCirccle;
 
@@ -52,7 +53,7 @@ export function initGsViewerOptions(options: Reall3dViewerOptions): Reall3dViewe
     opts.background ??= '#000000';
     opts.minDistance ??= 0.1;
     opts.maxDistance ??= 5000;
-    opts.qualityLevel ??= QualityLevels.Default5;
+    opts.qualityLevel = normalizeQualityLevel(opts.qualityLevel); // 限制1~9的整数，默认5
     opts.sortType ??= SortTypes.Default1;
     opts.transitionEffect ??= TransitionEffects.ModelCenterCirccle;
     opts.disableRightClickFocus ??= false;
