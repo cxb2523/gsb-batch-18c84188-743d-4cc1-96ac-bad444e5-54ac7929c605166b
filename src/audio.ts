@@ -37,7 +37,13 @@ class AudioX {
   private _fetchFn: (mediaTrack: MediaTrack) => Promise<void>;
   private eqStatus: EqualizerStatus = 'IDEAL';
   private isEqEnabled = false;
-  private eqInstance: Equalizer;
+  private eqInstance: Equalizer | undefined;
+  /**
+   * Equalizer operations requested before the processing chain finished
+   * building (for example before the first successful play). They are replayed
+   * in order once the equalizer becomes active.
+   */
+  private pendingEqOperations: Array<(eq: Equalizer) => void> = [];
   private showNotificationsActions = false;
   private originalQueue: MediaTrack[] = [];
   private isShuffled = false;
@@ -174,15 +180,61 @@ class AudioX {
     audioInstance.load();
   }
 
+  /**
+   * Builds the equalizer processing chain for the current audio element.
+   *
+   * The chain is created at most once: once active, repeated play calls and
+   * track changes (addMedia) reuse the same source node and filter graph.
+   * A failed attempt leaves no cached instance, so every subsequent play()
+   * retries from a clean state.
+   */
   attachEq() {
-    if (this.eqStatus === 'IDEAL') {
+    if (this.eqStatus === 'ACTIVE' && this.eqInstance) {
+      return;
+    }
+
+    try {
+      const eq = new Equalizer();
+      this.eqStatus = eq.status();
+      this.eqInstance = eq;
+      this.flushPendingEqOperations();
+    } catch (_error) {
+      // Do not cache a half-initialized instance: keep the status FAILED so
+      // the next play() can retry, and drop any reference to the failed one.
+      this.eqStatus = 'FAILED';
+      this.eqInstance = undefined;
+      console.log('failed to enable equalizer, it will be retried on the next play');
+    }
+  }
+
+  /**
+   * Runs equalizer operations that were requested before the chain was ready.
+   * @private
+   */
+  private flushPendingEqOperations() {
+    if (!this.eqInstance || this.eqStatus !== 'ACTIVE') {
+      return;
+    }
+    const pending = this.pendingEqOperations.splice(0);
+    for (const operation of pending) {
       try {
-        const eq = new Equalizer();
-        this.eqStatus = eq.status();
-        this.eqInstance = eq;
-      } catch (_e) {
-        console.log('failed to enable equalizer');
+        operation(this.eqInstance);
+      } catch (_error) {
+        console.error('Failed to apply a queued equalizer operation');
       }
+    }
+  }
+
+  /**
+   * Runs an equalizer operation immediately when the chain is active, or
+   * queues it until the first successful attachment.
+   * @private
+   */
+  private withEqualizer(operation: (eq: Equalizer) => void) {
+    if (this.eqStatus === 'ACTIVE' && this.eqInstance) {
+      operation(this.eqInstance);
+    } else {
+      this.pendingEqOperations.push(operation);
     }
   }
 
@@ -203,6 +255,8 @@ class AudioX {
         });
     }
     if (this.isEqEnabled) {
+      // No-op while ACTIVE, retries after a failure, and never rebuilds the
+      // chain on repeated plays or track changes.
       this.attachEq();
     }
   }
@@ -230,10 +284,9 @@ class AudioX {
         this.addMedia(currentTrack).then(() => {
           if (audioInstance.HAVE_ENOUGH_DATA === READY_STATE.HAVE_ENOUGH_DATA) {
             setTimeout(async () => {
+              // play() owns equalizer attachment, so track changes reuse the
+              // already established processing chain instead of rebuilding it.
               await this.play();
-              if (this.isEqEnabled) {
-                this.attachEq();
-              }
             }, 950);
           }
         });
@@ -335,7 +388,7 @@ class AudioX {
 
   setPreset(id: keyof Preset) {
     if (this.isEqEnabled) {
-      this.eqInstance.setPreset(id);
+      this.withEqualizer((eq) => eq.setPreset(id));
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
     }
@@ -343,7 +396,7 @@ class AudioX {
 
   setCustomEQ(gains: number[]) {
     if (this.isEqEnabled) {
-      this.eqInstance.setCustomEQ(gains);
+      this.withEqualizer((eq) => eq.setCustomEQ(gains));
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
     }
@@ -351,7 +404,7 @@ class AudioX {
 
   setBassBoost(enabled: boolean, boost: number) {
     if (this.isEqEnabled) {
-      this.eqInstance.setBassBoost(enabled, boost);
+      this.withEqualizer((eq) => eq.setBassBoost(enabled, boost));
     } else {
       console.error('Equalizer not initialized, please set enableEq at init');
     }

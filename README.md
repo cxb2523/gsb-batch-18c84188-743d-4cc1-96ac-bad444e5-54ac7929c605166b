@@ -187,6 +187,17 @@ audio.addEventListener("pause", (data: any) => {
 
 ### Equalizer Features
 
+Enable the equalizer at initialization with `enableEQ: true`. The processing
+chain (media element source → EQ bands → bass boost → compressor → output) is
+built only once for the audio element: repeated `play()` calls and track
+changes via `addMedia` reuse it instead of attaching the element a second time.
+If the chain cannot be built on the first play, the next play retries
+automatically, and preset/custom-EQ/bass-boost calls made in the meantime are
+queued and applied once it is ready. When the browser suspends the
+AudioContext before the first user interaction, it is resumed on the first
+click/keypress and the current preset, custom gains and bass boost are
+re-applied automatically.
+
 ```js
 // Get preset equalizer settings
 const presets = audio.getPresets();
@@ -198,6 +209,9 @@ audio.setPreset('preset_default');
 const gainsValue = preset[0].gains;   // Default: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 gainsValue[0] = 2.5;                  // Modify first band
 audio.setCustomEQ(gainsValue);
+
+// Bass boost (enable flag + gain in dB)
+audio.setBassBoost(true, 6);
 ```
 
 ### Queue Management
@@ -226,6 +240,24 @@ audio.getLoopMode();               // Get current loop mode
 ```js
 const instance = AudioX.getAudioInstance();  // Get raw audio element
 ```
+
+## Testing
+
+The test suite runs under [Vitest](https://vitest.dev/) with a jsdom
+environment and a controllable, in-memory mock of the Web Audio API
+(`tests/webAudioMock.ts`), so no real audio hardware or browser is required:
+
+```bash
+npm test          # single run
+npm run test:watch
+```
+
+The equalizer tests verify that repeated `play()` calls build the processing
+chain only once, a failed initialization leaves no half-initialized instance
+and is retried on the next play, track changes keep the established chain and
+preset working, settings requested before the first successful play are
+queued, and a suspended AudioContext is resumed after a user gesture with all
+preset/custom-gain/bass-boost settings re-applied.
 
 ## Contributing
 
