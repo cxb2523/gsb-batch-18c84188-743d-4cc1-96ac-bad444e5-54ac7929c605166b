@@ -1,0 +1,38 @@
+{
+  "name": "Layout Test Skin",
+  "defaults": { "size": 14, "align": "left" },
+  "areas": [
+    {
+      "rect": [10, 20, 200, 44],
+      "size": 12,
+      "align": "center",
+      "lines": [
+        ["album", ": ", "artist"],
+        ["Side A · ", "title"],
+        "playlist",
+        ["track", " / ", "playlist"]
+      ]
+    },
+    {
+      "rect": [10, 200, 100, 16],
+      "size": 14,
+      "align": "right",
+      "color": "#112233",
+      "lines": [["title"]]
+    },
+    {
+      "rect": [10, 230, 100, 16],
+      "size": 14,
+      "color": "not-a-color",
+      "lines": [["artist"]]
+    },
+    {
+      "rect": [400, 260, 200, 40],
+      "lines": [["title"]]
+    },
+    {
+      "rect": [0, 0, 0, 20],
+      "lines": [["title"]]
+    }
+  ]
+}

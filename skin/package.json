@@ -1,0 +1,12 @@
+{
+  "name": "trax-skin-text-layout",
+  "version": "1.0.0",
+  "description": "TRAX cassette-skin text layout: turns skin.json areas and track fields into positioned, fitted, colored lines",
+  "type": "module",
+  "main": "text-layout.js",
+  "exports": "./text-layout.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "UNLICENSED"
+}

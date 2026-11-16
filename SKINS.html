@@ -523,6 +523,7 @@ ux0:/data/trax/SKINS/      <span class="c">a Vita</span>
           <tr><td><code>color</code></td><td class="t">color</td><td class="t">chosen</td><td>The text color. Leave it out and TRAX picks dark or light text to suit the picture. See <a href="#color">Colors</a>.</td></tr>
         </tbody>
       </table></div>
+      <p>Each area is rendered on its own: its <code>rect</code> is cut to the screen first, any area with no width or height left is skipped, then its lines are composed, fitted and positioned as described under <a href="#lines">lines and fields</a> and <a href="#fit">How text is fitted</a>. The output for a visible area is its clipped rectangle, the resolved color and one entry per visible line, holding the final text, the pixel size used and where to draw it.</p>
     </section>
 
     <section id="lines">
@@ -543,27 +544,29 @@ ux0:/data/trax/SKINS/      <span class="c">a Vita</span>
       <div class="tree-wrap"><pre class="json"><span class="k">"lines"</span>: [ <span class="s">"title"</span>, [<span class="s">"artist"</span>, <span class="s">" — "</span>, <span class="s">"album"</span>] ]</pre></div>
 
       <h3>Missing information</h3>
-      <p>A field the track has nothing for is left out, and so is any text that was only there to separate it. Text between two fields is kept only when both of them have something. Text before or after all the fields is kept only when the field beside it has something.</p>
+      <p>A field the track has nothing for is left out, and so is any text that was only there to separate it. The rule is applied to each fixed piece on its own: text between two fields is kept only when both of them have something; text before or after all the fields is kept only when the field beside it has something. A line with no field names at all has nothing to depend on, so it is always printed as written.</p>
       <ul>
         <li><code>["album", ": ", "artist"]</code> with no artist prints just the album, without the colon.</li>
         <li><code>["Side A · ", "title"]</code> with no title prints nothing.</li>
-        <li>A line that ends up empty is skipped.</li>
+        <li><code>["artist", " - ", "album", " · ", "title"]</code> with no album prints the artist and title joined directly — each separator is dropped because the album beside it is empty.</li>
+        <li>A line that ends up empty is skipped, and no blank row is printed in its place.</li>
       </ul>
     </section>
 
     <section id="fit">
       <h2>How text is fitted</h2>
       <ul>
-        <li><strong>Placement:</strong> the lines are stacked as a block in the middle of the area, top to bottom, each <code>size</code> + 2 pixels below the last.</li>
-        <li><strong>Too wide:</strong> a line that doesn't fit is first made smaller, up to three times, each step 12% smaller, to about two-thirds of <code>size</code>. If it still doesn't fit, it's cut short with "...".</li>
+        <li><strong>Placement:</strong> empty lines are dropped first, then the visible lines are stacked as one block in the middle of the area, top to bottom, each <code>size</code> + 2 pixels below the last. The block's first line sits at <code>y + (area height − block height) ÷ 2</code>, so an area with fewer lines is still centered. Each line is then positioned across the area by its <code>align</code>.</li>
+        <li><strong>Too wide:</strong> a line that doesn't fit is first made smaller, up to three times, each step 12% smaller, to about two-thirds of <code>size</code>. If it still doesn't fit, characters are cut from the end and "<code>...</code>" is added, at the smallest size, until it fits. A box too narrow even for "<code>...</code>" prints just that.</li>
         <li><strong>Font:</strong> the text uses the PSP's own system font, as the rest of TRAX does. Accented, Japanese and Korean names all print.</li>
       </ul>
+      <p>For every visible line the renderer ends with its final text, the size actually used, and its top-left drawing position in screen pixels, ready to draw without any further measuring.</p>
     </section>
 
     <section id="color">
       <h2>Colors</h2>
-      <p>Every color is written <code>"#RRGGBB"</code>: a hash and exactly six hexadecimal digits, in upper or lower case. Short forms like <code>"#FFF"</code>, names like <code>"white"</code> and transparency aren't supported. A color TRAX can't read is ignored, as if it weren't there.</p>
-      <p>When an area has no <code>color</code>, TRAX looks at the opaque parts of the picture inside the area. If they're light, the text is dark gray (<code>#202020</code>); if they're dark, it's near-white (<code>#F0F0F0</code>). The same text is readable on a white label and on a dark shell without you setting anything.</p>
+      <p>Every color is written <code>"#RRGGBB"</code>: a hash and exactly six hexadecimal digits, in upper or lower case. Short forms like <code>"#FFF"</code>, names like <code>"white"</code> and transparency aren't supported. A color TRAX can't read is treated as if it weren't set at all, so the area falls back to the automatic choice below — it never inherits a wrong color or fails to render.</p>
+      <p>When an area has no readable <code>color</code>, TRAX looks at the opaque parts of the picture inside the area. If they're light, the text is dark gray (<code>#202020</code>); if they're dark, it's near-white (<code>#F0F0F0</code>). Transparent pixels don't count, and an area with no opaque pixels gets near-white. The same text is readable on a white label and on a dark shell without you setting anything.</p>
     </section>
 
     <section id="limits">
@@ -591,6 +594,10 @@ ux0:/data/trax/SKINS/      <span class="c">a Vita</span>
         <li>Try a long title, to check it shrinks and is cut short neatly within its area.</li>
         <li>Check the JSON with any validator first. A stray comma after the last item turns off all of the skin's text.</li>
       </ul>
+      <h3>Local layout tests</h3>
+      <p>The layout rules on this page have a reference implementation in <code>skin/text-layout.js</code>, with no dependencies: it takes an area and the current track and returns each visible line's text, size and drawing position. A sample <code>skin.json</code> and track data live under <code>skin/test/</code>, covering a missing artist dropping the colon, a missing title removing a whole line, an over-long title shrinking and then truncating, empty lines being skipped, and an invalid color falling back to the automatic choice. Run them locally with Node:</p>
+      <div class="tree-wrap"><pre class="json">cd skin
+node --test</pre></div>
     </section>
   </main>
 </div>
