@@ -94,7 +94,7 @@ export class GlassRain {
   constructor(geometry) {
     this.uniforms = {
       uWet: { value: 0 },
-      uDens: { value: new THREE.Vector4() },
+      uDens: { value: new THREE.Vector4(0, 0, 0, 0) },
       uOff: { value: Array.from({ length: 9 }, () => new THREE.Vector2()) },
       uDir: { value: [new THREE.Vector2(0, 1), new THREE.Vector2(1, 0), new THREE.Vector2(0, 1)] },
       uTail: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
@@ -109,17 +109,26 @@ export class GlassRain {
     this.mesh.renderOrder = 60;          // after the rain outside, which shows through it
     this.mesh.visible = false;
     this.wet = 0;
+    this.push = 0;                       // how hard the airflow grips the water; lags the airspeed
   }
   // rain: 0..1 how hard it is raining on the aircraft; ias in m/s; sky, glint: colours
   update(dt, rain, ias, sky, glint) {
+    // a paused clock (dt 0) freezes the water exactly where it is; a wild clock
+    // never gets to move it in big bites, so a resume never jumps or catches up
+    dt = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
+    rain = THREE.MathUtils.clamp(rain || 0, 0, 1);
+    ias = Math.max(0, ias || 0);
     // wetting takes seconds, drying takes the better part of a minute (faster in a fast airflow)
     const rate = rain > this.wet ? 0.35 : 0.025 * (1 + ias / 30);
     this.wet += (rain - this.wet) * Math.min(1, dt * rate);
-    const U = this.uniforms, wet = this.wet;
+    // the airflow's grip on the drops lags the airspeed: beads are stripped over a
+    // second or two as the speed builds, and let go more slowly as it falls
+    const grip = THREE.MathUtils.smoothstep(ias, 8, 22);
+    this.push += (grip - this.push) * Math.min(1, dt * (grip > this.push ? 1.4 : 0.6));
+    const U = this.uniforms, wet = this.wet, push = this.push;
     U.uWet.value = wet;
     this.mesh.visible = wet > 0.002;
     if (!this.mesh.visible) return;
-    const push = THREE.MathUtils.smoothstep(ias, 8, 22);            // air fast enough to move a drop
     U.uDens.value.set(
       wet * (0.50 - 0.42 * push),                                   // beads stick when slow, mostly blow off when fast
       wet * (0.10 - 0.03 * push), wet * (0.08), wet * (0.05 + 0.04 * push));   // a few runs at rest, quick thin rivulets at speed
@@ -137,6 +146,15 @@ export class GlassRain {
     });
     U.uSky.value.copy(sky);
     U.uGlint.value.copy(glint);
+  }
+  // Across a rebuild (switching aircraft) only the wetness carries over: the new
+  // glass is exactly as wet as the old one was in the same rain, but its streak
+  // pattern starts fresh — no other aircraft's water left on it.
+  getState() { return { wet: this.wet, push: this.push }; }
+  setState(s) {
+    if (!s) return;
+    this.wet = THREE.MathUtils.clamp(s.wet || 0, 0, 1);
+    this.push = THREE.MathUtils.clamp(s.push || 0, 0, 1);
   }
   dispose() { this.mesh.material.dispose(); }
 }

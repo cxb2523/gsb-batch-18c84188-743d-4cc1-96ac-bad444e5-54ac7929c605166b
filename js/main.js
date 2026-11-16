@@ -197,8 +197,12 @@ function applyTime() {
 function setAircraft(id) {
   const def = AIRCRAFT[id] || AIRCRAFT[DEFAULT_AIRCRAFT];
   S.aircraftId = def.id; S.def = def;
+  // the rain on the glass belongs to the weather, not to the airframe: the new
+  // aircraft is just as wet as the old one was, with no streaks carried over
+  const rainState = aircraft && aircraft.rainGlass ? aircraft.rainGlass.getState() : null;
   if (aircraft) { near.remove(aircraft.group); aircraft.dispose(); }
   aircraft = buildAircraft(def);
+  if (rainState && aircraft.rainGlass) aircraft.rainGlass.setState(rainState);
   cockpit = buildCockpit(def);
   cockpit.group.position.copy(aircraft.eye).sub(EYE);        // the panel goes where this aircraft's pilot sits
   cabin.position.set(aircraft.eye.x * 0.3, aircraft.eye.y - 0.16, aircraft.eye.z + 0.1);
