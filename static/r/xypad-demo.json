@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "xypad-demo",
+  "type": "registry:ui",
+  "title": "Xypad Demo",
+  "description": "Example: Xypad Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/xypad.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/xypad-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport { XYPad } from \"$lib/components/ui/audio/elements/xypad/index.js\";\r\n</script>\r\n\r\n<XYPad defaultValue={{ x: 50, y: 50 }} class=\"aspect-square\" />\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

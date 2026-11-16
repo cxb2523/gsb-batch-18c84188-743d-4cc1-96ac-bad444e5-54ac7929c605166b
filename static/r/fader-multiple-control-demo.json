@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "fader-multiple-control-demo",
+  "type": "registry:ui",
+  "title": "Fader Multiple Control Demo",
+  "description": "Example: Fader Multiple Control Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/fader.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/fader-multiple-control-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport { Fader } from \"$lib/components/ui/audio/elements/fader/index.js\";\r\n\r\n\tlet channels = $state([\r\n\t\t{ label: \"Kick\", value: 75 },\r\n\t\t{ label: \"Snare\", value: 60 },\r\n\t\t{ label: \"Bass\", value: 80 },\r\n\t\t{ label: \"Vox\", value: 90 },\r\n\t\t{ label: \"FX\", value: 40 },\r\n\t]);\r\n</script>\r\n\r\n<div class=\"flex h-56 items-end justify-center gap-4\">\r\n\t{#each channels as channel (channel.label)}\r\n\t\t<div class=\"flex flex-col items-center gap-2\">\r\n\t\t\t<Fader\r\n\t\t\t\tvalue={channel.value}\r\n\t\t\t\tlabel={channel.label}\r\n\t\t\t\tsize=\"sm\"\r\n\t\t\t\tonValueChange={(e) => (channel.value = e)}\r\n\t\t\t/>\r\n\t\t\t<span class=\"text-muted-foreground text-xs tabular-nums\">{channel.value}</span>\r\n\t\t</div>\r\n\t{/each}\r\n</div>\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

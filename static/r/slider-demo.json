@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "slider-demo",
+  "type": "registry:ui",
+  "title": "Slider Demo",
+  "description": "Example: Slider Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/slider.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/slider-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport { Slider } from \"$lib/components/ui/audio/elements/slider/index.js\";\r\n\r\n\tlet value = $state([25]);\r\n</script>\r\n\r\n<div class=\"w-full max-w-sm\">\r\n\t<Slider {value} onValueChange={(v) => (value = v)} max={100} step={1} bufferValue={55} />\r\n</div>\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

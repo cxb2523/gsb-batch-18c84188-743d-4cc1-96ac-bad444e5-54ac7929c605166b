@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "knob-demo",
+  "type": "registry:ui",
+  "title": "Knob Demo",
+  "description": "Example: Knob Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/knob.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/knob-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport { Knob } from \"$lib/components/ui/audio/elements/knob/index.js\";\r\n\r\n\tlet value = $state(50);\r\n</script>\r\n\r\n<div class=\"flex flex-col items-center gap-4\">\r\n\t<Knob {value} onValueChange={(v) => (value = v)} />\r\n\t<span class=\"text-muted-foreground text-xs tabular-nums\">{value}</span>\r\n</div>\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

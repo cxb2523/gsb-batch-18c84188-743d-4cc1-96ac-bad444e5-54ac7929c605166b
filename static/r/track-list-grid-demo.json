@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "track-list-grid-demo",
+  "type": "registry:ui",
+  "title": "Track List Grid Demo",
+  "description": "Example: Track List Grid Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/track.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/track-list-grid-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport * as AudioTrack from \"$lib/components/ui/audio/track/index.js\";\r\n</script>\r\n\r\n<AudioTrack.List variant=\"grid\" />\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "track-sortable-list-demo",
+  "type": "registry:ui",
+  "title": "Track Sortable List Demo",
+  "description": "Example: Track Sortable List Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/track.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/track-sortable-list-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport * as AudioTrack from \"$lib/components/ui/audio/track/index.js\";\r\n</script>\r\n\r\n<AudioTrack.List sortable onTrackSelect={(index) => console.log(\"selected queue index\", index)} />\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}

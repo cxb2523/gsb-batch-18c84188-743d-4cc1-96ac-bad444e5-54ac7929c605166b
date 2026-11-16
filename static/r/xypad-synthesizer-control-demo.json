@@ -1,0 +1,23 @@
+{
+  "$schema": "https://shadcn-svelte.com/schema/registry-item.json",
+  "name": "xypad-synthesizer-control-demo",
+  "type": "registry:ui",
+  "title": "Xypad Synthesizer Control Demo",
+  "description": "Example: Xypad Synthesizer Control Demo.",
+  "author": "ddtamn <https://github.com/ddtamn>",
+  "dependencies": [],
+  "registryDependencies": [
+    "https://svelte-audio-ui.vercel.app/r/xypad.json"
+  ],
+  "files": [
+    {
+      "target": "~/src/lib/components/ui/audio/examples/xypad-synthesizer-control-demo.svelte",
+      "content": "<script lang=\"ts\">\r\n\timport { XYPad } from \"$lib/components/ui/audio/elements/xypad/index.js\";\r\n</script>\r\n\r\n<XYPad\r\n\tdefaultValue={{ x: 30, y: 70 }}\r\n\tclass=\"aspect-square\"\r\n\tformatValue={(v) => {\r\n\t\tconst freq = Math.round(20 + (v.x / 100) * 20_000);\r\n\t\tconst cutoff = Math.round(200 + (v.y / 100) * 8000);\r\n\t\treturn `${freq}Hz, ${cutoff}Hz`;\r\n\t}}\r\n/>\r\n",
+      "type": "registry:file"
+    }
+  ],
+  "categories": [
+    "audio",
+    "example"
+  ]
+}
