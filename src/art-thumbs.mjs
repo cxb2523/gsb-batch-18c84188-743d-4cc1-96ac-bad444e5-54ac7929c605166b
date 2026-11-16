@@ -125,12 +125,26 @@ export function shrink(image, maxSide = MAX_SIDE) {
   return { width: w, height: h, pixels: out };
 }
 
+// 图集版本依据：文件大小 + 修改时间。缓存键和解码复用都带上它，
+// 图集被重新镜像后同名图标的键跟着变，旧缩略图和旧解码结果都不会再被命中。
+// 每次请求都实时 stat，不用缓存，保证替换后下一个请求立刻换键。
+function atlasVersion(icon) {
+  const file = atlasFile(icon.bundle, icon.page);
+  if (!file) return { file: null, stamp: 'missing' };
+  try {
+    const { size, mtimeMs } = fs.statSync(file);
+    return { file, stamp: `${size}@${mtimeMs}` };
+  } catch {
+    return { file: null, stamp: 'missing' };
+  }
+}
+
 const decoded = new Map();
-function loadAtlas(file) {
+function loadAtlas(file, stamp) {
   const hit = decoded.get(file);
-  if (hit) return hit;
+  if (hit && hit.stamp === stamp) return hit.atlas;
   const atlas = decodePng(fs.readFileSync(file));
-  decoded.set(file, atlas);
+  decoded.set(file, { stamp, atlas });
   // 一张解码后约 16MB，只留最近两张。
   if (decoded.size > 2) decoded.delete(decoded.keys().next().value);
   return atlas;
@@ -140,11 +154,11 @@ const inFlight = new Map();
 let queue = Promise.resolve();
 
 // 解码在主线程进行：逐个处理并让出事件循环，避免首次打开仓库时连续占用，影响游戏连接。
-function generate(icon, cacheFile) {
+// 同一图集页的解码结果经 loadAtlas 复用，串行队列里排在后面的同页图标不用重复解码。
+function generate(icon, cacheFile, version) {
   const job = queue.then(() => new Promise(resolve => setImmediate(resolve))).then(() => {
-    const atlasPath = atlasFile(icon.bundle, icon.page);
-    if (!atlasPath) throw new Error('图集文件不存在');
-    const png = encodePng(shrink(cropIcon(loadAtlas(atlasPath), icon)));
+    if (!version.file) throw new Error('图集文件不存在');
+    const png = encodePng(shrink(cropIcon(loadAtlas(version.file, version.stamp), icon)));
     try {
       fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
       fs.writeFileSync(cacheFile, png);
@@ -156,15 +170,18 @@ function generate(icon, cacheFile) {
 }
 
 // 查不到图标返回 null；名字只用于查索引，不参与拼接路径。
+// 缓存键含图集版本：图集文件被替换后同一图标名会换键重新生成，旧缓存文件不再被读取。
 export async function iconThumb(name) {
   const icons = iconIndex().icons;
   const icon = Object.hasOwn(icons, name) ? icons[name] : null;
   if (!icon) return null;
-  const key = createHash('sha1').update(JSON.stringify([name, icon.bundle, icon.page, icon.x, icon.y, icon.w, icon.h, icon.rotated, MAX_SIDE])).digest('hex').slice(0, 24);
+  const version = atlasVersion(icon);
+  const key = createHash('sha1').update(JSON.stringify([name, icon.bundle, icon.page, icon.x, icon.y, icon.w, icon.h, icon.rotated, MAX_SIDE, version.stamp])).digest('hex').slice(0, 24);
+  // 重建期间同一图标的重复请求复用同一个进行中的任务，不重复解码和写盘。
   if (inFlight.has(key)) return inFlight.get(key);
   const cacheFile = path.join(ART_DIR, '.thumbs', key + '.png');
-  try { return fs.readFileSync(cacheFile); } catch { /* 第一次用到这个图标 */ }
-  const job = generate(icon, cacheFile).finally(() => inFlight.delete(key));
+  try { return fs.readFileSync(cacheFile); } catch { /* 第一次用到这个版本的图标 */ }
+  const job = generate(icon, cacheFile, version).finally(() => inFlight.delete(key));
   inFlight.set(key, job);
   return job;
 }

@@ -19,6 +19,7 @@ const cases = [
   ['selftest-factory-loop.mjs', '--offline'],
   ['selftest-resource-updater.mjs'],
   ['selftest-trace-log.mjs'],
+  ['selftest-art-thumbs.mjs'],
   ['selftest-console-log.mjs'],
   ['selftest-console-output.mjs'],
   ['selftest-platform-recovery.mjs'],

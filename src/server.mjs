@@ -1585,7 +1585,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           json({ error: 'not found' }, 404);
           return;
         }
-        // 地址带图标在图集里的位置，内容变了地址也会变。
+        // 地址带图标位置和图集版本，矩形或图集内容变了地址都会变。
         res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' });
         res.end(png);
         return;

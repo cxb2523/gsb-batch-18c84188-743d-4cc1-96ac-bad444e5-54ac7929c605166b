@@ -8,7 +8,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig, RESOURCE } from './config.mjs';
 
-export const ART_DIR = path.resolve(import.meta.dirname, '../work/cdn/art');
+export const ART_DIR = process.env.CW_ART_DIR
+  ? path.resolve(process.env.CW_ART_DIR)
+  : path.resolve(import.meta.dirname, '../work/cdn/art');
 const INDEX_PATH = path.join(ART_DIR, 'index.json');
 
 let cached = null;
@@ -48,6 +50,28 @@ export function iconCount() {
   return Object.keys(iconIndex().icons).length;
 }
 
+// 缩略图地址用的图集版本（大小@修改时间）：图集重新镜像后地址跟着变，
+// 浏览器才不会继续用 immutable 缓存里的旧图。带 1 秒缓存，一页上百个图标只 stat 几次；
+// 服务端生成缩略图时另行实时核对版本，见 art-thumbs.mjs。
+const stamps = new Map();
+export function atlasStamp(bundle, page) {
+  const key = bundle + '/' + page;
+  const now = Date.now();
+  const hit = stamps.get(key);
+  if (hit && now - hit.at < 1000) return hit.stamp;
+  let stamp = '0';
+  const file = atlasFile(bundle, page);
+  if (file) {
+    try {
+      const stat = fs.statSync(file);
+      stamp = `${stat.size}@${stat.mtimeMs}`;
+    } catch { /* 图集刚好在替换，下次渲染再取 */ }
+  }
+  stamps.set(key, { at: now, stamp });
+  if (stamps.size > 64) stamps.delete(stamps.keys().next().value);
+  return stamp;
+}
+
 // 页面直接拿这个渲染：<span style="background-image:url(entry.url);background-position:-x -y;width:w;height:h">
 export function iconEntry(name) {
   const icon = iconOf(name);
@@ -55,7 +79,7 @@ export function iconEntry(name) {
   return {
     name: icon.name,
     url: `/api/art/atlas/${icon.bundle}/${encodeURIComponent(icon.page)}`,
-    thumb: `/api/art/icon/${encodeURIComponent(icon.name)}.png?v=${[icon.x, icon.y, icon.w, icon.h].join('.')}`,
+    thumb: `/api/art/icon/${encodeURIComponent(icon.name)}.png?v=${[icon.x, icon.y, icon.w, icon.h, atlasStamp(icon.bundle, icon.page)].join('.')}`,
     x: icon.x,
     y: icon.y,
     w: icon.w,
@@ -112,6 +136,7 @@ export function resetCache() {
   cached = null;
   indexMtime = undefined;
   nextIndexCheck = 0;
+  stamps.clear();
   tables = null;
   maps = null;
 }
