@@ -3,14 +3,10 @@
 
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { writeFile } from 'node:fs/promises'
-import { encodeWav } from '../wav-encoder'
+import { encodeWav, validateWavParams, MAX_CHANNELS } from '../wav-encoder'
 
-/** 30 minutes of stereo float32 at 48 kHz — far beyond any plausible take. */
-const MAX_PCM_BYTES = 48_000 * 4 * 2 * 60 * 30
-
-/** Range accepted by the WAV header's 32-bit sample-rate field, in practice. */
-const MIN_SAMPLE_RATE = 8_000
-const MAX_SAMPLE_RATE = 384_000
+/** 30 minutes of float32 at 48 kHz per channel — far beyond any plausible take. */
+const MAX_PCM_BYTES = 48_000 * 4 * 60 * 30 * MAX_CHANNELS
 
 /**
  * Register audio export IPC handlers.
@@ -22,6 +18,10 @@ const MAX_SAMPLE_RATE = 384_000
  * `Buffer.alloc(44 + n * 2)` in the MAIN process, so an oversized buffer stalls
  * the whole app, and a NaN or negative sampleRate throws ERR_OUT_OF_RANGE
  * inside writeUInt32LE.
+ *
+ * The channel contract matches the renderer (src/lib/audio/wav-export.ts):
+ * 1..MAX_CHANNELS interleaved channels are accepted as-is — no silent
+ * downmix to stereo — and anything outside that range is an explicit error.
  */
 export function registerAudioHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(
@@ -38,16 +38,12 @@ export function registerAudioHandlers(mainWindow: BrowserWindow): void {
       if (buffer.byteLength > MAX_PCM_BYTES) {
         return { error: 'Recording too large to export' }
       }
-      if (
-        !Number.isFinite(sampleRate) ||
-        !Number.isInteger(sampleRate) ||
-        sampleRate < MIN_SAMPLE_RATE ||
-        sampleRate > MAX_SAMPLE_RATE
-      ) {
-        return { error: 'Invalid sample rate' }
+      const invalidParams = validateWavParams(sampleRate, channels)
+      if (invalidParams) {
+        return { error: invalidParams }
       }
-      if (!Number.isInteger(channels) || channels < 1 || channels > 2) {
-        return { error: 'Invalid channel count' }
+      if (buffer.byteLength % (channels * 4) !== 0) {
+        return { error: 'Audio data is not aligned to whole frames' }
       }
 
       /* The dialog is also the rate limit: it is modal on the parent window, so

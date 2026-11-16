@@ -9,7 +9,7 @@ export interface ElectronAPI {
   openProject: () => Promise<{ json: string; path: string } | null>
   getRecentFiles: () => Promise<{ path: string; name: string; date: string }[]>
   revealInFinder: (filePath: string) => void
-  exportWav: (buffer: ArrayBuffer, sampleRate: number, channels: number) => Promise<{ path: string } | null>
+  exportWav: (buffer: ArrayBuffer, sampleRate: number, channels: number) => Promise<{ path: string } | { error: string } | null>
   hasGistToken: () => Promise<boolean>
   setGistToken: (token: string) => Promise<boolean>
   clearGistToken: () => Promise<void>

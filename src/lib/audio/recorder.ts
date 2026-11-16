@@ -8,6 +8,7 @@
 
 import { getSharedContext, getMasterGain } from './context'
 import { getStrudelOutputNode } from './strudel-tap'
+import { interleaveDecodedAudio } from './wav-export'
 
 /** Records audio from the master gain node and exports as WebM download. */
 export class AudioRecorder {
@@ -176,15 +177,15 @@ export async function exportLastTakeAsWav(): Promise<
   const ctx = getSharedContext()
   const decoded = await ctx.decodeAudioData(await take.arrayBuffer())
 
-  /* Interleave into the shape encodeWav expects, capped at stereo — the IPC
-     handler rejects anything wider. */
-  const channels = Math.min(2, decoded.numberOfChannels)
-  const frames = decoded.length
-  const interleaved = new Float32Array(frames * channels)
-  for (let c = 0; c < channels; c++) {
-    const data = decoded.getChannelData(c)
-    for (let i = 0; i < frames; i++) interleaved[i * channels + c] = data[i]
-  }
+  /* Interleave into the shape encodeWav expects, keeping the decoded channel
+     count — the IPC handler accepts up to MAX_EXPORT_CHANNELS. A take wider
+     than that fails here with a readable error instead of shipping half its
+     channels across the bridge. */
+  const pcm = interleaveDecodedAudio(decoded)
+  if ('error' in pcm) return { error: pcm.error }
 
-  return (await api.exportWav(interleaved.buffer, decoded.sampleRate, channels)) ?? null
+  return (
+    (await api.exportWav(pcm.interleaved.buffer, pcm.sampleRate, pcm.channels)) ??
+    null
+  )
 }
