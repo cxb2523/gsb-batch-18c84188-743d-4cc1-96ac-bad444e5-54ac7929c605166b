@@ -34,6 +34,11 @@ export function createRig(camera, world) {
   const look = new THREE.Vector3();
   let firstPerson = false, lookPitch = -0.12;
   const EYE = 1.62;
+  // First person in the water: how far the camera is lifted off the eyes to
+  // stay above the surface while swimming on top (eased, so dives and climbs
+  // never snap), and how much it leans with the body's dive or climb (eased
+  // back to level once the animation hands back).
+  let swimLift = 0, swimTilt = 0;
   // Looking up from the pool's floor: how far the camera has gone into their
   // eyes (0 to 1), and where it looks from there.
   let gazeT = 0, lying = false;
@@ -65,6 +70,7 @@ export function createRig(camera, world) {
   function setFirstPerson(on, heading) {
     if (on && heading !== undefined) yaw = yawGoal = heading + Math.PI;
     if (on) lookPitch = -0.12;
+    swimLift = 0; swimTilt = 0;
     firstPerson = on;
   }
 
@@ -95,6 +101,9 @@ export function createRig(camera, world) {
 
   const followPos = new THREE.Vector3();
   const dir = new THREE.Vector3();
+  // First-person orientation as yaw-then-pitch: unlike lookAt it stays
+  // continuous when a dive pitches the view past straight down.
+  const fpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   let reach = Infinity;
   // Keep the camera out of trees, walls and the mountainside: pull it in front
   // of whatever solid sits between it and the player (lowered walls and glass do not count).
@@ -153,12 +162,19 @@ export function createRig(camera, world) {
       }
     } else if (firstPerson) {
       // Swimming, the eyes are wherever the stroke puts them, but kept out
-      // of the water while the player swims on top.
+      // of the water while the player swims on top. The lift eases, so the
+      // camera sinks to the eyes smoothly when a dive or a climb begins.
       const e = player.swimming ? player.eye : null;
       camera.position.set(player.pos.x, player.y + EYE, player.pos.z);
-      if (e) camera.position.set(e.x, player.swim?.surface ? Math.max(e.y, POOL.water + 0.12) : e.y, e.z);
-      const cp = Math.cos(lookPitch), p = camera.position;
-      camera.lookAt(p.x - Math.sin(yaw) * cp, p.y + Math.sin(lookPitch), p.z - Math.cos(yaw) * cp);
+      if (e) {
+        const liftGoal = player.swim?.surface ? Math.max(0, POOL.water + 0.12 - e.y) : 0;
+        swimLift += (liftGoal - swimLift) * (1 - Math.exp(-dt * 8));
+        camera.position.set(e.x, e.y + swimLift, e.z);
+      } else swimLift = 0;
+      // A dive or a climb leans the camera with the body, then hands a level
+      // view back; dragging still looks around on top of it.
+      swimTilt += ((player.viewTilt || 0) - swimTilt) * (1 - Math.exp(-dt * 5));
+      camera.quaternion.setFromEuler(fpEuler.set(lookPitch + swimTilt, yaw, 0));
       lookUp(dt, player);
       cutaway(player, camera.position);
       return;
@@ -185,8 +201,9 @@ export function createRig(camera, world) {
       gaze.yaw = room[0][1] > 2.2 ? 0 : room.reduce((a, b) => (b[1] > a[1] ? b : a))[0];
       gaze.pitch = 1.15;
     }
-    // Getting up, the camera comes back behind them facing where the player looked.
-    if (!now && lying) yawGoal = gaze.yaw;
+    // Getting up, the camera comes back behind them facing where the player
+    // looked — by the short way around, never spinning the long way.
+    if (!now && lying) yawGoal = yaw + THREE.MathUtils.euclideanModulo(gaze.yaw - yaw + Math.PI, Math.PI * 2) - Math.PI;
     lying = now;
     gazeT = still.matches ? (now ? 1 : 0) : now ? Math.min(1, gazeT + dt / 2.2) : Math.max(0, gazeT - dt / 0.9);
     // A slightly wider lens down there takes in more of the window overhead.
@@ -240,7 +257,7 @@ export function createRig(camera, world) {
   return {
     update, orbit, zoom, startIntro, skipIntro, setFirstPerson, showcase,
     recenter(player, faceStation = false) {
-      intro = null; gazeT = 0; lying = false;
+      intro = null; gazeT = 0; lying = false; swimLift = 0; swimTilt = 0;
       focus.set(player.pos.x, player.y + 1.25, player.pos.z);
       reach = Infinity;
       if (firstPerson) setFirstPerson(true, player.heading);

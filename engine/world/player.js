@@ -32,6 +32,10 @@ const EXIT = L.EXIT || (HOUSE && { x: (HOUSE.x0 + HOUSE.x1) / 2, z: HOUSE.z1 + 2
 // up, unless the player has settled on the bottom: there the player turns over and lies
 // looking up, until something moves them.
 const SWIM = 1.7, SWIM_FAST = 2.9, RISE = 1.5, SINK = 1.6, FLOAT = 0.5, EDGE = 0.4, WATER = POOL ? POOL.water : -1, PIVOT = SWIM_PIVOT;
+// The rig's first-person eye height. The swim camera anchor blends between it
+// and the body's eye, so handing the view from walking to swimming and back
+// never jumps.
+const VIEW_EYE = 1.62;
 // At the surface: upright, the chin is at the water; leaning into a stroke,
 // the back comes up to just under it.
 const surfaceLevel = pitch => Math.min(WATER - 0.18, WATER + 0.15 - 0.575 * Math.cos(pitch));
@@ -187,7 +191,7 @@ export function createPlayer({ avatar, nav, grid = null, ground = null, onArrive
   function intoWater(c, fall = 0) {
     ladder = null; pilot = null; zip = null; web.visible = false; island = null; standing = null;
     mode = 'swim'; velocity.set(0, 0, 0); vy = 0; speed = 0;
-    swim = { c, vx: 0, vy: fall, vz: 0, pitch: 0, roll: 0, lie: 0, rest: false, dive: false, rise: false, still: 0, push: 0, breath: 2.5, anim: null, wet: c < WATER + 0.5 };
+    swim = { c, vx: 0, vy: fall, vz: 0, pitch: 0, roll: 0, lie: 0, rest: false, dive: false, rise: false, still: 0, push: 0, breath: 2.5, anim: null, wet: c < WATER + 0.5, entry: 0 };
     y = c - PIVOT;
   }
   // Leaving the water any way but climbing out (flying, a web): a splash.
@@ -323,6 +327,10 @@ export function createPlayer({ avatar, nav, grid = null, ground = null, onArrive
 
   function swimming(dt, input, cameraYaw) {
     const s = swim;
+    // The camera anchor blends between the standing view and the body's eye:
+    // towards the eye on the way into the water, back to the standing view on
+    // the way out onto the deck, so both handovers are seamless.
+    s.entry += ((s.anim?.kind === 'out' ? 0 : 1) - s.entry) * (1 - Math.exp(-dt * 5));
     if (s.anim) return animateSwim(dt);
     // Dropping in from the air: fall until the water takes them.
     if (!s.wet) {
@@ -690,6 +698,24 @@ export function createPlayer({ avatar, nav, grid = null, ground = null, onArrive
         surface: !s.anim && s.c > surfaceLevel(s.pitch) - 0.15, lie: s.lie, climb: s.anim?.kind === 'out', dive: s.anim?.kind === 'in' } } : { speed: 0, fly: -1, air: true });
       avatar.blob.visible = false;
       onBody(eye, 0, 0.575, 0.25);
+      // The camera's anchor: the body's eye once swimming, but the standing
+      // view (the rig's eye height over the feet) while getting in or out, so
+      // the first-person camera meets the water and the deck without a jump.
+      if (s.entry < 1) {
+        const t = 1 - s.entry;
+        eye.x += (pos.x - eye.x) * t;
+        eye.y += (y + VIEW_EYE - eye.y) * t;
+        eye.z += (pos.z - eye.z) * t;
+      }
+      // Keep the anchor out of the pool's floor and walls: never under the
+      // bed (turning over to lie down dips the eyes below it), and pulled
+      // back inside the coping while below the deck around the pool.
+      eye.y = Math.max(eye.y, POOL.bed + 0.12);
+      const sunk = THREE.MathUtils.clamp((0.02 - eye.y) / 0.3, 0, 1);
+      if (sunk > 0) {
+        eye.x += (THREE.MathUtils.clamp(eye.x, POOL.x0 + 0.06, POOL.x1 - 0.06) - eye.x) * sunk;
+        eye.z += (THREE.MathUtils.clamp(eye.z, POOL.z0 + 0.06, POOL.z1 - 0.06) - eye.z) * sunk;
+      }
       return;
     }
     avatar.root.position.set(pos.x, y, pos.z); avatar.root.rotation.y = heading;
@@ -730,6 +756,12 @@ export function createPlayer({ avatar, nav, grid = null, ground = null, onArrive
     // Heading for the bottom, or lying on it: what the dive button shows.
     get diving() { return mode === 'swim' && (swim.dive || swim.rest); },
     get gazing() { return mode === 'swim' && swim.rest && swim.lie > 0.9 && !swim.anim; },
+    // First-person only: while the dive-in or climb-out animation plays, the
+    // camera leans with the body's pitch (positive pitch is head-down, hence
+    // the minus); the rig eases it back to level once the animation hands
+    // back to swimming or walking. Dropping straight into the water (already
+    // below the surface) plays no animation and adds no tilt.
+    get viewTilt() { return mode === 'swim' && swim?.anim ? -swim.pitch : 0; },
     get swim() {
       if (mode !== 'swim') return null;
       swimInfo.x = pos.x; swimInfo.z = pos.z; swimInfo.c = swim.c; swimInfo.speed = Math.hypot(swim.vx, swim.vz);
