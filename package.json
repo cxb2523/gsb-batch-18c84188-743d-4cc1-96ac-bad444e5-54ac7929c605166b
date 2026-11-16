@@ -1,0 +1,13 @@
+{
+  "name": "skybreak-protocol",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Skybreak Protocol: a 3D air-combat shooter you build your own plane for. The game itself needs no build step and no dependencies (three.js comes from a CDN); this file only exists for the Node test suite.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "three": "0.169.0"
+  }
+}

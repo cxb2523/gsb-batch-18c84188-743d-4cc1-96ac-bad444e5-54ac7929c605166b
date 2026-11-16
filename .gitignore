@@ -2,3 +2,5 @@
 # personal progress: best scores and your own planes
 save.txt
 save.txt.tmp
+# test-only install (package.json's devDependency): the game itself loads three.js from a CDN
+node_modules/

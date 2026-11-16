@@ -20,8 +20,16 @@ export const Quality = {
   label() { const s = this.setting(); return s === 'auto' ? `Auto (${this.level === 'high' ? 'High' : 'Low'})` : s === 'high' ? 'High' : 'Low'; },
 
   listeners: [],
-  onChange(fn) { this.listeners.push(fn); },
-  emit() { for (const fn of this.listeners) fn(this.level); },
+  // follow every level change; returns a function that stops following (tests, and a sky that is thrown away)
+  onChange(fn) {
+    this.listeners.push(fn);
+    return () => {
+      const i = this.listeners.indexOf(fn);
+      if (i >= 0) this.listeners.splice(i, 1);
+    };
+  },
+  // a copy: a listener may stop following (dispose) while the others are still being told
+  emit() { for (const fn of [...this.listeners]) fn(this.level); },
   // the button: Auto -> High -> Low -> Auto (back to Auto = test again from high)
   cycle() {
     const next = { auto: 'high', high: 'low', low: 'auto' }[this.setting()];

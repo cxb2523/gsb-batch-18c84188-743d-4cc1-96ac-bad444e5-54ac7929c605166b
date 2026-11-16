@@ -2,11 +2,18 @@
 // colour, which is also the fog colour, so the land still fades into it, and a deeper colour overhead), low-poly
 // clouds drifting with the wind, and the sun where the light comes from. Low quality keeps the plain sky colour.
 // Built once and only recoloured when the map or weather changes; the clouds are one instanced mesh.
+//
+// The sky follows the graphics level by itself (quality.js): Auto dropping to Low, the manual cycle in the hangar and
+// picking Auto again to retry High all take effect immediately, and the fog / clear rules hold at either level. A
+// recolour made while the sky is hidden is kept, so switching back to High shows the current map and weather, not the
+// colours from before. When the clouds are not on screen nothing drifts and no per-frame instance matrix is written.
 
 import * as THREE from 'three';
+import { Quality } from './quality.js';
 
 const CLOUDS = 70, PUFFS = 5;                    // cloud clusters, puffs per cluster
 const SPREAD = 6500, ALT = [700, 1300];          // around the middle of the map, height range
+const DRIFT = 8, DRIFT_STORM = 18;               // cloud drift speed (world units/s)
 const R = Math.random;                           // only looks: never part of the simulation (rand.js)
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3(), _c = new THREE.Color();
 
@@ -14,7 +21,9 @@ export class Sky {
   constructor(scene, sunLight) {
     this.scene = scene;
     this.sunLight = sunLight;
-    this.on = false;
+    this.on = false;               // high graphics: the sky is drawn at all (quality.js)
+    this.weather = 'clear';        // the weather this sky is coloured for (setLook)
+    this.sunVisible = false;       // no sun before the first setLook, which is what decides it from the weather
     // the dome: a sphere seen from inside, coloured by height
     const geo = new THREE.SphereGeometry(9000, 32, 16);
     this.domeGeo = geo;
@@ -40,9 +49,17 @@ export class Sky {
     }
     this.drift = 0;
     for (const o of [this.dome, this.sun, this.glow, this.clouds]) { o.visible = false; scene.add(o); }
+    // follow the graphics setting itself, so the sky is right whoever changes it: Auto measuring this device too slow,
+    // the manual Auto -> High -> Low cycle, or Auto chosen again to try High
+    this.unfollow = Quality.onChange(() => this.setEnabled(Quality.high));
+    this.setEnabled(Quality.high);
   }
 
-  // the map's sky colour (also the fog colour) and its weather -> recolour the dome and the clouds
+  // stop following the graphics setting (a sky that is thrown away; tests use it to leave the shared listener list clean)
+  dispose() { if (this.unfollow) { this.unfollow(); this.unfollow = null; } }
+
+  // the map's sky colour (also the fog colour) and its weather -> recolour the dome and the clouds.
+  // This always records the look and applies the visibility rules, even on Low, so the next High is already correct.
   setLook(skyHex, weather = 'clear') {
     const horizon = new THREE.Color(skyHex);
     const dark = { rain: 0.25, thunderstorm: 0.5, fog: 0, sandstorm: 0.1 }[weather] || 0;
@@ -63,22 +80,25 @@ export class Sky {
     this.weather = weather;
     this.apply();
   }
-  setEnabled(on) { this.on = on; this.apply(); }
+  setEnabled(on) { this.on = !!on; this.apply(); }
+  // the one place that decides what is on screen, from the graphics level and the current weather
   apply() {
     this.dome.visible = this.on;
     this.clouds.visible = this.on && this.weather !== 'fog';
-    this.sun.visible = this.glow.visible = this.on && !!this.sunVisible;
+    this.sun.visible = this.glow.visible = this.on && this.sunVisible;
   }
 
   // every frame: the dome and the sun stay around the camera; the clouds drift slowly
   update(dt, camera) {
-    if (!this.on) return;
+    if (!this.on) return;                         // low graphics: nothing of the sky is drawn, so nothing to update
     this.dome.position.copy(camera.position);
     const dir = _p.copy(this.sunLight.position).normalize();
     this.sun.position.copy(camera.position).addScaledVector(dir, 8000);
     this.glow.position.copy(this.sun.position);
+    // clouds hidden (fog, or the sky turned off since the last frame) neither drift nor get new matrices: the time
+    // they were away is not banked up, so they carry on from where they stopped instead of jumping into place
     if (!this.clouds.visible) return;
-    this.drift += dt * (this.weather === 'thunderstorm' ? 18 : 8);
+    this.drift += dt * (this.weather === 'thunderstorm' ? DRIFT_STORM : DRIFT);
     for (let i = 0; i < this.puffs.length; i++) {
       const p = this.puffs[i];
       let x = p.x + this.drift;

@@ -152,6 +152,9 @@ Watch for the **PULL UP** warning.
 - **Graphics: Auto / High / Low** in the hangar. High adds a gradient sky, clouds, the sun, smoke from explosions
   and longer missile trails. Auto uses High, measures the frame rate a few seconds into a flight, and switches this
   device to Low if it runs under 45 fps or stutters. The pause screen shows the frame rate and what Auto picked.
+  The sky follows the setting at once, and it is built from the current map and weather, so switching Low → High
+  shows the sky of the map you are flying, never the one from before. Fog has no clouds and only clear weather has
+  the sun, whichever setting you are on; while the sky is hidden, its clouds do not drift and cost nothing to draw.
 - Explosions, muzzle flashes and warnings are kept modest on purpose: no bright flashes, and nothing blinks more
   than twice a second (fast flashing can trigger photosensitive epilepsy).
 
@@ -326,7 +329,11 @@ js/maps.js        today's map, random maps
 js/config.js      every tunable number in one place
 ```
 
-No dependencies besides [three.js](https://threejs.org), loaded from a CDN. No build step.
+The game itself has no dependencies besides [three.js](https://threejs.org), loaded from a CDN, and no build step.
+
+**Tests** (`test/`, run with `npm install` once and then `npm test`): they load the real game modules in Node
+against the same three.js version the page uses, and check things a screenshot can't, such as the sky following the
+Graphics setting and the cloud drift pausing while the clouds are hidden.
 
 ## Credits
 

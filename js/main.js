@@ -58,10 +58,9 @@ scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.15);
 sun.position.set(600, 1200, 400);
 scene.add(sun);
-// high graphics quality: gradient sky, clouds and the sun (sky.js); low keeps the plain sky colour
+// high graphics quality: gradient sky, clouds and the sun (sky.js); low keeps the plain sky colour.
+// (the sky follows the Graphics setting itself, see sky.js: Auto dropping, the manual cycle and Auto again all apply)
 const skyDome = new Sky(scene, sun);
-skyDome.setEnabled(Quality.high);
-Quality.onChange(() => skyDome.setEnabled(Quality.high));
 
 // mix two 0xRRGGBB colors (t = 0 -> a, 1 -> b)
 const mixHex = (a, b, t) => {
@@ -1276,7 +1275,7 @@ if (DEBUG) window.__sb = {
   View,
   coop, net, lobby, ladder, startLadder, ladderHit, openLadder,
   get glInfo() { return renderer.info; },      // GPU memory: geometries and textures alive (leak checks)
-  debugIncoming, camera, Quality, Sound, effects, getTrees,
+  debugIncoming, camera, Quality, Sound, effects, getTrees, skyDome,
   get duelist() { return duelist; },
   forceDeath() { plane.hp = 0; plane.alive = false; endGame(); },
   hit: (d, cause) => onPlayerHit(d, cause),
