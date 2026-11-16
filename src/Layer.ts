@@ -50,22 +50,22 @@ export class Layer {
     this.posY = posY;
     this.opacity = opacity;
     this.onStep = onStep;
+    this.isActive = isActive;
 
     if (imageSrc) {
-      this.#setSource(createSource(imageSrc), isActive);
+      this.#setSource(createSource(imageSrc));
     } else if (source) {
-      this.#setSource(getAsyncElement(source, VALID_SOURCE_TYPES), isActive);
+      this.#setSource(getAsyncElement(source, VALID_SOURCE_TYPES));
     }
   }
 
-  #setSource = (sourcePromise: SourcePromise, isActive?: boolean) => {
+  #setSource = (sourcePromise: SourcePromise) => {
     this.#state.sourcePromise = sourcePromise;
 
     this.#state.sourcePromise
       .then(({ element, ...size }) => {
         this.#state.source = element;
         this.#state.size = size;
-        this.#state.isActive = isActive;
         this.#state.isReady = true;
 
         return { element, ...size };
@@ -123,7 +123,9 @@ export class Layer {
   }
 
   set isActive(isActive) {
-    if (this.#state.isReady) this.#state.isActive = !!isActive;
+    // The desired state is kept even before the source resolves, so toggling
+    // a layer while it is still loading is not lost when it becomes ready.
+    this.#state.isActive = !!isActive;
   }
 
   toggle() {

@@ -176,6 +176,9 @@ An object that is passed to the `onStep` function. It contains the following pro
 
 # Caveats
 
-- Since adding layers to an engine happens in an async mode, race conditions might happen. To handle any issues, you can use
-  the promise exposed in `myLayer.sourcePromise` and/or avoid drawing to the canvas by passing the `shouldDraw` parameter as false to `addLayer`. Eg.: `myEngine.addLayer(myLayer, false)`.
+- Layers are resolved asynchronously, but the engine handles that ordering for you: a layer is only painted once its source
+  is ready, a source that resolves after its layer was removed does not redraw the canvas, and a source that fails to load is
+  skipped while the remaining layers keep rendering. You can still use the promise exposed in `myLayer.sourcePromise` to
+  coordinate custom code, and pass `shouldDraw` as false to `addLayer`/`removeLayer` when you do not want that call to trigger
+  a redraw. Eg.: `myEngine.addLayer(myLayer, false)`.
 - The `<canvas>` element may easily become "tainted" by CORS. That should not be a problem for basic layer rendering, but can be a challenge if you need to do some advanced image processing. To avoid that, you could use some of the solutions [shown in MDN](https://developer.mozilla.org/en-US/docs/Web/HTML/CORS_enabled_image) or use base64 encoded images.
