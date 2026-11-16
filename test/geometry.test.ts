@@ -8,6 +8,7 @@ import {
   distanceToSegment,
   circleIntersectsRect,
   dotGridPositions,
+  dotGridWorldSpacing,
 } from "../src/lib/geometry.ts";
 
 test("clamp keeps values within the range", () => {
@@ -161,4 +162,32 @@ test("dotGridPositions returns nothing for degenerate input", () => {
     ),
     []
   );
+});
+
+test("dotGridWorldSpacing keeps the configured spacing when it is dense enough", () => {
+  // 24 world units at 1x is 24px on screen, above the 20px floor.
+  assert.equal(dotGridWorldSpacing(24, 1, 20), 24);
+  // Zooming in only makes dots further apart: the spacing stays the same.
+  assert.equal(dotGridWorldSpacing(24, 2, 20), 24);
+});
+
+test("dotGridWorldSpacing doubles until the on-screen spacing is comfortable", () => {
+  // 24 * 0.5 = 12px is too dense -> 48 world units (24px) is enough.
+  assert.equal(dotGridWorldSpacing(24, 0.5, 20), 48);
+  // Very far out, several doublings are needed.
+  assert.equal(dotGridWorldSpacing(24, 0.1, 20), 384);
+});
+
+test("dotGridWorldSpacing only depends on zoom, never on the canvas", () => {
+  // This is what lets an export reuse the on-screen lattice: the spacing is a
+  // property of the scene at a given zoom, not of the canvas it is drawn on.
+  assert.equal(dotGridWorldSpacing(24, 0.5, 20), dotGridWorldSpacing(24, 0.5, 20));
+  assert.notEqual(dotGridWorldSpacing(24, 0.5, 20), dotGridWorldSpacing(24, 1, 20));
+});
+
+test("dotGridWorldSpacing returns 0 for degenerate input", () => {
+  assert.equal(dotGridWorldSpacing(0, 1, 20), 0);
+  assert.equal(dotGridWorldSpacing(-10, 1, 20), 0);
+  assert.equal(dotGridWorldSpacing(24, 0, 20), 0);
+  assert.equal(dotGridWorldSpacing(Number.NaN, 1, 20), 0);
 });

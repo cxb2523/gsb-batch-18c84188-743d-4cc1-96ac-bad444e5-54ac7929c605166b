@@ -3,7 +3,7 @@ import { CoordsContext } from "../lib/coords";
 import { WhiteboardItem, WhiteboardItemType } from "../lib/item";
 import { BoundingRect, DrawingContext, Point } from "../lib/types";
 import { rectsIntersect } from "../lib/geometry";
-import { drawDottedBackground } from "../lib/background";
+import { drawDottedBackgroundForExport } from "../lib/background";
 import {
   downloadCanvasAsPng,
   CanvasPngExportOptions,
@@ -27,6 +27,29 @@ export interface ExportHost {
 /** Largest side (in pixels) an exported image may reach. */
 const MAX_EXPORT_DIMENSION = 4096;
 
+/** Preferred output scale (pixels per world unit) before the size cap kicks in. */
+const EXPORT_SCALE = 2;
+
+/**
+ * Smallest marquee side (in canvas pixels) that counts as an intentional drag.
+ * A shorter gesture is treated as a stray click.
+ */
+const MIN_SELECTION_SIZE = 4;
+
+/** Padding (in world units) left around the items when exporting the full view. */
+const FULL_VIEW_PADDING = 24;
+
+/**
+ * Whether a world-space rectangle has a usable, strictly positive size.
+ */
+const isExportableRect = (rect: BoundingRect): boolean =>
+  Number.isFinite(rect.x) &&
+  Number.isFinite(rect.y) &&
+  Number.isFinite(rect.width) &&
+  Number.isFinite(rect.height) &&
+  rect.width > 0 &&
+  rect.height > 0;
+
 /**
  * Owns PNG export beyond the plain "current view": exporting the whole board
  * ("full view") and an interactively selected region ("selected area"),
@@ -35,7 +58,10 @@ const MAX_EXPORT_DIMENSION = 4096;
  * Both full-view and area exports re-render the items (and the dotted
  * background) onto a detached canvas through a dedicated coordinate system, so
  * the result is independent of the current pan/zoom and never includes the
- * selection/hover boxes or tool overlays.
+ * selection/hover boxes or tool overlays. The region picked on screen is
+ * converted to world coordinates once, and the off-screen camera maps exactly
+ * that world rectangle onto the output pixels: the exported image therefore
+ * shows exactly what the marquee covered.
  */
 export class ExportController {
   // Area-selection gesture state (canvas pixels).
@@ -68,8 +94,7 @@ export class ExportController {
     }
 
     const canvas = this.renderRegionToCanvas(bbox, {
-      scale: this.scaleFor(bbox),
-      padding: 24,
+      padding: FULL_VIEW_PADDING,
     });
     downloadCanvasAsPng(canvas, options);
     canvas.remove();
@@ -84,13 +109,11 @@ export class ExportController {
    * Export an arbitrary world-space region as a PNG.
    */
   downloadRegion(worldRect: BoundingRect, options?: CanvasPngExportOptions): void {
-    if (worldRect.width <= 0 || worldRect.height <= 0) {
+    // A zero (or negative) sized region cannot be turned into an image.
+    if (!isExportableRect(worldRect)) {
       return;
     }
-    const canvas = this.renderRegionToCanvas(worldRect, {
-      scale: this.scaleFor(worldRect),
-      padding: 0,
-    });
+    const canvas = this.renderRegionToCanvas(worldRect);
     downloadCanvasAsPng(canvas, options);
     canvas.remove();
     this.host.draw();
@@ -123,6 +146,9 @@ export class ExportController {
    * Begin the marquee at a canvas-space point.
    */
   pointerDown(x: number, y: number): void {
+    if (!this.selecting) {
+      return;
+    }
     this.start = { x, y };
     this.current = { x, y };
     this.host.draw();
@@ -132,7 +158,7 @@ export class ExportController {
    * Update the marquee's far corner while dragging.
    */
   pointerMove(x: number, y: number): void {
-    if (!this.start) {
+    if (!this.selecting || !this.start) {
       return;
     }
     this.current = { x, y };
@@ -144,6 +170,10 @@ export class ExportController {
    * intentional) and leave the mode.
    */
   pointerUp(): void {
+    if (!this.selecting) {
+      return;
+    }
+
     const start = this.start;
     const current = this.current;
     const options = this.options;
@@ -159,10 +189,13 @@ export class ExportController {
     const y2 = Math.max(start.y, current.y);
 
     // Ignore an accidental click or a tiny selection.
-    if (x2 - x1 < 4 || y2 - y1 < 4) {
+    if (x2 - x1 < MIN_SELECTION_SIZE || y2 - y1 < MIN_SELECTION_SIZE) {
       return;
     }
 
+    // Map the two screen corners to world coordinates. Both corners use the
+    // same (current) camera, so the resulting rectangle is exactly the part of
+    // the world that was covered by the marquee — at any pan/zoom.
     const coords = this.host.getCoordsContext();
     const topLeft = coords.convertFromCanvas(x1, y1);
     const bottomRight = coords.convertFromCanvas(x2, y2);
@@ -265,22 +298,33 @@ export class ExportController {
 
   /**
    * Pick an output scale (pixels per world unit): 2x for crispness, but reduced
-   * so the largest side never exceeds a sane limit. Zoom-independent, so the
-   * same content always exports at the same resolution.
+   * so the longest side of the *rendered region* never exceeds the size limit.
+   *
+   * The scale only depends on the region's world size, never on the current
+   * zoom or pan: the same content always exports at the same resolution.
+   * Full-view exports include their padding in the region, so the limit also
+   * holds around the frame.
    */
   private scaleFor(rect: BoundingRect): number {
-    const longestSide = Math.max(rect.width, rect.height) || 1;
-    return Math.min(2, MAX_EXPORT_DIMENSION / longestSide);
+    const longestSide = Math.max(rect.width, rect.height);
+    if (!Number.isFinite(longestSide) || longestSide <= 0) {
+      return EXPORT_SCALE;
+    }
+    return Math.min(EXPORT_SCALE, MAX_EXPORT_DIMENSION / longestSide);
   }
 
   /**
    * Render a world-space region onto a fresh, detached canvas and return it.
+   *
+   * The off-screen camera is built so that the region's top-left corner maps to
+   * the canvas' (0, 0) and one world unit is exactly `scale` output pixels. The
+   * exported image is therefore a faithful, pan/zoom-independent rendering of
+   * the region; both axes share the same scale, so nothing is stretched.
    */
   private renderRegionToCanvas(
     worldRect: BoundingRect,
-    options: { scale?: number; padding?: number } = {}
+    options: { padding?: number } = {}
   ): HTMLCanvasElement {
-    const scale = options.scale ?? 2;
     const padding = options.padding ?? 0;
 
     // Expand the region by the padding (in world units).
@@ -291,9 +335,15 @@ export class ExportController {
       height: worldRect.height + padding * 2,
     };
 
+    // Size the output from the region itself (padding included) and the one
+    // scale shared by both axes, so the longest side stays within the limit.
+    const scale = this.scaleFor(region);
+    const width = Math.max(1, Math.round(region.width * scale));
+    const height = Math.max(1, Math.round(region.height * scale));
+
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(region.width * scale));
-    canvas.height = Math.max(1, Math.round(region.height * scale));
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       return canvas;
@@ -308,9 +358,18 @@ export class ExportController {
     coords.setCoords(-region.x * scale, -region.y * scale);
 
     // Dotted background (if enabled), then every item that intersects the
-    // region, in stacking order.
+    // region, in stacking order. The background is generated from the same
+    // world-space camera as the items, so the dots pan/zoom with the content;
+    // its world spacing is taken from the on-screen camera so the exported grid
+    // lines up with the one the user saw inside the marquee.
     if (this.host.dottedBackground) {
-      drawDottedBackground(ctx, coords.toCamera(), canvas.width, canvas.height);
+      drawDottedBackgroundForExport(
+        ctx,
+        coords.toCamera(),
+        this.host.getCoordsContext().toCamera(),
+        width,
+        height
+      );
     }
 
     const roughCanvas = rough.canvas(canvas, { options: { seed: 42 } });

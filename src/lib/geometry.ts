@@ -10,6 +10,12 @@ export interface Rect {
   height: number;
 }
 
+/** Default spacing between two dotted-background dots, in world units. */
+export const DOT_GRID_SPACING = 24;
+
+/** Default minimum on-screen spacing before the dotted grid gets sparser. */
+export const DOT_GRID_MIN_SCREEN_SPACING = 20;
+
 /**
  * Camera describing how world coordinates map to canvas (screen) coordinates.
  * This mirrors the maths implemented by `CoordsContext`, but as a plain data
@@ -153,6 +159,43 @@ export interface DotGridOptions {
 }
 
 /**
+ * Resolve the world-space spacing actually used by the dotted grid at a given
+ * zoom: the configured spacing, doubled as many times as needed for the dots to
+ * stay at least `minScreenSpacing` pixels apart on screen.
+ *
+ * The spacing is a property of the view (how far apart dots sit in the world),
+ * not of the canvas it is painted on. Exporting therefore reuses the spacing
+ * resolved for the on-screen camera, so the exported dots sit on exactly the
+ * same world lattice as the ones the user sees.
+ *
+ * @param spacing The configured spacing, in world units.
+ * @param zoom The zoom level the grid is looked at with.
+ * @param minScreenSpacing The minimum on-screen spacing, in pixels.
+ * @returns The resolved world spacing (0 when the grid cannot be drawn).
+ */
+export const dotGridWorldSpacing = (
+  spacing: number,
+  zoom: number,
+  minScreenSpacing: number = DOT_GRID_MIN_SCREEN_SPACING
+): number => {
+  if (
+    !Number.isFinite(spacing) ||
+    !Number.isFinite(zoom) ||
+    spacing <= 0 ||
+    zoom <= 0
+  ) {
+    return 0;
+  }
+  let worldSpacing = spacing;
+  // Doubling keeps the lattice a superset/subset of the base one, so dots keep
+  // lining up with the same world coordinates as the zoom changes.
+  while (worldSpacing * zoom < minScreenSpacing) {
+    worldSpacing *= 2;
+  }
+  return worldSpacing;
+};
+
+/**
  * Compute the on-screen positions of the dotted-background grid points that
  * fall inside the current viewport.
  *
@@ -180,10 +223,7 @@ export const dotGridPositions = (
 
   // Adaptively grow the world spacing until the on-screen spacing is large
   // enough. This bounds the number of dots even when zoomed far out.
-  let worldSpacing = spacing;
-  while (worldSpacing * zoom < minScreenSpacing) {
-    worldSpacing *= 2;
-  }
+  const worldSpacing = dotGridWorldSpacing(spacing, zoom, minScreenSpacing);
 
   // World-space coordinates of the visible canvas corners.
   const minWorldX = (0 - camera.panX - camera.offsetX) / zoom;
