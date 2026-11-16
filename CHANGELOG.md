@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The stage freezes while its tab is hidden and re-aligns to the music when it comes back, instead
+  of jumping. Browsers pause requestAnimationFrame in a hidden tab, so the first frame after a
+  return used to carry the whole hidden duration as one step: lights, camera cuts and the
+  performers' head nods either snapped ("teleported") or sat on one beat. Both the pyramid show
+  and the starfield fallback now stop calling getFrame() and stop drawing while hidden (no
+  background rendering, so no wasted battery), and on the first visible frame they reset their
+  timing anchors and snap the beat clock, cue, camera and nods to the audio's real position rather
+  than replaying the gap. Transport cycles that elapsed while hidden are counted from wall time,
+  and a device that suspended the audio (frozen beat phase) is not mistaken for a wrapped loop.
+  prefers-reduced-motion is unchanged. The frame loop and re-alignment math are covered by
+  `npm test` (tools/test-stage-visibility.mjs)
 - Safari: changing a stem no longer leaves the old one playing in the background at its old tempo.
   The engine kept each fade-out's plan on Web Audio objects it didn't hold, which Safari can throw
   away; the next swap's fade-out then failed, the stop after it was skipped and the old stem looped

@@ -21,8 +21,69 @@
 //       paused:   true while the help dialog covers the screen
 //       album:    album id of the first filled layer, or null
 //   - Respect prefers-reduced-motion, and keep frames cheap: the interface sits on top.
+//
+// Visibility: the browser pauses requestAnimationFrame while the tab is hidden, and the first frame
+// after it comes back is timestamped as if all the hidden time had elapsed in one step. Every stage
+// therefore freezes while hidden — no getFrame(), no drawing — and re-aligns on the first visible
+// frame instead of replaying the gap. See startVisibleFrame.
 
 const TAU = Math.PI * 2;
+
+// Subscribe to visibility changes; cb(true) runs when the page becomes visible, cb(false) when it
+// is hidden. Both stages register their own listener through this.
+export function onVisibility(cb) {
+  document.addEventListener('visibilitychange', () => cb(!document.hidden));
+}
+
+// Drives `frame(now, resumed)` on requestAnimationFrame, but only while the page is visible.
+// While hidden the callback is never invoked: no getFrame() advances the clock and nothing renders,
+// so a background tab costs no stage work. The first frame after the page returns gets
+// resumed=true, which the stage uses to reset its timing anchors — the hidden duration must never
+// be fed to an animation as one large dt, and the musical state snaps to the audio's real position
+// rather than catching up through it. A frame that bails before it draws (canvas not laid out yet)
+// can return false to keep the resume marker for the next frame. Returns a cancel function.
+export function startVisibleFrame(frame) {
+  let cancelled = false, resumed = false;
+  const markResume = () => { if (!document.hidden) resumed = true; };
+  document.addEventListener('visibilitychange', markResume);
+  function tick(now) {
+    if (cancelled) return;
+    requestAnimationFrame(tick);
+    if (document.hidden) return; // rAF may still fire in tests and some engines; stay frozen
+    const isResume = resumed;
+    if (frame(now, isResume) !== false) resumed = false; // a false return holds the marker
+  }
+  requestAnimationFrame(tick);
+  return () => {
+    cancelled = true;
+    document.removeEventListener('visibilitychange', markResume);
+  };
+}
+
+// How many times the transport crossed its loop boundary while the page was hidden — the same
+// count the running show keeps in its `loops` bookkeeping (it increments whenever the bar wraps).
+// The frame data only carries the position inside one cycle, so wall time supplies the total
+// movement and the observed in-loop phase anchors it: if the phase moved by d beats within the
+// loop, total forward movement is d plus a whole number of loops nearest the wall-time span. If
+// the device suspended the audio its phase is frozen, so a span that isn't a whole number of loops
+// means nothing played and the count is zero. Pure, so it can be unit-tested.
+export function missedLoops({ hiddenMs, bpm, phaseHide, phaseNow, loopBeats }) {
+  const beatsHidden = Math.max(0, hiddenMs / 1000 * bpm / 60);
+  const wrap = (x) => ((x % loopBeats) + loopBeats) % loopBeats;
+  const phaseDelta = wrap(phaseNow - phaseHide);
+  const shortest = Math.min(phaseDelta, loopBeats - phaseDelta);
+  if (shortest < 0.5) {
+    // The phase barely moved: either the audio clock suspended, or an exact whole number of loops
+    // returned it to the same beat. Wall time distinguishes the two within a beat of jitter.
+    const whole = Math.round(beatsHidden / loopBeats);
+    if (whole <= 0 || Math.abs(beatsHidden - whole * loopBeats) > 0.5) return 0;
+    return whole;
+  }
+  // Forward playback: total beats moved is phaseDelta + k*loopBeats, with k nearest the wall time.
+  const k = Math.max(0, Math.round((beatsHidden - phaseDelta) / loopBeats));
+  const totalMoved = phaseDelta + k * loopBeats;
+  return Math.floor((phaseHide + totalMoved) / loopBeats);
+}
 
 // Small seeded random, so the stars are in the same places on every load.
 function rng(seed) {
@@ -67,13 +128,15 @@ function createStarfield(canvas, getFrame) {
   }
 
   let lastDraw = 0;
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const f = getFrame(); // every frame: it also advances the clock
-    if (now - lastDraw < (f.paused ? 100 : 1000 / 30)) return; // stars don't need more than 30 fps
-    lastDraw = now;
+  function frame(now, resumed) {
+    const f = getFrame(); // every visible frame: it also advances the clock
+    if (!resumed && now - lastDraw < (f.paused ? 100 : 1000 / 30)) return; // stars don't need more than 30 fps
     resize();
-    if (!w || !h) return; // not laid out yet
+    if (!w || !h) return resumed ? false : undefined; // not laid out; hold a resume for next frame
+    // Coming back from a hidden tab: don't treat the hidden time as one long step. Restart the
+    // twinkle clock from now and paint immediately, so the sky simply continues from this instant.
+    if (resumed) { last = now; lastDraw = 0; }
+    lastDraw = now;
     t += reduce.matches ? 0 : Math.min(0.1, (now - last) / 1000);
     last = now;
     g.globalCompositeOperation = 'source-over';
@@ -88,7 +151,7 @@ function createStarfield(canvas, getFrame) {
     g.globalAlpha = 1;
   }
 
-  requestAnimationFrame(frame);
+  startVisibleFrame(frame);
   return {};
 }
 
@@ -106,16 +169,17 @@ function canRunShow() {
 
 export function createStage(canvas, getFrame, after = null) {
   if (!canRunShow()) return createStarfield(canvas, getFrame);
-  // The show is downloaded after the app starts; keep the clock running meanwhile.
+  // The show is downloaded after the app starts; keep the clock running meanwhile. The idle loop
+  // also freezes while hidden (startVisibleFrame), so no getFrame() runs in a background tab.
   let loading = true;
-  const idle = () => { if (loading) { getFrame(); requestAnimationFrame(idle); } };
-  requestAnimationFrame(idle);
+  const stopIdle = startVisibleFrame(() => { if (loading) getFrame(); });
   Promise.race([Promise.resolve(after).catch(() => {}), new Promise((r) => setTimeout(r, 8000))])
     .then(() => import('./stage-pyramid.js'))
-    .then((m) => { m.createPyramid(canvas, getFrame); loading = false; })
+    .then((m) => { m.createPyramid(canvas, getFrame); loading = false; stopIdle(); })
     .catch((err) => {
       console.error('stage failed to start', err);
       loading = false;
+      stopIdle();
       const fresh = canvas.cloneNode(); // a canvas that tried WebGL can't give a 2D context
       canvas.replaceWith(fresh);
       createStarfield(fresh, getFrame);

@@ -18,6 +18,7 @@ import {
   Quaternion, RedFormat, RGBAFormat, BackSide, Scene, ShaderMaterial, UnsignedByteType, Vector2, Vector3,
   WebGLRenderer, WebGLRenderTarget,
 } from './vendor/three.min.js';
+import { startVisibleFrame, onVisibility, missedLoops } from './stage.js';
 
 const TAU = Math.PI * 2;
 
@@ -67,6 +68,9 @@ const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t
 // A head nod through one beat: down fast on the beat, back up slowly, and level before the next.
 const nodShape = (p) => smooth(0, 0.14, p) * (1 - smooth(0.14, 0.86, p));
 const approach = (v, to, dt, attack, release) => v + (to - v) * (1 - Math.exp(-dt * (to > v ? attack : release)));
+// One transport cycle is 128 beats (the engine's BEATS: a 32-bar loop). Hidden across a cycle, the
+// cue bookkeeping has to count the cycles the audio went through while the page was not drawing.
+const LOOP_BEATS = 128;
 
 function rng(seed) {
   return () => {
@@ -953,6 +957,11 @@ export function createPyramid(canvas, getFrame) {
   let nodDepth = 0;
   let kick = 0, bassSlow = 0, hit = 0, glow = 0, fxAmt = 0, tIdle = 0, time = 0;
   let T = 0, lastBar = -1, lastPhrase = -1, loops = 0, cue = CUES[0], camIndex = 0, album = null;
+  // Visibility freeze bookkeeping. While the tab is hidden the loop doesn't run, so on return the
+  // show re-aligns to the audio's real beat position instead of stepping through the hidden time.
+  let playingNow = false; // what the last frame was doing; captured if the tab is hidden between frames
+  let hideAt = 0, hideT = 0, hidePlaying = false;
+  const wrapMod = (x, n) => ((x % n) + n) % n;
   const camPos = new Vector3(), camAim = new Vector3();
   const A = new Vector3(...PALETTES.alive[0]), B = new Vector3(...PALETTES.alive[1]);
   const tintFx = new Vector3(), q = new Quaternion(), dir = new Vector3(), down = new Vector3(0, -1, 0);
@@ -1071,6 +1080,7 @@ export function createPyramid(canvas, getFrame) {
     const reduced = reduce.matches;
     const m = f.meters;
     const playing = f.playing && m.beatIndex >= 0;
+    playingNow = playing;
     time += dt;
     tIdle = playing ? 0 : tIdle + dt;
 
@@ -1182,6 +1192,51 @@ export function createPyramid(canvas, getFrame) {
     faceU.uRes.value = h;
   }
 
+  // Re-align the show with the audio on the first frame after the page was hidden. Nothing is
+  // stepped through the gap: T is rebuilt from the audio's real beat below in update(), the cue and
+  // camera snap to the current phrase, and only the transport cycles that actually elapsed are
+  // counted. Timing anchors reset so the resumed frame's dt stays a normal, bounded step.
+  function resyncShow(f, now) {
+    last = now;
+    lastDraw = 0; // draw this frame even if a per-frame budget would otherwise skip it
+    const m = f.meters;
+    if (hidePlaying && f.playing && m.beatIndex >= 0) {
+      const bpm = f.bpm || 116;
+      const phaseNow = m.beatIndex + m.beat;
+      // The audio may have wrapped the 128-beat loop several times while hidden. The in-loop phase
+      // only says where inside the cycle we are; wall time (missedLoops, in stage.js) says how many
+      // cycles elapsed — and reads an apparent wrap as no wrap when the device paused the audio.
+      const missed = missedLoops({
+        hiddenMs: now - hideAt, bpm, phaseHide: hideT, phaseNow, loopBeats: LOOP_BEATS,
+      });
+      loops += missed;
+      const bar = Math.floor(phaseNow / 4);
+      lastBar = bar;
+      const phrase = Math.floor(bar / 8);
+      lastPhrase = phrase;
+      cue = CUES[wrapMod(loops * 4 + phrase, CUES.length)];
+      // Same per-bar camera rule as the running show (see update): half-way through each phrase the
+      // answer shot replaces the close one.
+      if (reduce.matches) camIndex = 0;
+      else if (bar % 8 < 4) camIndex = cue.cam;
+      else camIndex = cue.cam === 0 ? 1 : 0;
+      // A white hit belongs to a phrase boundary we actually saw; don't fire one for a boundary
+      // that passed while hidden.
+      hit = 0;
+    }
+    hidePlaying = false;
+  }
+
+  // The browser fires this between frames when the tab leaves the screen; remember where the music
+  // was, so resyncShow() can tell which transport cycles passed while nothing was drawing.
+  onVisibility((visible) => {
+    if (!visible) {
+      hideAt = performance.now();
+      hideT = T;
+      hidePlaying = playingNow;
+    }
+  });
+
   // Keep the page responsive: if frames run long, render fewer pixels.
   let msAvg = 16, sinceResize = 0;
   function adapt(ms) {
@@ -1195,15 +1250,17 @@ export function createPyramid(canvas, getFrame) {
   }
 
   let last = performance.now(), lastDraw = 0;
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const f = getFrame(); // every frame: it also advances the clock
-    const budget = f.paused ? 100 : msAvg > 40 ? 30 : 0;
-    if (now - lastDraw < budget) return;
-    lastDraw = now;
+  function frame(now, resumed) {
+    const f = getFrame(); // every visible frame: it also advances the clock
     resize();
-    if (!w || !h) return;
-    const dt = Math.min(0.1, (now - last) / 1000);
+    if (!w || !h) return resumed ? false : undefined; // not laid out; hold a resume for next frame
+    if (resumed) resyncShow(f, now);
+    const budget = f.paused ? 100 : msAvg > 40 ? 30 : 0;
+    if (!resumed && now - lastDraw < budget) return;
+    lastDraw = now;
+    // Clamp before overwriting `last`: a resumed frame measures ~0 (resyncShow set last=now), and a
+    // stalled frame can't exceed one ordinary tick either way. The hidden duration is never seen.
+    const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
     adapt(now - last);
     last = now;
     update(f, dt);
@@ -1211,6 +1268,6 @@ export function createPyramid(canvas, getFrame) {
   }
   canvas.addEventListener('webglcontextlost', (e) => e.preventDefault());
 
-  requestAnimationFrame(frame);
+  startVisibleFrame(frame);
   return { renderer };
 }
