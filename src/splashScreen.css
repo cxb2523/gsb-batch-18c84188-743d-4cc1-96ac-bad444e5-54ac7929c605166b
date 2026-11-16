@@ -48,8 +48,26 @@
 		&::before { content: "downloading..." }
 		[ data-loaded ] &::before { content: "[ click to start ]" }
 		[ data-starting ] &::before { content: "starting..." }
+		[ data-error ] &::before { content: "[ retry ]" }
 	}
 	[ data-alert ] {
+		display: none;
+	}
+	&[ data-error ] [ data-alert=error ] {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+		max-width: 500px;
+		color: #ff8080;
+		text-align: center;
+
+		> :last-child {
+			font-size: .85em;
+			opacity: .7;
+		}
+	}
+	[ data-error-message ]:empty {
 		display: none;
 	}
 }

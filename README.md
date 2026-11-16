@@ -11,6 +11,18 @@ save your compositions online to retrieve them from anywhere at any time.
 Here is the [changelog](https://github.com/gridsound/daw/wiki/changelog), and
 this is the [help](https://github.com/gridsound/daw/wiki/help) page.
 
+## Development
+
+The splash-screen startup chain and the service worker can be checked offline
+with Node's built-in test runner (no dependencies, no network):
+
+```sh
+node --test
+```
+
+See [`tests/README.md`](tests/README.md) for what is covered and for the
+browser-based offline sample.
+
 Follow us on [Bluesky 🦋](https://bsky.app/profile/gridsound.com) or
 [Facebook](https://facebook.com/gridsound) to have the latest news related to
 the product.

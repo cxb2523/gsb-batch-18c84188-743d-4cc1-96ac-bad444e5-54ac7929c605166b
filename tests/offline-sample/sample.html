@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>DAW startup reliability — offline sample</title>
+	<style>
+		body { font: 14px/1.5 monospace; margin: 2rem; background: #191d21; color: #d7dde3; }
+		h1 { font-size: 1.1rem; }
+		section { margin: 1.5rem 0; padding: 1rem; border: 1px solid #333c44; border-radius: 6px; }
+		button { padding: .4rem .8rem; margin-right: .5rem; }
+		pre { background: #0e1114; padding: .75rem; overflow: auto; white-space: pre-wrap; }
+		.ok { color: #7ddc9a; }
+		.ko { color: #ff8f8f; }
+		#sandbox { position: fixed; left: -9999px; top: 0; }
+	</style>
+</head>
+<body>
+	<h1>DAW startup reliability — offline sample</h1>
+	<p>
+		This page loads the <strong>real</strong> <code>serviceWorker.js</code> and
+		<code>src/run.js</code> from this repository and drives them with stubs, so
+		the three failure paths can be exercised in a real browser without the DAW.
+		Serve the repo over HTTP (<code>node tests/offline-sample/serve.js . 8123</code>)
+		and open <code>/tests/offline-sample/sample.html</code>.
+	</p>
+
+	<section>
+		<h2>1. Cache manifest vs startup resources</h2>
+		<button data-action="manifest">Run check</button>
+		<pre data-out="manifest">…</pre>
+	</section>
+
+	<section>
+		<h2>2. Offline fetch fallback</h2>
+		<p>Runs the real fetch handler with a cold cache and a failing network.
+		The response must be an explicit 503, not a rejected promise.</p>
+		<button data-action="offline">Run check</button>
+		<pre data-out="offline">…</pre>
+	</section>
+
+	<section>
+		<h2>3. Startup failure and retry</h2>
+		<p>Runs the real startup chain; the wavelet load fails on the first attempt
+		and succeeds on retry. <code>GSDAW</code> must be constructed exactly once.</p>
+		<button data-action="startup">Run check</button>
+		<pre data-out="startup">…</pre>
+	</section>
+
+	<div id="sandbox"></div>
+
+	<script>
+	"use strict";
+
+	const $out = name => document.querySelector( `[data-out=${ name }]` );
+	const report = ( name, ok, text ) => {
+		const el = $out( name );
+
+		el.className = ok ? "ok" : "ko";
+		el.textContent = `${ ok ? "PASS" : "FAIL" }: ${ text }`;
+	};
+	const loadSource = async rel => {
+		const res = await fetch( rel, { cache: "no-store" } );
+
+		if ( !res.ok ) {
+			throw new Error( `${ rel } → HTTP ${ res.status }` );
+		}
+		return res.text();
+	};
+
+	let sources = null;
+	async function getSources() {
+		if ( !sources ) {
+			const [ sw, run ] = await Promise.all( [
+				loadSource( "../../serviceWorker.js" ),
+				loadSource( "../../src/run.js" ),
+			] );
+
+			sources = { sw, run };
+		}
+		return sources;
+	}
+
+	// --- 1. manifest -------------------------------------------------------
+	async function checkManifest() {
+		try {
+			const { sw, run } = await getSources();
+			const cacheMatch = sw.match( /const CACHE_URLS = \[([\s\S]*?)\];/u );
+
+			if ( !cacheMatch ) {
+				return report( "manifest", false, "CACHE_URLS not found in serviceWorker.js" );
+			}
+			const cache = [ ...cacheMatch[ 1 ].matchAll( /"([^"]+)"/gu ) ].map( m => m[ 1 ] );
+			const startup = [ ...new Set(
+				[ ...run.matchAll( /loadResource\(\s*"(assets\/[^"]+)"/gu ) ].map( m => m[ 1 ] )
+			) ];
+			const missing = startup.filter( s => !cache.includes( `/${ s }` ) );
+			const duplicated = cache.filter( ( u, i ) => cache.indexOf( u ) !== i );
+
+			if ( missing.length ) {
+				return report( "manifest", false, `not precached: ${ missing.join( ", " ) }` );
+			}
+			if ( duplicated.length ) {
+				return report( "manifest", false, `duplicated entries: ${ duplicated.join( ", " ) }` );
+			}
+			report( "manifest", true,
+				`${ startup.length } startup resources, ${ cache.length } cached entries, all aligned` );
+		} catch ( err ) {
+			report( "manifest", false, `${ err.message } (serve this page over HTTP)` );
+		}
+	}
+
+	// --- 2. offline fetch --------------------------------------------------
+	async function buildWorker( { network, cacheEntries = [] } ) {
+		const { sw } = await getSources();
+		const listeners = {};
+		const store = new Map( cacheEntries );
+		const caches = {
+			async open() {
+				return { add: async () => {}, addAll: async () => {} };
+			},
+			async keys() { return []; },
+			async delete() { return true; },
+			async match( req ) { return store.get( typeof req === "string" ? req : req.url ); },
+		};
+		const self = {
+			addEventListener( type, fn ) { listeners[ type ] = fn; },
+			skipWaiting() {},
+			clients: { claim() {} },
+		};
+
+		// eslint-disable-next-line no-new-func
+		new Function( "self", "caches", "fetch", "Response", "URL", "console", sw )(
+			self, caches, network, Response, URL, console
+		);
+		return { listeners, store };
+	}
+
+	async function checkOffline() {
+		try {
+			const { listeners } = await buildWorker( {
+				network: () => Promise.reject( new TypeError( "Failed to fetch" ) ),
+			} );
+			let responseProm = null;
+			const event = {
+				request: new Request( new URL( "assets/gsuiLibrarySamples-v1.js", location.href ) ),
+				respondWith( p ) { responseProm = p; },
+			};
+
+			listeners.fetch( event );
+			if ( !responseProm ) {
+				return report( "offline", false, "the fetch handler did not call respondWith()" );
+			}
+			const res = await responseProm; // must not reject
+			const body = await res.text();
+
+			report( "offline", res.status === 503,
+				`respondWith() resolved with ${ res.status } ${ res.statusText } — "${ body.slice( 0, 48 ) }"` );
+		} catch ( err ) {
+			report( "offline", false, `respondWith() received a rejected promise: ${ err.message }` );
+		}
+	}
+
+	// --- 3. startup failure + retry ---------------------------------------
+	function wrap( elems ) {
+		const arr = elems;
+		const chain = {
+			$query: sel => wrap( arr.flatMap( el => [ ...el.querySelectorAll( sel ) ] ) ),
+			$addAttr: ( ...k ) => { arr.forEach( el => k.forEach( a => el.setAttribute( a, "" ) ) ); return chain; },
+			$rmAttr: ( ...k ) => { arr.forEach( el => k.forEach( a => el.removeAttribute( a ) ) ); return chain; },
+			$css: ( p, v ) => { arr.forEach( el => el.style[ p ] = v ); return chain; },
+			$remove: () => { arr.forEach( el => el.remove() ); return chain; },
+			$text: t => { arr.forEach( el => el.textContent = t ); return chain; },
+			$disabled: b => {
+				arr.forEach( el => b === false ? el.removeAttribute( "disabled" ) : el.setAttribute( "disabled", "" ) );
+				return chain;
+			},
+			$onclick: fn => { arr.forEach( el => el.addEventListener( "click", fn ) ); return chain; },
+		};
+
+		return chain;
+	}
+
+	async function checkStartup() {
+		try {
+			const { run } = await getSources();
+			const host = document.createElement( "div" );
+			const state = { daw: 0, init: 0, wavesShouldFail: true };
+
+			host.innerHTML = `
+				<div id="splashScreen">
+					<div>
+						<div></div><b></b>
+						<span data-alert="firefox"></span>
+						<span data-alert="error"><span data-error-message></span></span>
+						<button disabled></button><a></a>
+					</div>
+				</div>`;
+			document.getElementById( "sandbox" ).append( host );
+
+			// Mirrors GSUloadJSFile: the tag is appended to <head> and the loader
+			// only settles on its "load" event. On the failing path we dispatch
+			// the element's "error" event, which run.js captures on window.
+			const loadFile = src => {
+				const el = document.createElement( "script" );
+
+				el.src = new URL( src, location.href ).href;
+				if ( state.wavesShouldFail && src.includes( "gsuiWaveletList" ) ) {
+					state.wavesShouldFail = false;
+					// The tag keeps its real URL (no real asset exists at that
+					// path here, so the server 404s) and therefore fires a real
+					// "error" event, which run.js captures on window.
+					document.head.append( el );
+					// Never settle: only the error event can unblock the chain.
+					return new Promise( () => {} );
+				}
+				return Promise.resolve();
+			};
+			const locals = {
+				document,
+				window,
+				location,
+				GSUonFirefox: false,
+				GSUsetTimeout: ( fn, sec ) => setTimeout( fn, sec * 1000 | 0 ),
+				GSUclearTimeout: id => clearTimeout( id ),
+				GSUloadJSFile: loadFile,
+				gswaContext: { $resume: () => Promise.resolve() },
+				GSDAW: class { constructor() { state.daw++; } $init() { state.init++; } },
+				console,
+				URL,
+			};
+
+			locals.$ = sel => wrap( [ ...host.querySelectorAll( sel ) ] );
+			// eslint-disable-next-line no-new-func
+			new Function( ...Object.keys( locals ), run )( ...Object.values( locals ) );
+
+			const button = host.querySelector( "#splashScreen button" );
+			const splash = host.querySelector( "#splashScreen" );
+
+			button.click();
+			await new Promise( r => setTimeout( r, 200 ) );
+			const failed = splash.hasAttribute( "data-error" );
+			const message = splash.querySelector( "[data-error-message]" ).textContent;
+
+			button.click();
+			await new Promise( r => setTimeout( r, 300 ) );
+			const started = splash.hasAttribute( "data-started" );
+
+			host.remove();
+			const ok = failed && started && state.daw === 1 && state.init === 1;
+
+			report( "startup", ok,
+				`first attempt → ${ failed ? "data-error" : "no error" } (${ message || "no message" }); ` +
+				`retry → ${ started ? "data-started" : "stuck" }; ` +
+				`GSDAW constructed ${ state.daw } time(s), $init ${ state.init } time(s)` );
+		} catch ( err ) {
+			report( "startup", false, err.stack || err.message );
+		}
+	}
+
+	document.addEventListener( "click", e => {
+		const action = e.target.dataset.action;
+
+		if ( action === "manifest" ) { checkManifest(); }
+		if ( action === "offline" ) { checkOffline(); }
+		if ( action === "startup" ) { checkStartup(); }
+	} );
+
+	// `?auto` runs all three checks on load (used by the headless smoke check).
+	if ( new URLSearchParams( location.search ).has( "auto" ) ) {
+		( async () => {
+			await checkManifest();
+			await checkOffline();
+			await checkStartup();
+			document.body.dataset.done = "1";
+		} )();
+	}
+	</script>
+</body>
+</html>
