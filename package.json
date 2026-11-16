@@ -4,6 +4,10 @@
   "description": "Play a frequency and watch the sand settle into its Chladni figure: square plate and drumhead modes, computed from the wave equation.",
   "repository": "github:evoluteur/cymatics",
   "homepage": "https://evoluteur.github.io/cymatics/",
+  "scripts": {
+    "test": "node --test test/app.test.js",
+    "test:browser": "node test/browser-check.js"
+  },
   "copyright": "(c) 2026 Olivier Giulieri",
   "author": "Olivier Giulieri (https://evoluteur.github.io/)",
   "license": "MIT",

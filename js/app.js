@@ -19,7 +19,9 @@ const state = {
 
 let grains = [];
 let field = null; // offscreen canvas holding the standing wave
-let running = false;
+let running = false; // the loop has more work to do
+let queued = false; // a frame is already waiting to run
+let unsettled = 0; // grains that have not reached a node yet
 
 // --- the plate, sampled once per mode ----------------------------------
 
@@ -85,12 +87,14 @@ const scatter = () => {
         settled: false,
       });
   }
+  unsettled = grains.length;
   wake();
 };
 
 // a new figure: every grain has to look for its node again
 const unsettle = () => {
   for (const g of grains) g.settled = false;
+  unsettled = grains.length;
   wake();
 };
 
@@ -125,6 +129,25 @@ const toNode = (x, y) => {
   return node;
 };
 
+// A step can carry a grain just past the rim, where the field has no slope to
+// descend. Bringing it back a little inside the plate (not exactly onto the
+// rim, where the outward slope would pin it) lets it slide along the edge and
+// keep walking to the node, so a figure always finishes forming.
+const EDGE = 0.0005;
+const clampInside = (x, y) => {
+  if (state.shape === "square") {
+    return [
+      Math.min(Math.max(x, EDGE), 1 - EDGE),
+      Math.min(Math.max(y, EDGE), 1 - EDGE),
+    ];
+  }
+  const dx = x - 0.5;
+  const dy = y - 0.5;
+  const r = Math.hypot(dx, dy);
+  const k = (0.5 - EDGE) / (r || 1);
+  return r <= 0.5 - EDGE ? [x, y] : [0.5 + dx * k, 0.5 + dy * k];
+};
+
 // One step of the real story: a grain is thrown around where the plate
 // moves and stays put where it does not, so it walks downhill to a node.
 // Returns how far the most restless grain moved, so the loop knows when the
@@ -139,16 +162,17 @@ const shake = () => {
     const { distance, gx, gy } = toNode(g.x, g.y);
     if (distance < 0.0012) {
       g.settled = true; // on a nodal line: it will not move until the figure changes
+      unsettled--;
       continue;
     }
     const drive = Math.min(distance / reach, 1);
-    const x = g.x - step * drive * gx + (Math.random() - 0.5) * jitter * drive * distance;
-    const y = g.y - step * drive * gy + (Math.random() - 0.5) * jitter * drive * distance;
-    if (inside(x, y)) {
-      moved = Math.max(moved, Math.abs(x - g.x) + Math.abs(y - g.y));
-      g.x = x;
-      g.y = y;
-    }
+    let x = g.x - step * drive * gx + (Math.random() - 0.5) * jitter * drive * distance;
+    let y = g.y - step * drive * gy + (Math.random() - 0.5) * jitter * drive * distance;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue; // a bad sample leaves it put
+    if (!inside(x, y)) [x, y] = clampInside(x, y);
+    moved = Math.max(moved, Math.abs(x - g.x) + Math.abs(y - g.y));
+    g.x = x;
+    g.y = y;
   }
   return moved;
 };
@@ -273,30 +297,64 @@ const draw = () => {
   ctx.stroke();
 };
 
-// Once nothing has visibly moved for half a second the figure is formed, and
-// the loop goes to sleep until the plate, the sand, or the view changes.
+// Once nothing has visibly moved for half a second, and every grain has
+// reached a node, the figure is formed and the loop goes to sleep until the
+// plate, the sand, or the view changes. A frame budget bounds the wake-up: a
+// grain that somehow cannot find its node still lets the figure rest instead
+// of pinning a core at full speed forever.
 const STILL = 0.0002; // well under a pixel
 const STILL_FRAMES = 30;
+const WAKE_FRAMES = 1800; // at most 30 s of motion after a change
 let still = 0;
+let awake = 0; // frames simulated since the last wake
 
 const loop = () => {
-  const moved = state.render !== "field" ? shake() : 0;
+  queued = false;
+  // "Standing wave" shows the field alone: there is no sand to advance, so a
+  // single redraw is all a wake needs, and the loop may rest at once.
+  const moving = state.render !== "field";
+  if (!moving) {
+    draw();
+    running = false;
+    return;
+  }
+  const moved = shake();
   draw();
+  awake++;
   still = moved < STILL ? still + 1 : 0;
-  if (still >= STILL_FRAMES) running = false;
-  if (running) requestAnimationFrame(loop);
+  // Never sleep with sand still on its way to a node: the figure would be
+  // left half-formed.
+  const formed = still >= STILL_FRAMES && unsettled === 0;
+  running = !formed && awake < WAKE_FRAMES;
+  if (!running) {
+    if (unsettled > 0) {
+      // The budget ran out before every grain found a line. Let the figure
+      // rest where it stands rather than spinning forever; the next change
+      // unsettles the sand and it looks again.
+      for (const g of grains) g.settled = true;
+      unsettled = 0;
+    }
+  }
+  if (running) schedule();
 };
 
-const start = () => {
-  if (running) return;
-  running = true;
+const schedule = () => {
+  if (queued) return;
+  queued = true;
   requestAnimationFrame(loop);
 };
 
+// Wake from sleep, or let a running loop know there is fresh work: either
+// way the stillness counters restart, so the new figure always gets its full
+// time to form.
 const wake = () => {
   still = 0;
-  start();
+  awake = 0;
+  running = true;
+  schedule();
 };
+
+const start = wake;
 
 // --- the tone ----------------------------------------------------------
 
@@ -324,25 +382,40 @@ const playTone = () => {
 
 const stopTone = () => {
   if (!oscillator) return;
-  gain.gain.cancelScheduledValues(audio.currentTime);
-  gain.gain.setValueAtTime(gain.gain.value, audio.currentTime);
-  gain.gain.linearRampToValueAtTime(0, audio.currentTime + 0.12);
-  oscillator.stop(audio.currentTime + 0.15);
+  const now = audio.currentTime;
+  const level = gain.gain.value; // read the sounding level before cancelling
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setValueAtTime(level, now);
+  gain.gain.linearRampToValueAtTime(0, now + 0.12);
+  const stopping = oscillator;
+  const stoppedGain = gain;
   oscillator = null;
+  // keep gain alive until the ramp has played out, then drop the nodes
+  stopping.stop(now + 0.15);
+  stopping.onended = () => {
+    try {
+      stopping.disconnect();
+      stoppedGain.disconnect();
+    } catch (e) {}
+  };
   $("play").textContent = "Play";
 };
 
 const toggleTone = () => (playing() ? stopTone() : playTone());
 
 // A ramp runs from the previous scheduled event, which may be the moment the
-// oscillator started. Pinning the current pitch first makes every glide start
-// from what is actually sounding, however fast the slider moves.
+// oscillator started. Reading the pitch before cancelling makes the glide
+// start from what is actually sounding, so however fast the slider moves the
+// next ramp begins where the ear is, not where the last schedule left off.
+// Every change is a short glide: the pitch slides instead of jumping and the
+// oscillator is never restarted, which would leave an audible gap.
 const retune = () => {
   if (!oscillator) return;
   const pitch = oscillator.frequency;
   const now = audio.currentTime;
+  const sounding = pitch.value;
   pitch.cancelScheduledValues(now);
-  pitch.setValueAtTime(pitch.value, now);
+  pitch.setValueAtTime(sounding, now);
   pitch.linearRampToValueAtTime(state.mode.frequency, now + 0.08);
 };
 
