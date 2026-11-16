@@ -9,6 +9,7 @@ import { GPUDepthReader } from '../utils/GPUDepthReader.js';
 import { PaintTool } from './PaintTool.js';
 import { EraseTool } from './EraseTool.js';
 import { FillTool } from './FillTool.js';
+import { syncPainterPixels } from './PaintHistorySync.js';
 
 const COLOR_TYPE_BY_MAP = {
   map: 'rgb',
@@ -261,6 +262,24 @@ export class TexturePainter {
     this.previewMaterial.needsUpdate = true;
 
     this.object.material = this.previewMaterial;
+  }
+
+  /**
+   * Bring the painter's internal pixel cache and the displayed preview
+   * material in step with a paint canvas that was just rewritten by undo/redo.
+   *
+   * Only the given paint map is affected; the caches and canvases of every
+   * other map are left untouched.  Returns false (never throws) when the
+   * session is inactive, another object is bound, the map entry is missing, or
+   * the image dimensions do not match the canvas.
+   *
+   * @param {THREE.Object3D} object
+   * @param {string} paintMap
+   * @param {ImageData} imageData
+   * @returns {boolean}
+   */
+  applyHistoryImageData(object, paintMap, imageData) {
+    return syncPainterPixels(this, object, paintMap, imageData);
   }
 
   getMapKey(type) {
@@ -757,6 +776,11 @@ export class TexturePainter {
 
     this.paintCtx.putImageData(working, 0, 0);
     this.texture.needsUpdate = true;
+
+    // The fill wrote directly to the canvas; refresh the projection painter's
+    // working cache so the next brush dab blends against the filled pixels
+    // instead of the pre-fill snapshot it still holds.
+    this.projectionPainter?.syncImageData(this.paintCanvas, working);
 
     this.editor.execute(new PaintStrokeCommand(this.editor, this.object, this.paintMap, before, working));
   }

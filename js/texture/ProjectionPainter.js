@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { syncProjectionCache } from './PaintHistorySync.js';
 
 export class ProjectionPainter {
   constructor() {
@@ -31,6 +32,20 @@ export class ProjectionPainter {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { willReadFrequently: true });
     this.imageData = this.ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  /**
+   * Replace the working pixel cache with the pixels now stored on the bound
+   * canvas (e.g. after an undo/redo rewrote the canvas directly).  Returns
+   * false without throwing when `canvas` is not the canvas this painter owns
+   * or when dimensions differ.
+   *
+   * @param {HTMLCanvasElement} canvas
+   * @param {ImageData} imageData
+   * @returns {boolean}
+   */
+  syncImageData(canvas, imageData) {
+    return syncProjectionCache(this, canvas, imageData);
   }
 
   _buildTriangleCache() {

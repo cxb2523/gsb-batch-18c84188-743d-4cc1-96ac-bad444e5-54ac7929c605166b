@@ -1,0 +1,9 @@
+{
+  "name": "kokraf",
+  "private": true,
+  "type": "module",
+  "description": "Local Node test runner for editor logic that is otherwise browser-only.",
+  "scripts": {
+    "test": "node --import ./tests/helpers/register.mjs --test tests/paint-history.test.js"
+  }
+}

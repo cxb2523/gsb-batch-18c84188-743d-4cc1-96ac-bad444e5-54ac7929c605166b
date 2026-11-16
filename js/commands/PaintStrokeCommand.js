@@ -53,12 +53,16 @@ export class PaintStrokeCommand {
     if (!imageData) return;
 
     const object = this.editor.objectByUuid(this.objectUuid);
+    if (!object) return;
+
     const texturePainter = this.editor.modeManager?.texturePainter;
 
     const material = this._getMaterial(object);
     const texture = material?.[this.paintMap];
     const canvas = texture?.image;
 
+    // Safe skip: missing canvas or history pixels whose dimensions no longer
+    // match the current texture (e.g. the map was recreated at another size).
     if (!canvas || imageData.width !== canvas.width || imageData.height !== canvas.height) {
       return;
     }
@@ -67,15 +71,13 @@ export class PaintStrokeCommand {
     ctx.putImageData(imageData, 0, 0);
     texture.needsUpdate = true;
 
-    if (texturePainter?.object === object && texturePainter.projectionPainter?.canvas === canvas) {
-      texturePainter.projectionPainter.imageData = new ImageData(
-        new Uint8ClampedArray(imageData.data),
-        imageData.width,
-        imageData.height
-      );
-    }
+    // During an active paint session this rewrites the projection painter's
+    // pixel cache for this map only and refreshes the preview material when it
+    // is the texture currently displayed.  It is a guarded no-op (never throws)
+    // when the session is inactive, bound to another object/map, or out of sync.
+    texturePainter?.applyHistoryImageData?.(object, this.paintMap, imageData);
 
-    this.editor.signals.objectChanged.dispatch(object);
+    this.editor.signals?.objectChanged?.dispatch?.(object);
   }
 
   toJSON() {
