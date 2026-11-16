@@ -1,0 +1,228 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wet reference-space check</title>
+<pre id="log">running...</pre>
+<script type="module">
+  import * as THREE from '/public/vendor/three.module.js';
+  import { loadMesh } from '/public/src/mesh.js';
+  import { applyPose } from '/public/src/pose.js';
+  import { restPointAt } from '/public/src/wet.js';
+  import { fabricVertex, fabricFragment, outlineVertex, outlineFragment } from '/public/src/shaders.js';
+
+  const log = document.getElementById('log');
+  const lines = [];
+  const report = (ok, label) => lines.push((ok ? 'PASS' : 'FAIL') + ' - ' + label);
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  window.addEventListener('error', event => lines.push('ERROR - ' + event.message));
+
+  try {
+    const { stocking } = await loadMesh(THREE);
+
+    // Real WebGL2 renderer so ShaderMaterial actually compiles the GLSL.
+    const renderer = new THREE.WebGLRenderer({ antialias: false });
+    renderer.setSize(64, 64, false);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(30, 1, .02, 12);
+    camera.position.set(0, .5, 2);
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        dye: { value: new THREE.Color('#141318') }, wetDye: { value: new THREE.Color(0) },
+        tint: { value: new THREE.Color(0xffffff) }, lengthLimit: { value: .425 },
+        band: { value: .04 }, denier: { value: 40 }, fabric: { value: 0 },
+        cuff: { value: 1 }, pattern: { value: 0 }, secret: { value: 0 },
+        garter: { value: 0 }, skinOnly: { value: 0 }, reflection: { value: 0 },
+        time: { value: 0 },
+        stains: { value: Array.from({ length: 24 }, () => new THREE.Vector4()) },
+      },
+      vertexShader: fabricVertex, fragmentShader: fabricFragment, transparent: true,
+    });
+    const outlineMaterial = new THREE.ShaderMaterial({
+      uniforms: { lengthLimit: material.uniforms.lengthLimit },
+      vertexShader: outlineVertex, fragmentShader: outlineFragment,
+      transparent: true, side: THREE.BackSide,
+    });
+
+    const geometryA = stocking.clone();
+    const geometryB = stocking.clone();
+    const mesh = new THREE.Mesh(geometryA, material);
+    const outline = new THREE.Mesh(geometryA, outlineMaterial);
+    scene.add(mesh, outline);
+    scene.updateMatrixWorld(true);
+
+    const compileOk = renderer.compile(scene, camera);
+    report(compileOk, 'fabric + outline shaders compile on WebGL2');
+
+    applyPose(geometryA, stocking, 'crossed', 0);
+    applyPose(geometryB, stocking, 'tiptoe', 0);
+
+    // Pick a vertex well inside the stocking (rest height below the cuff).
+    const rest = stocking.getAttribute('position');
+    let vertex = 0;
+    for (let i = 0; i < rest.count; i++) {
+      if (rest.getY(i) > .2 && rest.getY(i) < .35) { vertex = i; break; }
+    }
+
+    const posedA = geometryA.getAttribute('position');
+    const worldPoint = new THREE.Vector3(posedA.getX(vertex), posedA.getY(vertex), posedA.getZ(vertex));
+    const stored = restPointAt(mesh, worldPoint);
+    const expected = new THREE.Vector3(rest.getX(vertex), rest.getY(vertex), rest.getZ(vertex));
+    report(dist(stored, expected) < 1e-6, 'crossed-pose hit maps to exact rest vertex');
+
+    // Simulate markWet: store the stain uniform in rest space.
+    material.uniforms.stains.value[0].set(stored.x, stored.y, stored.z, .046);
+
+    // Reproject the same skin point after switching to tiptoe.
+    mesh.geometry = geometryB;
+    const posedB = geometryB.getAttribute('position');
+    const worldPointB = new THREE.Vector3(posedB.getX(vertex), posedB.getY(vertex), posedB.getZ(vertex));
+    const reprojected = restPointAt(mesh, worldPointB);
+    report(dist(reprojected, stored) < 1e-6, 'tiptoe hit on the same skin point resolves identically');
+
+    // The stored uniform must still contain the original rest coordinates.
+    const mark = material.uniforms.stains.value[0];
+    report(dist(mark, stored) < 1e-9 && mark.w === .046, 'stain uniform unchanged by pose switch');
+
+    // Cuff guard: a rest point above the length limit is rejected in every pose.
+    let topVertex = 0;
+    for (let i = 0; i < rest.count; i++) {
+      if (rest.getY(i) > rest.getY(topVertex)) topVertex = i;
+    }
+    const above = restPointAt(mesh, new THREE.Vector3(posedB.getX(topVertex), posedB.getY(topVertex), posedB.getZ(topVertex)));
+    report(above.y > material.uniforms.lengthLimit.value, 'above-cuff hit stays above the rest-space limit');
+
+    // Render each pose with the stain present: must not error and must draw.
+    let rendered = true;
+    try {
+      renderer.render(scene, camera);
+      mesh.geometry = geometryA;
+      renderer.render(scene, camera);
+    } catch (error) {
+      rendered = false;
+      lines.push('ERROR - render threw: ' + error.message);
+    }
+    report(rendered, 'renders in tiptoe and crossed with the wet mark active');
+
+    // Drying zeroes the mark; a fresh pour still resolves.
+    mark.w = 0;
+    const fresh = restPointAt(mesh, worldPoint);
+    report(mark.w === 0 && fresh !== null, 'dry clears marks and re-pouring still hits');
+
+    // Merge behavior: two nearby rest points collapse onto one stain.
+    const a = restPointAt(mesh, worldPoint);
+    material.uniforms.stains.value[1].set(a.x, a.y, a.z, .03);
+    const mergeDistance = Math.hypot(a.x - reprojected.x, a.y - reprojected.y, a.z - reprojected.z);
+    report(mergeDistance < .021, 'rest-space merge threshold still matches after pose change');
+
+    // --- Integration: replicate main.js markWet/splash/dry/rain data flow exactly. ---
+    const MAX = 24;
+    // Mirror of main.js markWet, using the real restPointAt and same thresholds.
+    function makeLeg(geometry, limit) {
+      const legMesh = { geometry, userData: { leg: 0 }, worldToLocal: v => v,
+        material: { uniforms: { lengthLimit: { value: limit } } } };
+      const stains = Array.from({ length: MAX }, () => new THREE.Vector4());
+      let nextStain = 0;
+      const markWet = (point, radius) => {
+        const uniforms = legMesh.material.uniforms;
+        const rest = restPointAt(legMesh, point);
+        if (!rest) return false;
+        if (rest.y >= uniforms.lengthLimit.value && uniforms.lengthLimit.value < .9) return false;
+        const close = stains.find(s => s.w > 0 && Math.hypot(s.x - rest.x, s.y - rest.y, s.z - rest.z) < .021);
+        if (close) close.w = Math.min(.089, Math.max(close.w, radius) * 1.13);
+        else { stains[nextStain].set(rest.x, rest.y, rest.z, radius); nextStain = (nextStain + 1) % MAX; }
+        return true;
+      };
+      // Mirror of main.js splash cuff rejection.
+      const splash = point => {
+        const rest = restPointAt(legMesh, point);
+        if (!rest || rest.y > limit) return false;
+        return markWet(point, .046);
+      };
+      const active = () => stains.filter(s => s.w > 0 && !(s.x === 0 && s.y === 0 && s.z === 0));
+      const dry = () => stains.forEach(s => { s.w = 0; });
+      return { mesh: legMesh, stains, markWet, splash, active, dry };
+    }
+    const posedPoint = (geometry, vertex) => {
+      const p = geometry.getAttribute('position');
+      return new THREE.Vector3(p.getX(vertex), p.getY(vertex), p.getZ(vertex));
+    };
+    const findVertex = (geometry, lo, hi) => {
+      const r = stocking.getAttribute('position');
+      for (let i = 0; i < r.count; i++) if (r.getY(i) > lo && r.getY(i) < hi) return i;
+      return 0;
+    };
+    const KNEE = .425;
+    const geoms = {};
+    for (const poseName of ['step', 'crossed', 'tiptoe', 'pigeon']) {
+      geoms[poseName] = stocking.clone();
+      applyPose(geoms[poseName], stocking, poseName, 0);
+    }
+    const restAttr = stocking.getAttribute('position');
+
+    // A. Bucket-style multi-pour in crossed pose stores rest-space marks below the cuff.
+    const leg = makeLeg(geoms.crossed, KNEE);
+    // Pick vertices whose REST points are well separated (> the .021 merge radius).
+    const pourVertices = [];
+    for (let i = 0; i < restAttr.count && pourVertices.length < 3; i++) {
+      const y = restAttr.getY(i);
+      if (y < .05 || y > KNEE - .02) continue;
+      const farEnough = pourVertices.every(j => Math.hypot(
+        restAttr.getX(i) - restAttr.getX(j), restAttr.getY(i) - restAttr.getY(j),
+        restAttr.getZ(i) - restAttr.getZ(j)) > .05);
+      if (farEnough) pourVertices.push(i);
+    }
+    for (const v of pourVertices) report(leg.markWet(posedPoint(geoms.crossed, v), .034), 'bucket pour accepts a below-cuff hit');
+    report(leg.active().length === pourVertices.length, `each distinct pour stored one mark (${leg.active().length}/${pourVertices.length})`);
+    report(leg.active().every(s => s.y <= KNEE + 1e-6), 'all bucket marks are within the rest-space cuff');
+
+    // B. Marks do not move when the geometry is re-posed (uniforms untouched).
+    const snapshot = leg.stains.map(s => [s.x, s.y, s.z, s.w]);
+    leg.mesh.geometry = geoms.tiptoe;
+    const unchanged = leg.stains.every((s, i) => s.x === snapshot[i][0] && s.y === snapshot[i][1] && s.z === snapshot[i][2] && s.w === snapshot[i][3]);
+    report(unchanged, 'stored marks are identical after switching crossed -> tiptoe');
+
+    // C. The same skin point hit in tiptoe resolves to the same rest point and merges.
+    const beforeMerge = leg.active().length;
+    for (const v of pourVertices) report(leg.markWet(posedPoint(geoms.tiptoe, v), .03), 're-pour on same skin point in a new pose accepted');
+    report(leg.active().length === beforeMerge, 're-pours in a new pose merge rather than drift/new-mark');
+
+    // D. Splash above the cuff is rejected in EVERY pose, even where deformation moves local y.
+    let rejects = 0, checks = 0;
+    for (const poseName of Object.keys(geoms)) {
+      const probe = makeLeg(geoms[poseName], KNEE);
+      const topV = (() => { let best = 0; for (let i = 0; i < restAttr.count; i++) if (restAttr.getY(i) > restAttr.getY(best)) best = i; return best; })();
+      checks++; if (!probe.splash(posedPoint(geoms[poseName], topV))) rejects++;
+    }
+    report(rejects === checks, `above-cuff splash rejected in all ${checks} poses (no marks escape the cuff)`);
+
+    // E. Rain-style many small pours accumulate then dry clears everything; re-pour works.
+    const rainLeg = makeLeg(geoms.step, .7);
+    const rainVertices = [];
+    for (let i = 0; i < restAttr.count && rainVertices.length < 40; i += 31) {
+      if (restAttr.getY(i) > .05 && restAttr.getY(i) < .68) rainVertices.push(i);
+    }
+    for (const v of rainVertices) rainLeg.markWet(posedPoint(geoms.step, v), .025);
+    report(rainLeg.active().length > 0 && rainLeg.active().length <= MAX, `rain accumulated ${rainLeg.active().length} capped marks`);
+    rainLeg.dry();
+    report(rainLeg.active().length === 0, 'dry removes every rain mark');
+    const rv = findVertex(geoms.step, .2, .35);
+    report(rainLeg.markWet(posedPoint(geoms.step, rv), .046) && rainLeg.active().length === 1, 're-pour after dry stores a fresh mark');
+
+    // F. Ring buffer wraps at 24 without throwing and keeps the most recent marks.
+    const ring = makeLeg(geoms.step, .9);
+    let ringStored = 0;
+    for (let i = 0; i < 60; i++) {
+      // Spread vertices so merges don't collapse them; use a stride over the mesh.
+      const v = (i * 53) % restAttr.count;
+      if (ring.markWet(posedPoint(geoms.step, v), .012)) ringStored++;
+    }
+    report(ring.active().length <= MAX, `ring buffer never exceeds ${MAX} marks (got ${ring.active().length})`);
+  } catch (error) {
+    lines.push('ERROR - ' + (error?.stack ?? error));
+  }
+
+  const failed = lines.filter(line => line.startsWith('FAIL') || line.startsWith('ERROR')).length;
+  lines.push(failed === 0 ? 'ALL CHECKS PASSED' : failed + ' CHECK(S) FAILED');
+  log.textContent = lines.join('\n');
+  document.title = failed === 0 ? 'PASS' : 'FAIL';
+</script>

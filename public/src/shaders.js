@@ -153,13 +153,15 @@ export const stageFragment = /* glsl */`
 
 export const fabricVertex = /* glsl */`
   attribute vec3 restPosition;
-  varying vec3 wetPoint;
+  varying vec3 restPoint;
   varying vec3 localPoint;
   varying vec3 facing;
   varying vec3 eyeDirection;
   void main() {
+    // localPoint/restPoint carry the pose-independent reference coordinates;
+    // the deformed position attribute is only used for placement on screen.
     localPoint = restPosition;
-    wetPoint = position;
+    restPoint = restPosition;
     vec4 viewPoint = modelViewMatrix * vec4(position, 1.);
     facing = normalize(normalMatrix * normal);
     eyeDirection = -viewPoint.xyz;
@@ -183,7 +185,7 @@ export const fabricFragment = /* glsl */`
   uniform float reflection;
   uniform float time;
   uniform vec4 stains[24];
-  varying vec3 wetPoint;
+  varying vec3 restPoint;
   varying vec3 localPoint;
   varying vec3 facing;
   varying vec3 eyeDirection;
@@ -243,7 +245,9 @@ export const fabricFragment = /* glsl */`
       for (int i = 0; i < 24; i++) {
         vec4 mark = stains[i];
         if (mark.w <= 0.) continue;
-        vec3 delta = wetPoint-mark.xyz;
+        // Marks live in the same reference space as restPoint, so the blob and
+        // its drip stay glued to the original skin location in every pose.
+        vec3 delta = restPoint-mark.xyz;
         float radius = mark.w;
         float ripple = .86+.14*sin(dot(localPoint,vec3(107.,146.,82.)));
         float blob = 1. - smoothstep(radius*.67,radius*ripple,length(delta));

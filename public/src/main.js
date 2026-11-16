@@ -3,6 +3,7 @@ import { loadMesh } from './mesh.js';
 import { dropletFragment, dropletVertex, fabricFragment, fabricVertex, outlineFragment, outlineVertex, stageFragment, stageVertex } from './shaders.js';
 import { initUI } from './ui.js';
 import { applyPose } from './pose.js';
+import { restPointAt } from './wet.js';
 
 const canvas = document.getElementById('view');
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -394,17 +395,19 @@ function createEngine({ stocking }) {
     } else if (camera.view?.enabled) camera.clearViewOffset();
   }
 
-  function markWet(mesh, point, radius) {
+  function markWet(mesh, point, radius, restHint) {
     const index = mesh.userData.leg;
     const model = models[index];
-    const local = mesh.worldToLocal(point.clone());
     const uniforms = mesh.material.uniforms;
-    if (local.y >= uniforms.lengthLimit.value && uniforms.lengthLimit.value < .9) return;
+    // Store every mark in rest coordinates so it survives pose changes.
+    const rest = restHint ?? restPointAt(mesh, point);
+    if (!rest) return;
+    if (rest.y >= uniforms.lengthLimit.value && uniforms.lengthLimit.value < .9) return;
     const stains = uniforms.stains.value;
-    const close = stains.find(stain => stain.w > 0 && Math.hypot(stain.x - local.x, stain.y - local.y, stain.z - local.z) < .021);
+    const close = stains.find(stain => stain.w > 0 && Math.hypot(stain.x - rest.x, stain.y - rest.y, stain.z - rest.z) < .021);
     if (close) close.w = Math.min(.089, Math.max(close.w, radius) * 1.13);
     else {
-      stains[model.nextStain].set(local.x, local.y, local.z, radius);
+      stains[model.nextStain].set(rest.x, rest.y, rest.z, radius);
       model.nextStain = (model.nextStain + 1) % maxStains;
     }
   }
@@ -453,9 +456,11 @@ function createEngine({ stocking }) {
   function splash(x, y, quiet = false) {
     const hit = pickLeg(x, y);
     if (!hit) return false;
-    const local = hit.object.worldToLocal(hit.point.clone());
-    if (local.y > hit.object.material.uniforms.lengthLimit.value) return false;
-    markWet(hit.object, hit.point, quiet ? .026 : .046);
+    // The cuff limit is a rest-space height, so reject hits above it using the
+    // pose-independent reference coordinate rather than the deformed vertex.
+    const rest = restPointAt(hit.object, hit.point);
+    if (!rest || rest.y > hit.object.material.uniforms.lengthLimit.value) return false;
+    markWet(hit.object, hit.point, quiet ? .026 : .046, rest);
     spawnDrops(hit.point, quiet ? 7 : 50, quiet ? .55 : 1.01, true);
     if (!quiet) sound.play(.6);
     return true;
