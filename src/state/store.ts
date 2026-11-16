@@ -1061,12 +1061,53 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
             const selH = Math.max(0, selBottom - selTop);
             const selCx = selLeft + selW / 2;
             const selCy = selTop + selH / 2;
-            // Collect target positions from static nodes (not moving) and guides
+            // Collect target positions from static nodes (not moving) and guides.
+            // While inner-editing, snapping must only reference nodes inside the
+            // current edit scope: members of the visual group(s) being edited
+            // and/or nodes in the parent/child hierarchy subtree that contains the
+            // edited node. Nodes outside that scope must not attract the drag.
+            // Guides always remain valid snap targets in both modes.
+            let snapScope: Set<NodeId> | null = null;
+            if (s.innerEditNodeId) {
+              const scope = new Set<NodeId>();
+              // Hierarchy subtree containing the edited node: walk up to the
+              // root, then include the whole root subtree (parents + siblings).
+              let root: NodeId = s.innerEditNodeId;
+              const visitedAncestors = new Set<NodeId>([root]);
+              let parentId = s.nodes[root]?.parentId ?? null;
+              while (parentId != null && !visitedAncestors.has(parentId)) {
+                visitedAncestors.add(parentId);
+                root = parentId;
+                parentId = s.nodes[root]?.parentId ?? null;
+              }
+              const subtreeQueue: NodeId[] = [root];
+              scope.add(root);
+              while (subtreeQueue.length) {
+                const pid = subtreeQueue.shift() as NodeId;
+                const kids = childrenByParent.get(pid);
+                if (!kids) continue;
+                for (const cid of kids) {
+                  if (!scope.has(cid)) {
+                    scope.add(cid);
+                    subtreeQueue.push(cid);
+                  }
+                }
+              }
+              // Visual groups being edited: every visual group that contains the
+              // inner-edit node contributes all of its members as snap targets.
+              const innerEditId = s.innerEditNodeId;
+              for (const vg of Object.values(s.visualGroups)) {
+                if (!vg.members.includes(innerEditId)) continue;
+                for (const m of vg.members) scope.add(m as NodeId);
+              }
+              snapScope = scope;
+            }
             type Target = { axis: 'x' | 'y'; at: number; targetId: NodeId | 'selection' };
             const targetsX: Target[] = [];
             const targetsY: Target[] = [];
             for (const [id, n] of Object.entries(s.nodes) as [NodeId, Node][]) {
               if (toMove.has(id)) continue;
+              if (snapScope && !snapScope.has(id)) continue;
               const left = n.x;
               const top = n.y;
               const right = n.x + n.width;
