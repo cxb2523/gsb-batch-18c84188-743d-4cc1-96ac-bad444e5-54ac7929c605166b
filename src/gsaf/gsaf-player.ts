@@ -7,6 +7,10 @@ import type { GsafFrame, GsafFrameBuffers } from './gsaf-worker';
 // the playback rate when the file carries no fps hint
 const DEFAULT_FPS = 30;
 
+// Rejects a seek that a later one replaced. Every request settles with a definite outcome, so a
+// caller awaiting one never hangs on a target the player has already left.
+const seekSuperseded = () => new Error('gsaf: the seek was superseded by a newer seek');
+
 const STREAMS = [
     ['dataCenter', 'center'],
     ['dataColor', 'color'],
@@ -45,11 +49,21 @@ const readBytes = async (response: Response, progressCallback: (progress: number
 
 /**
  * An animated splat sequence playing through a container. The viewer's timeline drives it:
- * {@link paused} stops its clock, {@link seek} moves it and {@link time} is where it is. Each
- * update decodes the frame due at that time, in a worker, so a slow decode skips frames rather
- * than slowing playback; the decoder continues forward from the frame it holds and replays from
- * the last keyframe to go back. Destroying {@link entity} stops it and releases the worker and
- * the container.
+ * {@link paused} stops its clock, {@link seek} moves it and {@link time} is where it is.
+ *
+ * Each update decodes the frame due at that time, in a worker. Only one decode runs at a time,
+ * and it always asks for the frame due when it starts, never for the one after the last: a
+ * decoder slower than the frame rate therefore skips the frames in between instead of replaying
+ * them one by one. The clock runs only forwards, so skipping never rewinds it.
+ *
+ * A seek moves the playhead and supersedes any earlier request. A decode that a later seek
+ * abandoned (its target is no longer the frame the playhead sits on) is dropped rather than
+ * shown, so the picture never jumps back to a time the timeline has left. A seek to the frame
+ * already on screen resolves at once without decoding. Every request settles with a definite
+ * outcome: the newest one resolves when its frame lands, an older one rejects as superseded, a
+ * failed decode rejects every seek with the same error while the last frame stays on screen, and
+ * destroying {@link entity} resolves what is still waiting and releases the worker (and, through
+ * {@link loadGsaf}, the container).
  */
 class GsafPlayer {
     /** The gsplat entity, showing the frame at {@link time}. */
@@ -84,7 +98,14 @@ class GsafPlayer {
 
     private buffers: GsafFrameBuffers | null;
 
-    // seeks waiting for their frame
+    // whether a decode is in flight
+    private decoding = false;
+
+    // bumped on every seek, so a decode issued before a seek is known to describe a target the
+    // playhead has since left; such a frame is shown only if it is still exactly the frame due
+    private generation = 0;
+
+    // seeks waiting for their frame; a newer seek supersedes them
     private waiters: { resolve: () => void; reject: (err: Error) => void }[] = [];
 
     // a decode that failed, after which the player shows its last frame and every seek fails
@@ -119,6 +140,9 @@ class GsafPlayer {
         entity.once('destroy', () => {
             this.destroyed = true;
             app.off('update', onUpdate);
+            // release the worker now; the entity's loader also destroys it (and the container)
+            this.decoder.destroy();
+            this.buffers = null;
             this.settle();
         });
     }
@@ -129,23 +153,34 @@ class GsafPlayer {
     }
 
     /**
-     * Moves the playhead, wrapping it into the sequence.
+     * Moves the playhead, wrapping it into the sequence. A seek to the frame already on screen
+     * resolves without decoding; a newer seek supersedes any request still waiting, which
+     * rejects with `gsaf: the seek was superseded by a newer seek`.
      *
      * @param time - The time in seconds.
-     * @returns Resolves once the frame at that time is on screen, or the player is destroyed;
-     * rejects once a decode has failed.
+     * @returns Resolves once the frame at that time is on screen; a seek still waiting when the
+     * player is destroyed resolves too. Rejects once a decode has failed, when a newer seek
+     * replaces this one, or when the player has already been destroyed.
      */
     seek(time: number) {
         if (this.failure) return Promise.reject(this.failure);
+        if (this.destroyed) return Promise.reject(new Error('gsaf: the player was destroyed'));
         if (!this.animated) return Promise.resolve();
         // a time already in range is kept exactly, so it lands on the frame it names
         const wrapped = time % this.duration;
         this._time = wrapped < 0 ? wrapped + this.duration : wrapped;
-        const landed = new Promise<void>((resolve, reject) => this.waiters.push({ resolve, reject }));
-        this.pump();
-        return landed;
+        // only the newest target is still wanted: end the older requests now, rather than
+        // leaving them to a decode they no longer describe
+        this.settle(seekSuperseded());
+        this.generation++;
+        return new Promise<void>((resolve, reject) => {
+            this.waiters.push({ resolve, reject });
+            this.pump();
+        });
     }
 
+    // end every waiting seek: resolve when the player reached the frame, reject on failure or
+    // supersession
     private settle(err?: Error) {
         const { waiters } = this;
         this.waiters = [];
@@ -155,29 +190,52 @@ class GsafPlayer {
         }
     }
 
+    // the frame the clock is on
+    private due() {
+        // a frame's own start time can land a rounding error short of it
+        return Math.min(this.frameCount - 1, Math.floor(this._time * this.fps + 1e-6));
+    }
+
     // decode the frame due now, unless it is on screen or a decode is already in flight
     private pump() {
-        if (this.destroyed || this.failure || !this.buffers) return;
-        // a frame's own start time can land a rounding error short of it
-        const due = Math.min(this.frameCount - 1, Math.floor(this._time * this.fps + 1e-6));
+        if (this.destroyed || this.failure) return;
+        const due = this.due();
         if (due === this.shown) {
+            // the picture already matches the clock, so a seek here lands without a decode
             this.settle();
             return;
         }
+        // the decode in flight will re-enter here when it lands, against the clock as it is then
+        if (this.decoding || !this.buffers) return;
         const buffers = this.buffers;
         this.buffers = null;
+        this.decoding = true;
+        const generation = this.generation;
         this.decoder.decode(due, buffers).then(
             (frame) => {
-                // the worker is terminated with the entity, so this only runs while alive
-                uploadFrame(this.app, this.entity.gsplat.resource as GSplatContainer, frame);
-                // the engine re-copies a resource into its work buffer only when its allocation
-                // changes, and a frame keeps the container's, so ask for the copy
-                this.entity.gsplat.workBufferUpdate = WORKBUFFER_UPDATE_ONCE;
-                this.shown = frame.index;
+                this.decoding = false;
+                // the worker is terminated with the entity, so this only runs while alive; a
+                // frame that arrives after teardown is dropped with the buffers it returned
+                if (this.destroyed) return;
                 this.buffers = frame;
+                // The clock may have moved past this frame while it decoded. Show it, unless a
+                // seek issued meanwhile moved the playhead to a different frame — then this
+                // decode answers a target the player has left, and showing it would drag the
+                // picture back to where the timeline no longer is. The next decode asks for the
+                // frame due now, never the one after this, so the frames in between are never
+                // decoded and playback skips ahead instead of replaying them.
+                if (generation === this.generation || frame.index === this.due()) {
+                    uploadFrame(this.app, this.entity.gsplat.resource as GSplatContainer, frame);
+                    // the engine re-copies a resource into its work buffer only when its
+                    // allocation changes, and a frame keeps the container's, so ask for the copy
+                    this.entity.gsplat.workBufferUpdate = WORKBUFFER_UPDATE_ONCE;
+                    this.shown = frame.index;
+                    this.settle();
+                }
                 this.pump();
             },
             (err: Error) => {
+                this.decoding = false;
                 // the worker was terminated with the entity
                 if (this.destroyed) return;
                 console.error(err);

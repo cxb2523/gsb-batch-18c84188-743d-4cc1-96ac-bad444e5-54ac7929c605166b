@@ -199,7 +199,8 @@ const compileGsafDecoder = (url?: string) => {
 
 /**
  * The gsaf decoder in a worker, so decoding never stalls the main thread. One request is in
- * flight at a time.
+ * flight at a time: a second one rejects rather than overwriting the first's callbacks and
+ * leaving it waiting forever.
  */
 class GsafDecoder {
     private worker: Worker;
@@ -221,9 +222,12 @@ class GsafDecoder {
             }
         };
         this.worker.onerror = (event: ErrorEvent) => {
+            // A worker error that names no request ends the worker: every later request would
+            // wait on a thread that will never answer them, so the decoder stops instead.
             const pending = this.pending;
             this.pending = null;
             pending?.reject(new Error(event.message || 'gsaf: the decoder worker failed'));
+            this.stop(new Error(event.message || 'gsaf: the decoder worker failed'));
         };
     }
 
@@ -231,9 +235,17 @@ class GsafDecoder {
 
     private request<T>(type: string, message: object, transfer: Transferable[]) {
         if (this.stopped) return Promise.reject(new Error('gsaf: the decoder was stopped'));
+        if (this.pending) return Promise.reject(new Error('gsaf: the decoder is already decoding'));
         return new Promise<T>((resolve, reject) => {
             this.pending = { resolve: resolve as (data: unknown) => void, reject };
-            this.worker.postMessage({ type, ...message }, transfer);
+            try {
+                this.worker.postMessage({ type, ...message }, transfer);
+            } catch (err) {
+                // a transfer that failed (a buffer already detached) never reaches the worker,
+                // so nothing would ever settle this request
+                this.pending = null;
+                reject(err as Error);
+            }
         });
     }
 
@@ -260,14 +272,19 @@ class GsafDecoder {
         return frame;
     }
 
-    /** Stops the worker. A request in flight, and any made after, rejects. Idempotent. */
-    destroy() {
+    // terminate the worker and reject what it was serving
+    private stop(err: Error) {
         if (this.stopped) return;
         this.stopped = true;
         this.worker.terminate();
         const pending = this.pending;
         this.pending = null;
-        pending?.reject(new Error('gsaf: the decoder was stopped'));
+        pending?.reject(err);
+    }
+
+    /** Stops the worker. A request in flight, and any made after, rejects. Idempotent. */
+    destroy() {
+        this.stop(new Error('gsaf: the decoder was stopped'));
     }
 }
 
