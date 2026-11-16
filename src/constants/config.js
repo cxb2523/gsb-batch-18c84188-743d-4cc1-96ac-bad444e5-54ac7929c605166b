@@ -109,6 +109,9 @@ const sequenceList = [
     }
 ]
 
+const MIN_BPM = 40
+const MAX_BPM = 240
+
 const soundFiles = {
     'kick': '/sounds/kick.wav',
     'snare': '/sounds/snare.wav',
@@ -116,4 +119,4 @@ const soundFiles = {
     'hh_closed': '/sounds/hh_closed.wav'
 }
 
-export { sequenceList, soundFiles }
+export { sequenceList, soundFiles, MIN_BPM, MAX_BPM }

@@ -1,18 +1,8 @@
 import { memo } from "react";
-import useSound from "../hooks/useSound";
 import Note from "./Note";
 import "./Track.css";
 
-const Track = ({
-  trackID,
-  currentStepID,
-  title,
-  noteCount,
-  onNotes,
-  soundFilePath,
-}) => {
-  const [play] = useSound(soundFilePath);
-
+const Track = ({ trackID, currentStepID, title, noteCount, onNotes, play }) => {
   const notes = [...Array(noteCount)].map((el, i) => {
     const isNoteOn = onNotes.indexOf(i) !== -1;
     const isNoteOnCurrentStep = currentStepID === i;

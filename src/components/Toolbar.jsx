@@ -1,4 +1,4 @@
-import { useContext, memo } from "react";
+import { useContext, useState, memo } from "react";
 import { sequenceList } from "../constants/config";
 import { Context } from "../Provider";
 import "./Toolbar.css";
@@ -6,7 +6,8 @@ import "./Toolbar.css";
 const ToolBar = ({
   setStartTime,
   setPastLapse,
-  setBPM,
+  onBPMChange,
+  stopPlayback,
   isSequencePlaying,
   startTime,
   BPM,
@@ -15,6 +16,10 @@ const ToolBar = ({
     sequence: { id: selectedSequenceID },
     selectSequence,
   } = useContext(Context);
+
+  // 输入框文本与生效的 BPM 分离:文本允许任意键入,
+  // 只有解析为有限数字时才提交;非法/空输入保留上一个有效 BPM。
+  const [bpmText, setBpmText] = useState(String(BPM));
 
   function togglePlayback() {
     if (isSequencePlaying) {
@@ -25,13 +30,19 @@ const ToolBar = ({
     }
   }
 
-  function stopPlayback() {
-    setPastLapse(0);
-    setStartTime(null);
+  function updateBPM(e) {
+    const text = e.target.value;
+    setBpmText(text);
+    const parsed = Number(text);
+    if (text.trim() !== "" && Number.isFinite(parsed)) {
+      onBPMChange(parsed);
+    }
+    // 非法或空输入:不提交,播放时钟继续使用上一个有效 BPM
   }
 
-  function updateBPM(e) {
-    setBPM(e.target.value);
+  function handleBPMBlur() {
+    // 回退显示为当前生效的 BPM(非法输入或未钳制前的原始文本)
+    setBpmText(String(BPM));
   }
 
   return (
@@ -79,8 +90,9 @@ const ToolBar = ({
         className="form_element input_bpm"
         id="bpm"
         type="text"
-        value={BPM}
+        value={bpmText}
         onChange={updateBPM}
+        onBlur={handleBPMBlur}
       />
       <label className="label_bpm" htmlFor="bpm">
         BPM

@@ -6,6 +6,7 @@ import PlayHead from "./components/PlayHead";
 import { Provider } from "./Provider";
 import useTimer from "./hooks/useTimer";
 import useStyles from "./hooks/useStyles";
+import { MIN_BPM, MAX_BPM } from "./constants/config";
 import "./Board.css";
 
 function Board() {
@@ -20,6 +21,7 @@ function Board() {
   const [startTime, setStartTime] = useState(null);
   const [pastLapsedTime, setPastLapse] = useState(0);
   const [currentStepID, setCurrentStep] = useState(null);
+  const [playbackResetKey, setPlaybackResetKey] = useState(0);
   const [getNotesAreaWidthInPixels] = useStyles(totalSteps);
 
   const notesAreaWidthInPixels = getNotesAreaWidthInPixels(totalSteps);
@@ -40,10 +42,37 @@ function Board() {
     }
   }, [isSequencePlaying, timePerStep, totalLapsedTime, totalSteps]);
 
+  // BPM 只允许落在 [MIN_BPM, MAX_BPM];非法输入直接忽略(由 Toolbar 保证不回传),
+  // 这里再兜底一次。播放中修改时按 timePerStep ∝ 1/BPM 缩放已走过的时间,
+  // 使步进度(totalLapsedTime / timePerStep)在新速度下连续,不跳步、不倒退。
+  const changeBPM = (nextBPM) => {
+    const parsed = Number(nextBPM);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.min(MAX_BPM, Math.max(MIN_BPM, parsed));
+    if (clamped === BPM) return;
+    const ratio = BPM / clamped;
+    if (isSequencePlaying) {
+      const now = performance.now();
+      const elapsed = pastLapsedTime + Math.max(0, now - startTime);
+      setPastLapse(elapsed * ratio);
+      setStartTime(now);
+    } else {
+      setPastLapse((past) => past * ratio);
+    }
+    setBPM(clamped);
+  };
+
+  const stopPlayback = () => {
+    setPastLapse(0);
+    setStartTime(null);
+    setPlaybackResetKey((k) => k + 1);
+  };
+
   const toolBarProps = {
     setStartTime,
     setPastLapse,
-    setBPM,
+    onBPMChange: changeBPM,
+    stopPlayback,
     isSequencePlaying,
     startTime,
     BPM,
@@ -57,6 +86,7 @@ function Board() {
 
   const trackListProps = {
     currentStepID,
+    playbackResetKey,
   };
 
   return (
