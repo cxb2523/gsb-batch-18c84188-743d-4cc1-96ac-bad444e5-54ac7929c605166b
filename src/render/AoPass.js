@@ -120,7 +120,12 @@ export class AoPass {
       const u = this.compute.u;
       u.tDepth.value = depthTexture;
       u.uTexel.value.set(1 / this.rtA.width, 1 / this.rtA.height);
-      u.uFullTexel.value.set(1 / (this.rtA.width * 2), 1 / (this.rtA.height * 2));
+      // Full-res depth texel, derived from the SAME scale the targets were allocated with —
+      // hardcoding *2 silently breaks normal reconstruction the moment scale !== 0.5 (ultra).
+      u.uFullTexel.value.set(
+        1 / (this.rtA.width / this.scale),
+        1 / (this.rtA.height / this.scale)
+      );
       u.uInvProj.value.copy(camera.projectionMatrixInverse);
       u.uNearFar.value.set(camera.near, camera.far);
       // projScale converts a world-space radius at view depth z into pixels:
