@@ -16,7 +16,8 @@ import { southSkirtVertices, eastSkirtVertices } from './DiamondOOBSkirt';
 import { planDiamondShading } from './diamondShading';
 import { terrainTriFillMatrix, type Uv } from './terrainTriFillMatrix';
 import { getGrassTexture, getWaterTexture, getRoadTexture, getParkTexture, getDirtTexture, getSandTexture, getRockTexture } from './faceTexture';
-import { contourPolygon, SAND_MAX_HEIGHT, ROCK_MIN_HEIGHT, type ContourVertex, type ContourSide } from './heightContour';
+import { contourQuadPolygons, foldContourSegments, SAND_MAX_HEIGHT, ROCK_MIN_HEIGHT, type QuadContourVertex, type ContourSide } from './heightContour';
+import { clipPolygonToTriangle, clipSegmentToTriangle, type Tri2 } from './polygonClip';
 import { maxRoadHalfWidthForDiamond } from './roadHalfWidth';
 
 // Concrete sidewalk grey, matching road.png curb colour.
@@ -128,45 +129,132 @@ function shadeTri(
   }
 }
 
-// One terrain CONTOUR band (sand or rock) for ONE shading triangle, drawn ON TOP
-// of the already-shaded grass. Overlays the band texture on the sub-region kept
-// by the height contour: `keep === 'below'` for coastal SAND (down to the
-// waterline), `keep === 'above'` for highland ROCK (up to the peak). Height is
-// linear across a triangle, so the contour is a straight line → the band/grass
-// boundary runs PARALLEL to the slope, not along the shading diagonal. `skip`
-// (the per-triangle water flag, set only for sand) drops fully-submerged
-// triangles so sand never lands on water tiles. Uses the triangle's own Lambert
-// brightness so the band dims with the slope like the grass; white tint (the
-// terrain art carries its own colour).
-function drawTerrainContour(
+// ---------------------------------------------------------------------------
+// Quad-level terrain contour bands + fold stroke
+//
+// The sand/rock band boundary and the non-planar fold stroke are derived from
+// the four CORNER heights only (see heightContour.ts) — never from the shading
+// diagonal. The diagonal's two fill triangles are used here only as CLIP
+// regions: they exactly tile the (possibly concave) projected diamond, so
+// clipping the quad-level contour geometry to them keeps every painted pixel
+// inside the tile without letting the split line kink the boundary.
+// ---------------------------------------------------------------------------
+
+/** One shading triangle as a clip region + its Lambert brightness + water flag. */
+interface ShadeTri {
+  readonly pts: Tri2;
+  readonly brightness: number;
+  readonly waterSkip: boolean;
+}
+
+/** Screen position + texture UV carried together through polygon clipping. */
+interface BandVertex {
+  readonly x: number;
+  readonly y: number;
+  readonly u: number;
+  readonly v: number;
+}
+
+function lerpBandVertex(a: BandVertex, b: BandVertex, t: number): BandVertex {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    u: a.u + (b.u - a.u) * t,
+    v: a.v + (b.v - a.v) * t,
+  };
+}
+
+/** Resolve a contour vertex to screen position + UV from the quad corners. */
+function resolveContourVertex(
+  v: QuadContourVertex,
+  corners: readonly ScreenCoord[],
+  uvs: readonly Uv[],
+): BandVertex {
+  if (v.kind === 'corner') {
+    const p = corners[v.i];
+    const uv = uvs[v.i];
+    return { x: p.x, y: p.y, u: uv.u, v: uv.v };
+  }
+  return lerpBandVertex(
+    { x: corners[v.a].x, y: corners[v.a].y, u: uvs[v.a].u, v: uvs[v.a].v },
+    { x: corners[v.b].x, y: corners[v.b].y, u: uvs[v.b].u, v: uvs[v.b].v },
+    v.t,
+  );
+}
+
+// One terrain CONTOUR band (sand or rock) for the WHOLE tile quad, drawn ON TOP
+// of the already-shaded grass. The kept region comes from contourQuadPolygons —
+// a single straight chord between quad-edge crossings, continuous across the
+// shading diagonal and seamless with the neighbour's band on shared edges.
+// `keep === 'below'` for coastal SAND (down to the waterline), `keep === 'above'`
+// for highland ROCK (up to the peak). Each band polygon is clipped to each
+// shading triangle and filled with THAT triangle's Lambert brightness, so the
+// band dims with the slope exactly like the grass under it; `skipSubmerged`
+// (sand only) drops pieces inside fully-submerged triangles so sand never lands
+// on water. White tint (the terrain art carries its own colour).
+function drawTerrainBand(
   gfx: Graphics,
   tex: Texture,
-  skip: boolean,
-  brightness: number,
   threshold: number,
   keep: ContourSide,
-  p0: ScreenCoord, uv0: Uv, h0: number,
-  p1: ScreenCoord, uv1: Uv, h1: number,
-  p2: ScreenCoord, uv2: Uv, h2: number,
+  skipSubmerged: boolean,
+  corners: readonly ScreenCoord[],
+  uvs: readonly Uv[],
+  heights: readonly [number, number, number, number],
+  tris: readonly ShadeTri[],
 ): void {
-  if (skip) return;
-  const poly = contourPolygon(h0, h1, h2, threshold, keep);
-  if (poly.length < 3) return;
-  const pts = [p0, p1, p2];
-  const uvs = [uv0, uv1, uv2];
-  const resolve = (v: ContourVertex): { p: ScreenCoord; uv: Uv } => {
-    if (v.kind === 'corner') return { p: pts[v.i], uv: uvs[v.i] };
-    const pa = pts[v.a], pb = pts[v.b], ua = uvs[v.a], ub = uvs[v.b];
-    return {
-      p: { x: pa.x + (pb.x - pa.x) * v.t, y: pa.y + (pb.y - pa.y) * v.t },
-      uv: { u: ua.u + (ub.u - ua.u) * v.t, v: ua.v + (ub.v - ua.v) * v.t },
-    };
-  };
-  const verts = poly.map(resolve);
-  const tint = darken(0xffffff, brightness);
-  // Triangle-fan the 3- or 4-vertex band polygon.
-  for (let k = 1; k < verts.length - 1; k++) {
-    fillTexturedTri(gfx, verts[0].p, verts[k].p, verts[k + 1].p, verts[0].uv, verts[k].uv, verts[k + 1].uv, tex, tint);
+  const polys = contourQuadPolygons(heights[0], heights[1], heights[2], heights[3], threshold, keep);
+  for (const poly of polys) {
+    const screenPoly = poly.map((v) => resolveContourVertex(v, corners, uvs));
+    for (const tri of tris) {
+      if (skipSubmerged && tri.waterSkip) continue;
+      const clipped = clipPolygonToTriangle(screenPoly, tri.pts, (p) => p, lerpBandVertex);
+      if (clipped.length < 3) continue;
+      const tint = darken(0xffffff, tri.brightness);
+      // Triangle-fan the clipped band piece.
+      for (let k = 1; k < clipped.length - 1; k++) {
+        const v0 = clipped[0];
+        const v1 = clipped[k];
+        const v2 = clipped[k + 1];
+        fillTexturedTri(
+          gfx,
+          v0, v1, v2,
+          { u: v0.u, v: v0.v },
+          { u: v1.u, v: v1.v },
+          { u: v2.u, v: v2.v },
+          tex,
+          tint,
+        );
+      }
+    }
+  }
+}
+
+// Fold stroke for a NON-PLANAR tile: the surface's mid-height contour
+// (foldContourSegments), a level set of the slope itself, so it reads as a
+// slope-following contour rather than a hard crease along the shading
+// diagonal. Each segment is clipped to the two shading triangles, which keeps
+// it inside the diamond even when the projection is concave (a chord between
+// two edge crossings could otherwise cut across the reflex notch).
+function strokeFoldContour(
+  gfx: Graphics,
+  corners: readonly ScreenCoord[],
+  uvs: readonly Uv[],
+  heights: readonly [number, number, number, number],
+  tris: readonly ShadeTri[],
+): void {
+  const segments = foldContourSegments(heights[0], heights[1], heights[2], heights[3]);
+  for (const seg of segments) {
+    const a = resolveContourVertex(seg.a, corners, uvs);
+    const b = resolveContourVertex(seg.b, corners, uvs);
+    for (const tri of tris) {
+      const piece = clipSegmentToTriangle(a, b, tri.pts);
+      if (!piece) continue;
+      gfx.beginPath();
+      gfx.moveTo(piece[0].x, piece[0].y);
+      gfx.lineTo(piece[1].x, piece[1].y);
+      gfx.stroke({ color: 0x000000, width: 1, alpha: 0.18 });
+    }
   }
 }
 
@@ -568,46 +656,42 @@ function drawDiamond(gfx: Graphics, input: TileVisualInput): void {
   gfx.closePath();
   gfx.fill({ color: baseFillColor });
 
-  // Per-triangle brightness + fold-line stroke from the shading plan helper.
-  // See diamondShading.ts for the diagonal/brightness/stroke rules.
+  // Per-triangle brightness from the shading plan helper. See diamondShading.ts
+  // for the diagonal/brightness rules. The two fill triangles (with their
+  // brightness + water flags) double as clip regions for the quad-level contour
+  // band and fold stroke below: they exactly tile the projected diamond, even
+  // when it is concave (the plan picks the diagonal through the concave vertex).
   // Triangles draw OVER the base fill at alpha 1.0 to fully cover it where the
   // brightness factor differs from 1.0 (the base fill stays visible only as the
   // seam-safety bleed; for brightness === 1.0 the overdraw is bit-identical).
   const plan = planDiamondShading(c);
+  const cornerPts: readonly ScreenCoord[] = [top, right, bottom, left];
+  const cornerUvs: readonly Uv[] = [uvTop, uvRight, uvBottom, uvLeft];
+  const cornerHs: readonly [number, number, number, number] = [c.topH, c.rightH, c.bottomH, c.leftH];
+  let shadeTris: readonly ShadeTri[];
   if (plan.diagonal === 'tb') {
     shadeTri(gfx, bottom, left,  top, uvBottom, uvLeft,  uvTop, plan.brightnessWest, tbWestWater, fillColor, landFill, waterFill, roughFactor, landTintBase);
     shadeTri(gfx, bottom, right, top, uvBottom, uvRight, uvTop, plan.brightnessEast, tbEastWater, fillColor, landFill, waterFill, roughFactor, landTintBase);
-    if (isTerrainBand && sandFill) {
-      drawTerrainContour(gfx, sandFill, tbWestWater, plan.brightnessWest, SAND_MAX_HEIGHT, 'below', bottom, uvBottom, c.bottomH, left,  uvLeft,  c.leftH,  top, uvTop, c.topH);
-      drawTerrainContour(gfx, sandFill, tbEastWater, plan.brightnessEast, SAND_MAX_HEIGHT, 'below', bottom, uvBottom, c.bottomH, right, uvRight, c.rightH, top, uvTop, c.topH);
-    }
-    if (isTerrainBand && rockFill) {
-      drawTerrainContour(gfx, rockFill, false, plan.brightnessWest, ROCK_MIN_HEIGHT, 'above', bottom, uvBottom, c.bottomH, left,  uvLeft,  c.leftH,  top, uvTop, c.topH);
-      drawTerrainContour(gfx, rockFill, false, plan.brightnessEast, ROCK_MIN_HEIGHT, 'above', bottom, uvBottom, c.bottomH, right, uvRight, c.rightH, top, uvTop, c.topH);
-    }
-    if (plan.strokeFold) {
-      gfx.beginPath();
-      gfx.moveTo(top.x, top.y);
-      gfx.lineTo(bottom.x, bottom.y);
-      gfx.stroke({ color: 0x000000, width: 1, alpha: 0.18 });
-    }
+    shadeTris = [
+      { pts: [bottom, left, top],  brightness: plan.brightnessWest, waterSkip: tbWestWater },
+      { pts: [bottom, right, top], brightness: plan.brightnessEast, waterSkip: tbEastWater },
+    ];
   } else {
     shadeTri(gfx, left, top,    right, uvLeft, uvTop,    uvRight, plan.brightnessNorth, lrNorthWater, fillColor, landFill, waterFill, roughFactor, landTintBase);
     shadeTri(gfx, left, bottom, right, uvLeft, uvBottom, uvRight, plan.brightnessSouth, lrSouthWater, fillColor, landFill, waterFill, roughFactor, landTintBase);
-    if (isTerrainBand && sandFill) {
-      drawTerrainContour(gfx, sandFill, lrNorthWater, plan.brightnessNorth, SAND_MAX_HEIGHT, 'below', left, uvLeft, c.leftH, top,    uvTop,    c.topH,    right, uvRight, c.rightH);
-      drawTerrainContour(gfx, sandFill, lrSouthWater, plan.brightnessSouth, SAND_MAX_HEIGHT, 'below', left, uvLeft, c.leftH, bottom, uvBottom, c.bottomH, right, uvRight, c.rightH);
-    }
-    if (isTerrainBand && rockFill) {
-      drawTerrainContour(gfx, rockFill, false, plan.brightnessNorth, ROCK_MIN_HEIGHT, 'above', left, uvLeft, c.leftH, top,    uvTop,    c.topH,    right, uvRight, c.rightH);
-      drawTerrainContour(gfx, rockFill, false, plan.brightnessSouth, ROCK_MIN_HEIGHT, 'above', left, uvLeft, c.leftH, bottom, uvBottom, c.bottomH, right, uvRight, c.rightH);
-    }
-    if (plan.strokeFold) {
-      gfx.beginPath();
-      gfx.moveTo(left.x, left.y);
-      gfx.lineTo(right.x, right.y);
-      gfx.stroke({ color: 0x000000, width: 1, alpha: 0.18 });
-    }
+    shadeTris = [
+      { pts: [left, top, right],    brightness: plan.brightnessNorth, waterSkip: lrNorthWater },
+      { pts: [left, bottom, right], brightness: plan.brightnessSouth, waterSkip: lrSouthWater },
+    ];
+  }
+  if (isTerrainBand && sandFill) {
+    drawTerrainBand(gfx, sandFill, SAND_MAX_HEIGHT, 'below', true, cornerPts, cornerUvs, cornerHs, shadeTris);
+  }
+  if (isTerrainBand && rockFill) {
+    drawTerrainBand(gfx, rockFill, ROCK_MIN_HEIGHT, 'above', false, cornerPts, cornerUvs, cornerHs, shadeTris);
+  }
+  if (plan.strokeFold) {
+    strokeFoldContour(gfx, cornerPts, cornerUvs, cornerHs, shadeTris);
   }
 
   // Road asphalt bands — drawn ON TOP of the grass base per the autotile mask.

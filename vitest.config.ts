@@ -87,6 +87,7 @@ export default defineConfig({
         'game/render/visuals/polygon/massingGeometry.ts',
         'game/render/visuals/polygon/buildingMassing.ts',
         'game/render/visuals/polygon/heightContour.ts',
+        'game/render/visuals/polygon/polygonClip.ts',
         'game/render/dataViewColors.ts',
       ],
       thresholds: {

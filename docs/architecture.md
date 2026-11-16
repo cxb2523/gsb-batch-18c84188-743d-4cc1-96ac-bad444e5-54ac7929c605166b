@@ -147,7 +147,8 @@ cimulity/
 │   │           ├── buildingMassing.ts   # Procedural massing plan (boxes/gables/props) per building
 │   │           ├── massingGeometry.ts   # Fractional-rect → screen-face geometry for massing boxes
 │   │           ├── windowGeometry.ts    # Window frame/glass inset-quad geometry (punched/curtain)
-│   │           └── heightContour.ts     # Height-contour triangle clip (coastal sand / highland rock)
+│   │           ├── heightContour.ts     # Quad-level height-contour clip (sand/rock bands) + mid-height fold contour
+│   │           └── polygonClip.ts       # Screen-space polygon/segment ∩ triangle clip (concave-safe containment)
 │   │
 │   └── types/                    # Shared TypeScript types
 │       ├── coordinates.ts        # Coordinate types
