@@ -1,6 +1,6 @@
 import { VIDEO_STRINGS } from '../i18n';
 import { END_CARD, stateAt, type Timeline } from '../timeline';
-import { drawExhale } from './breaks';
+import { breakAt, drawExhale } from './breaks';
 import { drawHands } from './hands';
 import { drawKeyboard, rr } from './keyboard';
 import { FIELD_MIN_H, FIELD_W, FIELD_X, SCREEN_H, SCREEN_W, SEND_R, fieldBottom, sendCenter } from './scene';
@@ -144,8 +144,9 @@ export function renderFrame(ctx: Ctx2D, tl: Timeline, t: number, opts: RenderOpt
   }
   drawVoiceBubble(ctx, y, tl.voiceSeconds, font);
 
-  // Keyboard
-  if (slide < 1) drawKeyboard(ctx, s, t, slide, strings, font);
+  // Keyboard. During a break nothing may look pressed: the typing hands are away, so no key
+  // highlight or popup is allowed (a flash could otherwise bleed past a compressed break's start).
+  if (slide < 1) drawKeyboard(ctx, s, t, slide, strings, font, breakAt(tl, t) !== null);
 
   ctx.restore(); // drop the screen clip
 

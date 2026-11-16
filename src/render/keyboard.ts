@@ -18,6 +18,15 @@ const C = {
 /** How long (s) the highlight / key popup stays after a press. */
 const FLASH = 0.12;
 
+/**
+ * The press still flashing at time t, if any. `idle` is set while no hand is typing (a break),
+ * when nothing may look pressed — a flash from the last press before the break must not bleed into it.
+ */
+export function pressFlash(s: TypingState, t: number, idle = false): TypingState['lastPress'] {
+  if (idle || !s.lastPress) return null;
+  return t - s.lastPress.t < FLASH ? s.lastPress : null;
+}
+
 /** ⇧ and ⌫ are drawn as vectors: fonts often lack them, and they must look the same everywhere. */
 const SPECIAL_LABEL: Partial<Record<KeyId, string>> = {
   'to-symbols': '123',
@@ -33,12 +42,14 @@ export function drawKeyboard(
   slide: number,
   strings: VideoStrings,
   font: string,
+  /** No hand is typing right now (a break): suppress the press highlight and the key popup. */
+  idle = false,
 ): void {
   const top = kbTop(slide);
   ctx.fillStyle = C.bg;
   ctx.fillRect(0, top, SCREEN_W, KB_H);
 
-  const flash = s.lastPress && t - s.lastPress.t < FLASH ? s.lastPress : null;
+  const flash = pressFlash(s, t, idle);
   const rects = keyRects(s.kb, slide);
   let popup: KeyRect | null = null;
 

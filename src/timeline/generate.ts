@@ -165,11 +165,18 @@ export function generateTimeline(opts: TimelineOptions): Timeline {
   let duration = t + TAIL;
   const target = duration < minDuration ? minDuration : duration > maxDuration ? maxDuration : duration;
   if (target !== duration) {
-    const factor = (target - TAIL) / t;
+    // A cap smaller than the tail leaves no room for typing at all: keep everything at t = 0
+    // instead of scaling by a negative factor.
+    const factor = Math.max(0, (target - TAIL) / t);
     for (const e of events) e.t *= factor;
     for (const b of breaks) {
       b.t0 *= factor;
       b.t1 *= factor;
+    }
+    // A break squeezed down to nothing cannot be shown (and would swallow the events at its start):
+    // drop it rather than leave a degenerate interval behind.
+    for (let i = breaks.length - 1; i >= 0; i--) {
+      if (!(breaks[i]!.t1 > breaks[i]!.t0)) breaks.splice(i, 1);
     }
     duration = target;
   }

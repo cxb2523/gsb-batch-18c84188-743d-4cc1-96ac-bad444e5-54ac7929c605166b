@@ -33,31 +33,128 @@ export const MOUTH_SCALE = 1.6;
 const ease = (p: number) => (p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2);
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 const lerp = (a: Pt, b: Pt, p: number): Pt => ({ x: a.x + (b.x - a.x) * p, y: a.y + (b.y - a.y) * p });
-/** Progress of segment [a, b] at time u, eased. */
-const seg = (u: number, a: number, b: number) => ease(clamp01((u - a) / (b - a)));
+const ZERO: Pt = { x: 0, y: 0 };
 
 export function breakAt(tl: Timeline, t: number): Break | null {
   for (const b of tl.breaks ?? []) if (t >= b.t0 && t <= b.t1) return b;
   return null;
 }
 
+/** A time span inside the break, in seconds. */
+export interface BreakPhase {
+  start: number;
+  end: number;
+}
+
 /**
- * Choreography in fractions of the break (so it survives the timeline being stretched or squeezed):
- * out → in with the prop → hold → raise → hold at the mouth → lower → hold → out → in empty-handed.
+ * The break laid out on the real timeline.
+ *
+ * The generator squeezes breaks together with the events to fit `maxDuration`, so the intervals can be
+ * much shorter (or longer) than the ~5 s the choreography was designed for. Every phase therefore gets
+ * explicit absolute times derived from the *current* interval, and the return is finished before t1:
+ * the typing hands are back in place from `settled` until the break ends, so the next key press never
+ * starts while the hand is still on its way back.
+ */
+export interface BreakTiming {
+  t0: number;
+  t1: number;
+  /** Hand leaves the keyboard and the frame. */
+  out: BreakPhase;
+  /** Empty hand comes back holding the prop. */
+  enter: BreakPhase;
+  /** Prop goes up to the mouth. */
+  raise: BreakPhase;
+  /** Prop comes back down. */
+  lower: BreakPhase;
+  /** Hand (with the prop) leaves the frame again. */
+  leave: BreakPhase;
+  /** Empty hand returns to the typing position. */
+  back: BreakPhase;
+  /** The prop is in the hand during [propFrom, propUntil). */
+  propFrom: number;
+  propUntil: number;
+  /** From here until t1 the hand is back in the typing pose (no offset, no prop). */
+  settled: number;
+  /** False for a degenerate interval — the hand just stays at the keyboard. */
+  active: boolean;
+}
+
+/*
+ * Phase boundaries as fractions of the break. `breakTiming` turns them into absolute times for the
+ * current interval, which is what keeps the gesture glued to the break after the timeline has been
+ * stretched or squeezed. The return to the typing pose finishes at `back[1]`, leaving the last 8% of
+ * the interval as a settle window: the hand is already back at the keyboard before the break ends,
+ * so a press that follows the break can never start while the hand is still on its way back.
+ */
+const AT = {
+  outEnd: 0.1,
+  enter: [0.13, 0.25],
+  raise: [0.34, 0.44],
+  lower: [0.54, 0.64],
+  leave: [0.7, 0.78],
+  back: [0.82, 0.92],
+} as const;
+
+export function breakTiming(brk: Break): BreakTiming {
+  const { t0, t1 } = brk;
+  const span = t1 - t0;
+  const active = Number.isFinite(span) && span > 0;
+  const at = (f: number) => (active ? t0 + span * f : t0);
+  const phase = (a: number, b: number): BreakPhase => ({ start: at(a), end: at(b) });
+  return {
+    t0,
+    t1,
+    out: phase(0, AT.outEnd),
+    enter: phase(AT.enter[0], AT.enter[1]),
+    raise: phase(AT.raise[0], AT.raise[1]),
+    lower: phase(AT.lower[0], AT.lower[1]),
+    leave: phase(AT.leave[0], AT.leave[1]),
+    back: phase(AT.back[0], AT.back[1]),
+    propFrom: at(AT.enter[0]),
+    propUntil: at(AT.leave[1]),
+    settled: at(AT.back[1]),
+    active,
+  };
+}
+
+/** Eased progress through a phase at time t; 1 for zero-length phases. */
+const progress = (t: number, p: BreakPhase): number => {
+  const span = p.end - p.start;
+  return span > 0 ? ease(clamp01((t - p.start) / span)) : 1;
+};
+
+const typingPose = (brk: Break): BreakPose => ({ offset: { ...ZERO }, prop: null, raise: 0, brk });
+const poseWith = (brk: Break, offset: Pt, prop: Break['kind'] | null, raise: number): BreakPose => ({
+  offset,
+  prop,
+  raise,
+  brk,
+});
+
+/**
+ * Choreography: typing → out → in with the prop → hold → raise → hold at the mouth → lower → hold →
+ * out with the prop → in empty-handed → typing.
+ *
+ * Pure function of t: the pose is derived from the break's own timings, and is exactly the typing pose
+ * at t0 and everywhere from `settled` to t1. The hand is guaranteed to be back before the break ends,
+ * and the prop is only ever raised/lowered strictly inside the interval.
  */
 export function breakPose(brk: Break, t: number): BreakPose {
-  const u = (t - brk.t0) / (brk.t1 - brk.t0);
-  const raised = Math.min(seg(u, 0.36, 0.46), 1 - seg(u, 0.56, 0.66));
-  if (u < 0.1) return { offset: lerp({ x: 0, y: 0 }, OUT, seg(u, 0, 0.1)), prop: null, raise: 0, brk };
-  if (u < 0.13) return { offset: OUT, prop: null, raise: 0, brk };
-  if (u < 0.82) {
-    const inView = lerp(OUT, HOLD, seg(u, 0.13, 0.25));
-    const out = lerp(HOLD, OUT, seg(u, 0.74, 0.82));
-    const base = u < 0.74 ? inView : out;
-    return { offset: lerp(base, MOUTH, raised), prop: brk.kind, raise: raised, brk };
+  const tm = breakTiming(brk);
+  if (!tm.active || t <= tm.out.start || t >= tm.t1) return typingPose(brk);
+
+  if (t < tm.out.end) return poseWith(brk, lerp(ZERO, OUT, progress(t, tm.out)), null, 0);
+  if (t < tm.enter.start) return poseWith(brk, { ...OUT }, null, 0);
+  if (t < tm.enter.end) return poseWith(brk, lerp(OUT, HOLD, progress(t, tm.enter)), brk.kind, 0);
+  if (t < tm.leave.start) {
+    const raised = Math.min(progress(t, tm.raise), 1 - progress(t, tm.lower));
+    return poseWith(brk, lerp(HOLD, MOUTH, raised), brk.kind, raised);
   }
-  if (u < 0.86) return { offset: OUT, prop: null, raise: 0, brk };
-  return { offset: lerp(OUT, { x: 0, y: 0 }, seg(u, 0.86, 1)), prop: null, raise: 0, brk };
+  if (t < tm.leave.end) return poseWith(brk, lerp(HOLD, OUT, progress(t, tm.leave)), brk.kind, 0);
+  if (t < tm.back.start) return poseWith(brk, { ...OUT }, null, 0);
+  if (t < tm.back.end) return poseWith(brk, lerp(OUT, ZERO, progress(t, tm.back)), null, 0);
+  // Settle window: the hand is already back at the keyboard, in the normal typing pose.
+  return typingPose(brk);
 }
 
 /** Where the holding hand sits while in view (scene points, before the offset). */
@@ -464,12 +561,21 @@ function drawWisp(ctx: Ctx2D, from: Pt, height: number, phase: number, color: st
   ctx.restore();
 }
 
-/** After a drag: a cloud of smoke is blown over the phone from the bottom of the frame and dissolves. */
+/**
+ * After a drag: a cloud of smoke is blown over the phone from the bottom of the frame and dissolves.
+ * The puff is a fraction of the break interval (from just after the prop is lowered until the hand
+ * leaves), so it never spills past the break into typing time when the timeline is compressed.
+ */
 export function drawExhale(ctx: Ctx2D, tl: Timeline, t: number, frameBottom: number): void {
   for (const b of tl.breaks ?? []) {
     if (b.kind !== 'smoke') continue;
-    const start = b.t0 + (b.t1 - b.t0) * 0.6;
-    const p = (t - start) / 2.2;
+    const tm = breakTiming(b);
+    if (!tm.active) continue;
+    const span = b.t1 - b.t0;
+    const start = b.t0 + span * 0.58;
+    const end = Math.min(tm.leave.end, b.t1);
+    if (end <= start) continue;
+    const p = (t - start) / (end - start);
     if (p < 0 || p > 1) continue;
     const alpha = 0.95 * Math.sin(Math.PI * Math.min(1, p * 1.4)) * (1 - p);
     const puffs = [

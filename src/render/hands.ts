@@ -1,4 +1,4 @@
-import type { Timeline } from '../timeline';
+import type { Break, Timeline } from '../timeline';
 import { HOLD_ANCHOR, MOUTH_SCALE, breakAt, breakPose, drawHoldingHand } from './breaks';
 import { SCREEN_W, keyCenter } from './scene';
 import type { Ctx2D, Pt } from './types';
@@ -95,12 +95,35 @@ function plan(tl: Timeline): Finger[] {
     targets[fi]!.push({ t: e.t, pos, press: e.type !== 'hover' });
   }
 
+  /**
+   * During a break nobody types. The right hand is drawn from the break choreography, but a finger
+   * must not hover over (or drift towards) the next key before the break is over — with the timeline
+   * compressed there can be less than the fixed `travel` time between a break's end and the next press.
+   */
+  const breaks = (tl.breaks ?? []).slice().sort((a, b) => a.t0 - b.t0);
+
   fingers.forEach((f, i) => {
     const wps: Waypoint[] = [{ ...f.home, arrive: -Infinity, leave: -Infinity, press: false }];
+    const rest = (arrive: number, leave: number) => wps.push({ ...f.home, arrive, leave, press: false });
+    let brkIdx = 0; // breaks are chronological and never contain a press, so one pointer per finger is enough
     for (const tg of targets[i]!) {
       const prev = wps[wps.length - 1]!;
-      if (prev.leave !== -Infinity && tg.t - prev.leave > f.idle + f.travel * 2) {
-        wps.push({ ...f.home, arrive: prev.leave + f.travel, leave: tg.t - f.travel, press: false });
+      // Every break that starts before this press but after the previous waypoint: rest at home through
+      // it and only then travel to the key. A compressed timeline can leave less than `travel` seconds
+      // between a break's end and the next press, so the hand must start moving at the break's end.
+      const rests: Break[] = [];
+      while (brkIdx < breaks.length && breaks[brkIdx]!.t0 < tg.t) {
+        const b = breaks[brkIdx++]!;
+        if (b.t0 >= prev.arrive) rests.push(b);
+      }
+      if (rests.length) {
+        const first = rests[0]!;
+        if (prev.leave !== -Infinity && first.t0 - prev.leave > f.idle + f.travel * 2) {
+          rest(prev.leave + f.travel, first.t0);
+        }
+        for (const b of rests) rest(b.t0, b.t1);
+      } else if (prev.leave !== -Infinity && tg.t - prev.leave > f.idle + f.travel * 2) {
+        rest(prev.leave + f.travel, tg.t - f.travel);
       } else if (prev.leave === -Infinity) {
         prev.leave = tg.t - f.travel;
       }
@@ -148,10 +171,12 @@ function fingerAt(f: Finger, t: number): { tip: Pt; press: number } {
 /** pxPerPt — frame pixels per scene point (shadow sizes are in pixels). */
 export function drawHands(ctx: Ctx2D, tl: Timeline, t: number, pxPerPt: number): void {
   const brk = breakAt(tl, t);
-  plan(tl).forEach((f, i) => {
+  const fingers = plan(tl);
+  fingers.forEach((f, i) => {
     const { tip, press } = fingerAt(f, t);
     // Breaks: the right hand steps away for coffee or a smoke (see breaks.ts).
-    if (!brk || i !== 1) return drawFinger(ctx, f, tip, press, pxPerPt);
+    // During a break nothing is typed, so no finger may show the press/flash effect either.
+    if (!brk || i !== 1) return drawFinger(ctx, f, tip, brk ? 0 : press, pxPerPt);
     const pose = breakPose(brk, t);
     ctx.save();
     ctx.translate(pose.offset.x, pose.offset.y);
@@ -166,6 +191,52 @@ export function drawHands(ctx: Ctx2D, tl: Timeline, t: number, pxPerPt: number):
     }
     ctx.restore();
   });
+}
+
+/** Where a finger is at time t and whether it looks like it is pressing — for tests and diagnostics. */
+export interface HandProbe {
+  /** Right hand (the one that takes breaks): offset from its typing position, scene points. */
+  breakOffset: Pt;
+  /** Prop in the right hand, if any. */
+  prop: Break['kind'] | null;
+  /** 0..1, the raised-prop amount. */
+  raise: number;
+  /** Is the right hand exactly in the typing pose (offset zero, no prop, not raised)? */
+  typing: boolean;
+  /** Largest press/flash amount across all fingers (0..1). */
+  press: number;
+  /** Fingertip positions the renderer actually uses (before the break offset). */
+  tips: Pt[];
+  /** Resting (home) positions of the fingers. */
+  homes: Pt[];
+}
+
+/**
+ * Pure probe of the drawn hand pose at t. Mirrors `drawHands` without touching a canvas, so tests can
+ * assert that the hand is back at the keyboard by the end of a (possibly compressed) break and that
+ * nothing is pressing while a break is on.
+ */
+export function handPoseAt(tl: Timeline, t: number): HandProbe {
+  const brk = breakAt(tl, t);
+  const fingers = plan(tl);
+  let press = 0;
+  const tips = fingers.map((f, i) => {
+    const s = fingerAt(f, t);
+    // During a break no finger shows the press/flash effect (the right hand is away, the left rests).
+    if (!brk && i !== 1) press = Math.max(press, s.press);
+    return s.tip;
+  });
+  const pose = brk ? breakPose(brk, t) : null;
+  const offset = pose?.offset ?? { x: 0, y: 0 };
+  return {
+    breakOffset: { ...offset },
+    prop: pose?.prop ?? null,
+    raise: pose?.raise ?? 0,
+    typing: offset.x === 0 && offset.y === 0 && !pose?.prop && !pose?.raise,
+    press,
+    tips,
+    homes: fingers.map((f) => ({ ...f.home })),
+  };
 }
 
 function drawFinger(ctx: Ctx2D, f: Finger, touch: Pt, press: number, pxPerPt: number): void {
