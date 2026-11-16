@@ -647,6 +647,11 @@ export function initUI(player: Player): void {
     player.setEqEnabled(on);
     eqOnBtn.classList.toggle('lit', on);
     eqOnBtn.textContent = on ? 'On' : 'Off';
+    eqOnBtn.title = on
+      ? 'Equalizer on — click to bypass (settings are kept)'
+      : 'Equalizer bypassed — click to re-apply the faders';
+    // Faders stay draggable while bypassed: they edit the remembered values,
+    // which the player re-applies in one shot when the EQ comes back on.
     eqSliders.classList.toggle('eq-off', !on);
   }
 

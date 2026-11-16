@@ -1137,10 +1137,29 @@ button:focus-visible {
   background: #000;
   border: 2px solid;
   border-color: var(--lo-deep) var(--hi) var(--hi) var(--lo-deep);
+  position: relative;
 }
 
+/* Bypassed: faders stay draggable (they edit the remembered values) but are
+   dimmed, and a badge makes the bypass state unmistakable. pointer-events:
+   none on the badge so it never blocks a drag. */
 .eq-sliders.eq-off {
   opacity: 0.4;
+}
+
+.eq-sliders.eq-off::after {
+  content: 'BYPASSED';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 3px 10px;
+  font: bold 11px var(--lcd-font);
+  letter-spacing: 2px;
+  color: var(--lcd-green);
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid var(--lcd-dim);
+  pointer-events: none;
 }
 
 .eq-band {

@@ -51,7 +51,10 @@ export class Player {
 
   // Graphic EQ: a preamp GainNode + one peaking BiquadFilter per EQ_FREQS band.
   // Nodes are built lazily in ensureGraph(); values set before then are stored
-  // here and applied when the graph comes up.
+  // here and applied when the graph comes up. When the EQ is off the chain is
+  // truly bypassed: the source is wired straight to the analyser and the dB
+  // values live only in memory until the EQ is switched back on.
+  private sourceNode: MediaElementAudioSourceNode | null = null;
   private preampNode: GainNode | null = null;
   private eqBands: BiquadFilterNode[] = [];
   private eqEnabled = true;
@@ -266,7 +269,8 @@ export class Player {
     return Math.min(Math.max(db, -EQ_RANGE_DB), EQ_RANGE_DB);
   }
 
-  /** Set band `index` gain in dB (−12…+12). Applied live when EQ is enabled. */
+  /** Set band `index` gain in dB (−12…+12). While bypassed this only updates
+   *  the remembered value — the audible chain is untouched until re-enabled. */
   setEqBand(index: number, db: number): void {
     if (index < 0 || index >= this.eqGainsDb.length) return;
     const value = this.clampDb(db);
@@ -275,19 +279,53 @@ export class Player {
     if (band && this.eqEnabled) band.gain.value = value;
   }
 
-  /** Preamp level in dB (−12…+12). */
+  /** Preamp level in dB (−12…+12). Memory-only while bypassed, like bands. */
   setPreamp(db: number): void {
     this.preampDb = this.clampDb(db);
     if (this.preampNode && this.eqEnabled) this.preampNode.gain.value = dbToGain(this.preampDb);
   }
 
-  /** Toggle the EQ. Disabled = flat (all bands 0 dB, preamp unity). */
+  /**
+   * Toggle the EQ. Off is a TRUE BYPASS, not a flatten: the source is
+   * re-wired straight to the analyser, skipping the preamp + filter chain
+   * entirely so no phase/Q coloration leaks through. The band/preamp dB
+   * values are kept in memory and re-applied to the nodes in one shot when
+   * the EQ is switched back on — no volume jump, no band drift.
+   */
   setEqEnabled(on: boolean): void {
     this.eqEnabled = on;
+    if (on) this.applyEqValues();
+    this.wireEq();
+  }
+
+  /** Push the stored dB values onto the live nodes (used when leaving bypass). */
+  private applyEqValues(): void {
+    if (this.preampNode) this.preampNode.gain.value = dbToGain(this.preampDb);
     this.eqBands.forEach((b, i) => {
-      b.gain.value = on ? (this.eqGainsDb[i] as number) : 0;
+      b.gain.value = this.eqGainsDb[i] as number;
     });
-    if (this.preampNode) this.preampNode.gain.value = on ? dbToGain(this.preampDb) : 1;
+  }
+
+  /**
+   * (Re)connect the chain endpoints: source → preamp → … → last band →
+   * analyser when enabled, source → analyser directly when bypassed. The
+   * inner wiring (preamp → band 1 → … → band 10) is permanent; only the two
+   * endpoints move. No-op until the graph exists.
+   */
+  private wireEq(): void {
+    const source = this.sourceNode;
+    const analyser = this.analyser;
+    const preamp = this.preampNode;
+    if (!source || !analyser || !preamp) return;
+    const lastBand = this.eqBands[this.eqBands.length - 1] ?? null;
+    source.disconnect();
+    lastBand?.disconnect();
+    if (this.eqEnabled) {
+      source.connect(preamp);
+      (lastBand ?? preamp).connect(analyser);
+    } else {
+      source.connect(analyser);
+    }
   }
 
   get eqOn(): boolean {
@@ -330,36 +368,43 @@ export class Player {
       analyser.connect(panner);
       panner.connect(ctx.destination);
       const source = ctx.createMediaElementSource(this.audio);
-      // EQ chain: source → preamp → 10 peaking filters → analyser.
+      // EQ chain: source → preamp → 10 peaking filters → analyser. Nodes are
+      // initialized from the stored settings, so values (and the bypass
+      // state) set before the first play are honored when the graph comes up.
       const preamp = ctx.createGain();
-      preamp.gain.value = this.eqEnabled ? dbToGain(this.preampDb) : 1;
+      preamp.gain.value = dbToGain(this.preampDb);
       const bands = EQ_FREQS.map((freq, i) => {
         const bq = ctx.createBiquadFilter();
         bq.type = 'peaking';
         bq.frequency.value = freq;
         bq.Q.value = 1.1; // roughly one octave per band
-        bq.gain.value = this.eqEnabled ? (this.eqGainsDb[i] as number) : 0;
+        bq.gain.value = this.eqGainsDb[i] as number;
         return bq;
       });
-      source.connect(preamp);
+      // Permanent inner wiring: preamp → band 1 → … → band 10. The endpoints
+      // (source in, last band out) are attached by wireEq() per eqEnabled.
       let node: AudioNode = preamp;
       for (const b of bands) {
         node.connect(b);
         node = b;
       }
-      node.connect(analyser);
+      this.sourceNode = source;
       this.preampNode = preamp;
       this.eqBands = bands;
       this.analyser = analyser;
       this.panner = panner;
       this.freqData = new Uint8Array(analyser.frequencyBinCount);
       this.waveData = new Uint8Array(analyser.fftSize);
+      this.wireEq();
       // Belt and braces for strict autoplay policies: if the context was born
       // suspended, retry resuming it on any later real user interaction.
       const retryResume = (): void => this.resumeContext();
       document.addEventListener('pointerdown', retryResume, { passive: true });
       document.addEventListener('keydown', retryResume);
     } catch (err) {
+      this.sourceNode = null;
+      this.preampNode = null;
+      this.eqBands = [];
       this.analyser = null;
       this.panner = null;
       this.emit('error', `visualizer setup failed: ${errorMessage(err)}`);
