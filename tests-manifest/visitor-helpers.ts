@@ -40,6 +40,50 @@ export const audioStop = (id: string, title: string, extra: Record<string, unkno
   ...extra,
 });
 
+/** Append a query marker to a media URL, keeping any query it already has. */
+const withMarker = (url: string, marker: string) => `${url}${url.includes('?') ? '&' : '?'}${marker}`;
+
+/**
+ * A second tour in the same manifest, for tests about moving between tours: the same stops
+ * and same-origin audio as `barcelona-evening` (each file URL marked with the tour id, so a
+ * switch really changes the source), with `metadata` overrides the test needs. Mutates and
+ * returns `draft`.
+ */
+export function addSecondTour(
+  draft: Draft,
+  id: string,
+  metadata: Partial<TourMetadataFile> = {},
+  title = 'Second tour',
+): Draft {
+  const evening = draft.manifest.tours.find((t) => t.id === EVENING)!;
+  const second = structuredClone(evening);
+  second.id = id;
+  second.metadata = { ...second.metadata, ...metadata, id };
+  for (const [code, file] of Object.entries(second.languages)) {
+    file.id = id;
+    file.title = `${title} (${code})`;
+    for (const stop of file.stops) if (stop.type === 'audio') stop.audioFile = withMarker(stop.audioFile, `tour=${id}`);
+  }
+  draft.manifest.tours.push(second);
+  return draft;
+}
+
+/** Go to another tour in place, the way the tour picker does, without reloading the page. */
+export async function switchTour(page: Page, tourId: string): Promise<void> {
+  await page.evaluate((id) => {
+    history.pushState({}, '', `/tour/${id}`);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, tourId);
+}
+
+/** Wait until the player is on `tourId` and that tour's audio is loaded into the element. */
+export async function waitForTour(page: Page, tourId: string): Promise<void> {
+  await expect(page).toHaveURL(new RegExp(`/tour/${tourId}(/|$)`), { timeout: 15000 });
+  await expect
+    .poll(() => page.evaluate(() => document.querySelector('audio')?.src ?? ''), { timeout: 15000 })
+    .toContain(tourId === EVENING ? 'test-org' : `tour=${tourId}`);
+}
+
 /** Settle on the loaded player, replace its content with `draft.manifest` and go to the tour. */
 export async function openDraft(page: Page, draft: Draft, tourId = EVENING): Promise<void> {
   await page.goto('/', { waitUntil: 'domcontentloaded' });

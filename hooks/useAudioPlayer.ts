@@ -147,7 +147,12 @@ export const useAudioPlayer = ({
   }, [onEnded, onProgress, isPlaying, id, onPlayBlocked]);
 
   // Declared before the source effect below so a new stop's load() already sees the right default rate.
+  // The rate is mirrored in a ref too: `load()` (a new stop, a tour switch, stall recovery)
+  // resets `playbackRate` from `defaultPlaybackRate`, and the once-attached listener below
+  // re-asserts it after every load so a rate chosen before the switch survives it.
+  const playbackRateRef = useRef(playbackRate);
   useEffect(() => {
+    playbackRateRef.current = playbackRate;
     audioRef.current.defaultPlaybackRate = playbackRate;
     audioRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
@@ -160,10 +165,22 @@ export const useAudioPlayer = ({
     const audio = audioRef.current;
     debugLog('[AUDIO] Attaching event listeners to audio element');
 
+    // `load()` and some browsers reset the element's rate to its default, and the default
+    // itself is not guaranteed to survive a source change. Re-assert the rate we hold after
+    // each load so switching stop or tour never silently falls back to 1×. Declared before
+    // the handlers that call it; the once-attached listeners all fire after mount.
+    const reassertPlaybackRate = () => {
+      const element = audioRef.current;
+      if (!element) return;
+      if (element.defaultPlaybackRate !== playbackRateRef.current) element.defaultPlaybackRate = playbackRateRef.current;
+      if (element.playbackRate !== playbackRateRef.current) element.playbackRate = playbackRateRef.current;
+    };
+
     const handleLoadedMetadata = () => {
       if (audioRef.current) {
         setDuration(audioRef.current.duration);
       }
+      reassertPlaybackRate();
     };
 
     const handleTimeUpdate = () => {
@@ -259,6 +276,9 @@ export const useAudioPlayer = ({
     const handleWaiting = () => debugWarn('⏳ Audio waiting for data');
 
     audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    // Fired by every load(); re-asserting here (not just in the effect) covers a source
+    // that loads before a newly rendered rate reaches the effect, and stall recovery.
+    audio.addEventListener('loadstart', reassertPlaybackRate);
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('ended', handleEnded);
     audio.addEventListener('error', handleError);

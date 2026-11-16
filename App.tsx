@@ -18,7 +18,7 @@ import { DEFAULT_TOUR_ID } from './src/config/tours';
 import { getAvailableTourIds } from './src/services/tourDiscovery';
 import { defaultLanguage } from './src/config/languages';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
-import { usePlaybackSpeed } from './src/playback/playbackSpeed';
+import { useEffectivePlaybackSpeed } from './src/playback/playbackSpeed';
 import { useApplyTextSize } from './src/textSize/textSize';
 import { useBackgroundAudio } from './hooks/useBackgroundAudio';
 import { MobileFrame } from './components/shared/MobileFrame';
@@ -285,10 +285,10 @@ const App: React.FC<AppProps> = ({ frameless = false }) => {
     setIsPlaying(false);
   }, [setIsPlaying]);
 
-  // The visitor's speed (per device); a tour that hides the control always plays at 1x.
+  // The visitor's speed (per device); a tour that hides the control always plays at 1x
+  // (and leaves the saved choice alone, so a tour that shows it returns to it).
   const showPlaybackSpeed = tour?.showPlaybackSpeed !== false;
-  const chosenSpeed = usePlaybackSpeed();
-  const playbackRate = showPlaybackSpeed ? chosenSpeed : 1;
+  const playbackRate = useEffectivePlaybackSpeed(showPlaybackSpeed);
   useApplyTextSize(tour?.showTextSize !== false);
 
   // Audio Player

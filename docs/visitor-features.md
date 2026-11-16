@@ -35,7 +35,7 @@ A button in the expanded mini player and in the full player steps through **0.75
 { "showPlaybackSpeed": false }
 ```
 
-With `false` the control is gone and the tour always plays at 1×, whatever the visitor chose in another tour. Transition audio between stops plays at the chosen speed too.
+With `false` the control is gone and the tour always plays at 1×, whatever the visitor chose in another tour: the audio element, the full player and the lock-screen position state all report 1×. The saved choice on the device is left untouched, so opening a tour that shows the control again (or turning the setting back on) returns to it. Transition audio between stops plays at the same rate as the stops.
 
 ## Stop search
 

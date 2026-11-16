@@ -108,32 +108,51 @@ export const useMediaSessionIntegration = ({
     onNextTrack: onNextTrack,
   });
 
-  // Update MediaSession position state (throttled to once per second)
+  // Update MediaSession position state. Two triggers share one reporter:
+  // - a new speed is reported at once (the OS scrubber would otherwise advance at the old
+  //   pace until the next whole second), and
+  // - otherwise at most once per second while the position moves.
   const lastPositionUpdateRef = useRef(0);
   const lastRateRef = useRef(playbackRate);
-  useEffect(() => {
-    if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
-      const duration = audioPlayer.duration;
-      const currentTime = audioPlayer.currentTime;
-      const now = Date.now();
 
-      // Throttle to once per second, but a new speed is reported at once
-      const rateChanged = lastRateRef.current !== playbackRate;
-      if (!rateChanged && now - lastPositionUpdateRef.current < 1000) return;
+  const reportPositionState = useCallback((rate: number) => {
+    if (!('mediaSession' in navigator) || !('setPositionState' in navigator.mediaSession)) return false;
 
-      if (duration > 0 && isFinite(duration) && isFinite(currentTime)) {
-        try {
-          navigator.mediaSession.setPositionState({
-            duration: duration,
-            playbackRate,
-            position: currentTime,
-          });
-          lastPositionUpdateRef.current = now;
-          lastRateRef.current = playbackRate;
-        } catch {
-          // Ignore errors
-        }
-      }
+    // Read the element, not React state: a speed change must be reported in the same tick,
+    // before the next timeupdate has had a chance to re-render. Fall back to the state when
+    // the element is between sources (its duration is NaN until the new metadata loads).
+    const element = audioPlayer.audioElement;
+    const elementDuration = element?.duration;
+    const elementCurrentTime = element?.currentTime;
+    const duration = elementDuration !== undefined && isFinite(elementDuration) ? elementDuration : audioPlayer.duration;
+    const currentTime = elementCurrentTime !== undefined && isFinite(elementCurrentTime) ? elementCurrentTime : audioPlayer.currentTime;
+    if (!(duration > 0) || !isFinite(duration) || !isFinite(currentTime)) return false;
+
+    try {
+      navigator.mediaSession.setPositionState({
+        duration,
+        playbackRate: rate,
+        position: Math.min(Math.max(currentTime, 0), duration),
+      });
+      lastPositionUpdateRef.current = Date.now();
+      lastRateRef.current = rate;
+      return true;
+    } catch {
+      return false; // Ignore errors (e.g. a duration the browser rejects)
     }
-  }, [audioPlayer.currentTime, audioPlayer.duration, playbackRate]);
+  }, [audioPlayer.audioElement, audioPlayer.currentTime, audioPlayer.duration]);
+
+  // A new speed goes out immediately, even inside the one-second window.
+  useEffect(() => {
+    if (lastRateRef.current === playbackRate) return;
+    reportPositionState(playbackRate);
+  }, [playbackRate, reportPositionState]);
+
+  // Periodic sync, throttled to once per second. A rate that has not reached the OS yet
+  // (the immediate effect ran before the new stop's duration was known) skips the throttle.
+  useEffect(() => {
+    const ratePending = lastRateRef.current !== playbackRate;
+    if (!ratePending && Date.now() - lastPositionUpdateRef.current < 1000) return;
+    reportPositionState(playbackRate);
+  }, [audioPlayer.currentTime, audioPlayer.duration, playbackRate, reportPositionState]);
 };

@@ -5,7 +5,8 @@
  * The preference lives in localStorage (`agk-playback-speed`) on the visitor's device. It is
  * a preference, not tracking: it never leaves the device and is not sent to analytics.
  * Tours can hide the control (`showPlaybackSpeed: false`); the app then plays at 1x whatever
- * a visitor chose in another tour.
+ * a visitor chose in another tour. The stored choice is left untouched, so the next tour that
+ * shows the control returns to it.
  */
 import { useSyncExternalStore } from 'react';
 
@@ -29,6 +30,15 @@ export function nextPlaybackSpeed(current: PlaybackSpeed): PlaybackSpeed {
 
 /** `1.25` -> `1.25×`, `1` -> `1×`. */
 export const formatPlaybackSpeed = (speed: number): string => `${speed}×`;
+
+/**
+ * The rate the audio must actually play at. This is the one place the tour setting
+ * (`showPlaybackSpeed`) and the visitor's saved choice meet: a tour that hides the control
+ * always plays at 1×, and its setting must not overwrite the saved choice, so turning the
+ * control back on (or opening a tour that has it) returns to the speed the visitor picked.
+ */
+export const effectivePlaybackSpeed = (showControl: boolean, chosen: PlaybackSpeed): PlaybackSpeed =>
+  showControl ? chosen : DEFAULT_PLAYBACK_SPEED;
 
 function readStored(): PlaybackSpeed {
   try {
@@ -61,3 +71,11 @@ const subscribe = (listener: () => void) => {
 
 /** The visitor's chosen speed, kept in step across every component that shows or uses it. */
 export const usePlaybackSpeed = (): PlaybackSpeed => useSyncExternalStore(subscribe, getPlaybackSpeed, () => DEFAULT_PLAYBACK_SPEED);
+
+/**
+ * The rate to play at, given whether the current tour shows the control. Components that
+ * only display the speed still use `usePlaybackSpeed`; everything that decides what the
+ * audio and the lock screen do must go through this so the three stay in step.
+ */
+export const useEffectivePlaybackSpeed = (showControl: boolean): PlaybackSpeed =>
+  effectivePlaybackSpeed(showControl, usePlaybackSpeed());
