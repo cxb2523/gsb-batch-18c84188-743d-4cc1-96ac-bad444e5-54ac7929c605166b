@@ -56,10 +56,23 @@ onmessage = async e => {
     }
     Atomics.store(k, 1, rd);
   };
-  // AdLib: the OPL register writes go to the page's synthesiser (opl-worklet.js) through a shared ring
+  // AdLib: the OPL register writes go to the page's synthesiser (opl-worklet.js) through a shared ring. A full ring
+  // is handled without overwriting: the oldest write is dropped to make room (never one not yet read being covered
+  // up), and the ring's read count is raised to say so, so the synthesiser takes the discard -- and resynchronises
+  // the chip from the register snapshot, which always holds the latest value written -- rather than reading a write
+  // that was covered. The newest state is never what is lost. The read count only ever goes up: the synthesiser
+  // publishes its own, and neither side may undo the other's advance (both use a compare-and-swap).
   if (audio) {
     const RING = 8192, I = new Int32Array(audio, 0, 2), R = new Uint8Array(audio, 8, 256), F = new Float64Array(audio, 512, RING * 2), T0 = performance.timeOrigin;
-    pc.onOpl = (a, v, t) => { R[a] = v; const w = I[0], j = (w % RING) * 2; F[j] = T0 + t; F[j + 1] = (a << 8) | v; Atomics.store(I, 0, w + 1); };
+    pc.onOpl = (a, v, t) => {
+      R[a] = v;
+      const w = Atomics.load(I, 0);
+      if (w - Atomics.load(I, 1) >= RING) {   // full: drop the oldest, raising the read count to it
+        const want = w - RING + 1;
+        for (let rd = Atomics.load(I, 1); rd < want;) { const prev = Atomics.compareExchange(I, 1, rd, want); rd = prev === rd ? want : prev; }
+      }
+      const j = (w % RING) * 2; F[j] = T0 + t; F[j + 1] = (a << 8) | v; Atomics.store(I, 0, w + 1);
+    };
   }
   // the chase camera (C) starts straight behind the car, a little lower than the original's default
   pc.ww(StuntsCode.DSEG, StuntsCode.SYM.custom_camera_azimuth_angle, 512);

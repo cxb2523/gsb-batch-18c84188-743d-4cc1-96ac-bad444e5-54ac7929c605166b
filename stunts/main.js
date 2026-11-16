@@ -206,10 +206,17 @@ async function startAudio() {
   node.port.postMessage({ sab: audio });
   if (window.qolAudio) qolAudio(node);   // (remembered volume, mute)
   const vol = /[?&]vol=([\d.]+)/.exec(location.search); if (vol) node.port.postMessage({ vol: +vol[1] });   // ?vol=0.1 .. 1
-  // the worker stamps writes with epoch milliseconds; tell the synthesiser how they map to its clock
-  const sync = () => { const ts = actx.getOutputTimestamp(); if (ts.performanceTime) node.port.postMessage({ offset: performance.timeOrigin + ts.performanceTime - ts.contextTime * 1000 }); };
+  // the worker stamps writes with epoch milliseconds; tell the synthesiser how they map to its clock. Told again
+  // whenever the context starts running (a suspended context's clock is stopped, and currentTime starts from where
+  // it left off), so the mapping is fresh at the first block after a resume; the synthesiser itself handles a
+  // pause's backlog (opl-worklet.js), playing it in order rather than at once.
+  const sync = () => { if (actx.state !== 'running') return; const ts = actx.getOutputTimestamp(); if (ts.performanceTime) node.port.postMessage({ offset: performance.timeOrigin + ts.performanceTime - ts.contextTime * 1000 }); };
+  actx.addEventListener('statechange', () => { if (actx.state === 'running') sync(); });   // (resumed: back on the page's clock)
   sync(); setInterval(sync, 1000);
 }
+// A page hidden and shown again: the browser may have suspended the context or not; resumed, its clock has stopped
+// for the while it was suspended, which the synthesiser's queue handles (a pause plays through, not skipped).
+addEventListener('visibilitychange', () => { if (!document.hidden && actx && actx.state === 'suspended') actx.resume().catch(() => {}); });
 addEventListener('pointerdown', startAudio);
 // (a touch: the browser allows sound from the finger's lifting, not its press; pressed only, the sound stayed off on Android, issue 36)
 addEventListener('pointerup', startAudio, true); addEventListener('touchend', startAudio, true);   // (capturing: the touch buttons keep their pointerup to themselves)

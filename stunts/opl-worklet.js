@@ -1,7 +1,22 @@
 // OPL2 (YM3812) FM synthesis in an AudioWorklet, fed with the register writes the game's AdLib driver
 // makes in the worker. Shared buffer layout (see index.html):
-//   Int32 [0]: write count; bytes 8..263: the chip's registers as last written;
+//   Int32 [0]: write count, [1]: read count (published here; the worker uses it to stop at the ring's end);
+//   bytes 8..263: the chip's registers as last written;
 //   Float64 from byte 512: a ring of RING (time, register << 8 | value), time in ms since the epoch.
+//
+// Pauses and resumes. The worker stamps writes with the page's clock (performance.timeOrigin + now), while
+// currentTime stops whenever the context is suspended (a hidden page, a phone's call, the OS suspending it), so
+// after a resume the stamps have run on by the length of the pause and a mapping applied write by write would make
+// the whole backlog fall due in one instant: the stretch of music would be skipped at once. Here, instead, playing
+// runs with a `lag` behind this clock, and each write is applied when playing reaches its stamp. A pause leaves the
+// queue's head behind the clock; the head's distance becomes the lag, so playing starts at the head and pays the
+// backlog off at up to MAXRATE until it is with the clock again: writes are consumed in order, on time, and never
+// all at once. With no backlog the lag is 0 and playing is exactly the original schedule. If the pause outlasted
+// the ring, the writer drops its oldest writes rather than overwrite unread ones (the register snapshot still holds
+// the latest value for every register), and here the drop is taken and the chip put back into the snapshot's state,
+// so the writes after the overflow are unharmed. Muting only scales the output, smoothly, so un-muting does not
+// click: the queue keeps being consumed, the music keeps its place, and it carries on from there when the sound
+// comes back.
 //
 // The chip as it works inside, in integers, at its own rate (49716 Hz, resampled to the output's):
 //  - phase: a 19-bit counter per operator, advanced by (F-number << block) times the multiple; its top 10
@@ -19,6 +34,14 @@
 //    sound twice as loud as a melodic channel
 'use strict';
 const RING = 8192, SR_OPL = 49716;
+// In seconds of audio. Playing's lag behind this clock: when a pause leaves the queue far from it, playing starts
+// from the queue's head and that lag is paid off at up to MAXRATE times real time, so the backlog is consumed in
+// order and the music returns to the game's clock without a jump. A lag under DEAD (the ordinary jitter) is left
+// alone, so uninterrupted playback keeps its timing exactly; MAXLEAD is beyond any offset the page's sync lets
+// drift (it is re-posted every second), so a lead past it means the clock mapping is stale, not latency.
+const CATCHUP = 0.25, MAXLEAD = 1.5, MAXRATE = 4, DEAD = 0.02;
+// volume changes glide, so un-muting does not click
+const VOL_TAU = 0.02;
 const MT = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 24, 24, 30, 30];   // multiple, doubled
 const KSLROM = [0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64], KSLSHIFT = [8, 1, 2, 0];
 const LOGSIN = new Uint16Array(256), EXP = new Uint16Array(256);
@@ -53,7 +76,11 @@ class OPL extends AudioWorkletProcessor {
     this.ops = Array.from({ length: 18 }, () => new Op());
     this.ch = Array.from({ length: 9 }, () => new Chan());
     this.regs = new Uint8Array(256);
-    this.offset = null; this.lat = 0.07; this.vol = 0.22; this.rd = 0;
+    // offset: epoch ms - context ms (main.js); lag: how far playing is behind this clock (see process);
+    // rd: writes consumed, published in Int32 [1] so the writer can refuse to overwrite unread ones.
+    // vol is the target gain; gain follows it per sample, so muting and un-muting do not click.
+    this.offset = null; this.lag = 0; this.lat = 0.07; this.vol = 0.22; this.gain = 0.22; this.rd = 0;
+    this.ran = false;
     this.timer = 0; this.noise = 1; this.trem = 0; this.tremPos = 0; this.vibPos = 0;
     this.drums = 0; this.rhythm = false;
     this.chipT = 0; this.y0 = 0; this.y1 = 0; this.dc = 0;   // resampling: the chip's last two outputs
@@ -62,14 +89,19 @@ class OPL extends AudioWorkletProcessor {
       if (m.sab) {
         this.I = new Int32Array(m.sab, 0, 2); this.R = new Uint8Array(m.sab, 8, 256); this.F = new Float64Array(m.sab, 512, RING * 2);
         // start from the chip's current state, then follow new writes
-        this.rd = Atomics.load(this.I, 0);
-        this.write(0x01, this.R[1]);
-        for (let a = 0x20; a < 0x100; a++) this.write(a, this.R[a]);
-        this.write(0xBD, this.R[0xBD]);
+        this.rd = Atomics.load(this.I, 0); this.lag = 0; Atomics.store(this.I, 1, this.rd);
+        this.syncRegs();
       }
       if (m.offset != null) this.offset = m.offset;   // epoch ms - context ms
-      if (m.vol != null) this.vol = m.vol;
+      if (m.vol != null) { this.vol = m.vol; if (!this.ran) this.gain = m.vol; }   // (before the first block: no glide)
     };
+  }
+  // put the chip in the state the register snapshot has: the latest value written for every register. Used at the
+  // start and after dropping a backlog, where the state read is nothing but the last word on each register.
+  syncRegs() {
+    this.write(0x01, this.R[1]);
+    for (let a = 0x20; a < 0x100; a++) this.write(a, this.R[a]);
+    this.write(0xBD, this.R[0xBD]);
   }
   keyOn(op) { if (op.stage === 4 || op.stage === 3) { op.stage = 0; op.acc = 0; op.egAcc = 0; if (this.rate(op, op.ar) >= 60) op.env = 0; } }
   keyOff(op) { if (op.stage < 3) op.stage = 3; }
@@ -182,19 +214,63 @@ class OPL extends AudioWorkletProcessor {
     if (this.rhythm) mix += this.percussion();
     return mix;
   }
+  // Publish how far the queue has been read. Only ever raises the count: the writer may raise it too, when it has
+  // to make room in a full ring (see worker.js), and neither may undo the other's advance.
+  publishRead() {
+    let cur = Atomics.load(this.I, 1);
+    while (this.rd > cur) { const prev = Atomics.compareExchange(this.I, 1, cur, this.rd); if (prev === cur) break; cur = prev; }
+  }
+  // where a write's epoch stamp falls on this clock (seconds)
+  when(et) { return (et - this.offset) / 1000 + this.lat; }
   process(_, outputs) {
     const out = outputs[0], L = out[0], n = L.length;
     if (!this.F) { for (const c of out) c.fill(0); return true; }
-    const I = this.I, F = this.F, wr = Atomics.load(I, 0);
-    if (wr - this.rd > RING) this.rd = wr - RING;
-    const now = currentTime, dt = 1 / sampleRate, step = SR_OPL / sampleRate;
+    const I = this.I, F = this.F, now = currentTime, dt = 1 / sampleRate, step = SR_OPL / sampleRate;
+    const wr = Atomics.load(I, 0);
+    // The writer had to discard the oldest writes to make room while the ring was full (a suspended context reads
+    // nothing): take its read count and put the chip into the registers' latest state, the snapshot, which is all
+    // that is left of the discarded stretch; the queued writes after them carry on from there.
+    const pub = Atomics.load(I, 1);
+    if (pub > this.rd) { this.rd = pub; this.syncRegs(); }
+    // (defensive: more unread than the ring can hold, should the writer's guard ever be missing)
+    if (wr - this.rd > RING) { this.rd = wr; this.syncRegs(); }
+    // PLAYING runs `lag` seconds behind this clock: at 0 it is exactly the original schedule, write for write. A
+    // suspended context stops this clock, so on resume the queue's head may sit far from it; mapping each write
+    // afresh would then make the whole backlog fall due in one sample, skipping the stretch. Instead the head's
+    // distance becomes the lag: playing starts at the head (nothing queued is skipped), and a head behind is paid
+    // off at up to MAXRATE, so the backlog is consumed in order, at a quicker pace, and never at once. A head far
+    // ahead is a stale mapping the other way (the page's sync has not caught up with the resume yet): playing then
+    // keeps with the clock, and the writes go by as their stamps come due, so nothing is dumped or skipped.
+    if (this.offset == null || this.rd >= wr) this.lag = 0;   // (no mapping yet, or nothing queued: with the clock)
+    else {
+      const head = this.when(F[(this.rd % RING) * 2]);
+      const play = now - this.lag;
+      if (head < play - DEAD) this.lag = now - head;           // the cursor ran past the queue's head (a pause resumed): start at the head
+      else if (head > play + MAXLEAD) this.lag = 0;            // a stale mapping put the queue far ahead: with the clock
+    }
+    // the cursor's speed relative to the clock: faster while behind (catching a backlog up), and exactly 1 otherwise,
+    // so uninterrupted playback, and a queue played from its head, keep their timing exactly
+    let speed = 1;
+    if (this.lag > DEAD) speed = Math.min(MAXRATE, 1 + (this.lag - DEAD) / CATCHUP);
+    const lagStep = dt * (1 - speed);
+    const gl = 1 - Math.exp(-dt / VOL_TAU);   // (a one-pole glide to the volume: un-muting does not click)
     for (let s = 0; s < n; s++) {
-      const t = now + s * dt;
-      // apply writes that are due (all of them if no clock mapping yet)
-      while (this.rd < wr) {
-        const j = (this.rd % RING) * 2, et = F[j];
-        if (this.offset != null) { const at = (et - this.offset) / 1000 + this.lat; if (at > t) break; }
-        const p = F[j + 1]; this.write(p >> 8, p & 0xFF); this.rd++;
+      if (this.offset == null) {
+        // no clock mapping yet: apply every write
+        while (this.rd < wr) { const j = (this.rd % RING) * 2, p = F[j + 1]; this.write(p >> 8, p & 0xFF); this.rd++; }
+      } else {
+        // where playing is on the music's timeline at this sample
+        const at = now + s * dt - this.lag;
+        // the writes this instant has reached, in the order they were made; a muted output still consumes them, so
+        // the music keeps its place and carries on from there when the sound comes back
+        // (a writer discarding the oldest writes mid-block, should the ring fill, is taken at the next block: at
+        // most one block's worth could be read meanwhile, and it corrects itself)
+        while (this.rd < wr) {
+          const j = (this.rd % RING) * 2;
+          if (this.when(F[j]) > at) break;
+          const p = F[j + 1]; this.write(p >> 8, p & 0xFF); this.rd++;
+        }
+        if (speed !== 1) { this.lag += lagStep; if (this.lag <= 0) this.lag = 0; }   // (the lag paid off: no overshoot)
       }
       // the chip's samples, linearly interpolated to the output's rate
       this.chipT += step;
@@ -202,8 +278,11 @@ class OPL extends AudioWorkletProcessor {
       const y = (this.y0 + (this.y1 - this.y0) * this.chipT) / 4096 * 0.18;
       // the card's output stage: a DC-blocking high pass, then the page's volume
       this.dc += (y - this.dc) * 0.0005;
-      L[s] = Math.max(-1, Math.min(1, (y - this.dc) * this.vol));
+      this.gain += (this.vol - this.gain) * gl;
+      L[s] = Math.max(-1, Math.min(1, (y - this.dc) * this.gain));
     }
+    this.ran = true;
+    this.publishRead();
     for (let i = 1; i < out.length; i++) out[i].set(L);
     return true;
   }
