@@ -132,9 +132,11 @@ function forEachSegment(dataView, callback) {
 }
 
 /**
- * Get orientation value from given array buffer.
- * @param {ArrayBuffer} arrayBuffer - The array buffer to read.
- * @returns {number} The read orientation value.
+ * Reset the Exif orientation tag of the given array buffer to its default
+ * value (1), mutating the buffer in place.
+ * @param {ArrayBuffer} arrayBuffer - The array buffer to update.
+ * @returns {number|undefined} The original orientation value, or `undefined`
+ *   when no Exif orientation tag is present.
  */
 export function resetOrientation(arrayBuffer) {
   const dataView = new DataView(arrayBuffer);
@@ -367,7 +369,109 @@ export function getExif(arrayBuffer) {
 }
 
 /**
+ * Override the Orientation tag (0x0112) inside an Exif APP1 segment copy with
+ * its default value (1). Leaves every other Exif field untouched.
+ * @param {DataView} dataView - The data view containing the segment.
+ * @param {number} start - The segment start (the APP1 marker byte).
+ * @param {number} end - The segment end, exclusive.
+ */
+function normalizeExifOrientation(dataView, start, end) {
+  try {
+    if (end - start < 18 || getStringFromCharCode(dataView, start + 4, 4) !== 'Exif') {
+      return;
+    }
+
+    const tiffOffset = start + 10;
+    const endianness = dataView.getUint16(tiffOffset);
+    const littleEndian = endianness === 0x4949;
+
+    if (!littleEndian && endianness !== 0x4D4D /* bigEndian */) {
+      return;
+    }
+
+    if (dataView.getUint16(tiffOffset + 2, littleEndian) !== 0x002A) {
+      return;
+    }
+
+    const firstIFDOffset = dataView.getUint32(tiffOffset + 4, littleEndian);
+
+    if (firstIFDOffset < 0x00000008) {
+      return;
+    }
+
+    const ifdStart = tiffOffset + firstIFDOffset;
+    const length = dataView.getUint16(ifdStart, littleEndian);
+
+    for (let i = 0; i < length; i += 1) {
+      const entry = ifdStart + (i * 12) + 2;
+
+      if (dataView.getUint16(entry, littleEndian) === 0x0112 /* Orientation */) {
+        // 8 is the offset of the current tag’s value
+        dataView.setUint16(entry + 8, 1, littleEndian);
+        return;
+      }
+    }
+  } catch {
+    // Ignore malformed Exif data; the segment is retained as-is
+  }
+}
+
+/**
+ * Extract the Exif segments from a JPEG with the Orientation tag reset to 1.
+ * The browser already straightens the pixels when decoding an oriented image
+ * (via `image-orientation: from-image`), so the retained metadata must claim
+ * orientation 1 to match the re-encoded pixels. Only the returned copy is
+ * modified; the source array buffer is left untouched.
+ * @param {ArrayBuffer} arrayBuffer - The array buffer to read.
+ * @returns {Array} The Exif information with orientation normalized to 1.
+ */
+export function getNormalizedExif(arrayBuffer) {
+  const dataView = new DataView(arrayBuffer);
+  const exifSegments = [];
+
+  forEachSegment(dataView, (type, start, end) => {
+    // APP1 marker (EXIF, XMP, and other APP1 payloads)
+    if (type === 0xE1) {
+      exifSegments.push({ start, end });
+    }
+  });
+
+  if (exifSegments.length === 0) {
+    return [];
+  }
+
+  const totalLength = exifSegments.reduce((sum, { start, end }) => sum + (end - start), 0);
+  const exifBuffer = new ArrayBuffer(totalLength);
+  const exifView = new DataView(exifBuffer);
+  const source = new Uint8Array(arrayBuffer);
+  const target = new Uint8Array(exifBuffer);
+  let offset = 0;
+
+  for (const { start, end } of exifSegments) {
+    target.set(source.subarray(start, end), offset);
+    offset += end - start;
+  }
+
+  // Reset orientation within the copied Exif segment(s), not the source data
+  let copyOffset = 0;
+
+  for (const { start, end } of exifSegments) {
+    const segmentLength = end - start;
+
+    normalizeExifOrientation(exifView, copyOffset, copyOffset + segmentLength);
+    copyOffset += segmentLength;
+  }
+
+  return Array.from(target);
+}
+
+/**
  * Insert Exif information into the given array buffer.
+ *
+ * The Exif segment is placed right after the SOI marker and before every
+ * other segment, whether or not an APP0 (JFIF) segment is present. This is
+ * the position the JPEG specification prescribes for APP1 and keeps the
+ * output a well-formed, decodable JPEG.
  * @param {ArrayBuffer} arrayBuffer - The array buffer to transform.
  * @param {Array} exifArray - The Exif information to insert.
  * @returns {Uint8Array} The transformed array as Uint8Array.
@@ -376,29 +480,22 @@ export function insertExif(arrayBuffer, exifArray) {
   const dataView = new DataView(arrayBuffer);
   const uint8 = new Uint8Array(arrayBuffer);
 
-  // Check for APP0 marker (JFIF)
-  if (dataView.getUint8(2) !== 0xFF || dataView.getUint8(3) !== 0xE0) {
+  if (!isJPEG(dataView) || exifArray.length === 0) {
     return uint8;
   }
 
-  const app0Length = dataView.getUint16(4);
-  const restStart = 4 + app0Length;
-  const restLength = uint8.byteLength - restStart;
-
-  // Create new buffer: SOI (2) + EXIF + rest of image
-  const result = new Uint8Array(2 + exifArray.length + restLength);
+  // Create new buffer: SOI (2) + EXIF + the rest of the image, unchanged
+  const result = new Uint8Array(2 + exifArray.length + uint8.byteLength - 2);
 
   // SOI marker
   result[0] = 0xFF;
   result[1] = 0xD8;
 
-  // EXIF data
-  for (let i = 0; i < exifArray.length; i += 1) {
-    result[2 + i] = exifArray[i];
-  }
+  // EXIF data, directly after SOI and before any other segment
+  result.set(Uint8Array.from(exifArray), 2);
 
-  // Rest of image (skip SOI and APP0)
-  result.set(uint8.subarray(restStart), 2 + exifArray.length);
+  // Everything that followed SOI (APP0, other APP segments, scan data, …)
+  result.set(uint8.subarray(2), 2 + exifArray.length);
 
   return result;
 }

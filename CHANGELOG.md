@@ -4,6 +4,13 @@ All notable changes to Compressor.js Next are documented in this file, which is 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+* Fixed `retainExif: true` output ending up with a mismatched orientation: the source image’s orientation tag was rewritten to 1 in place before the browser decoded it, while the same tag was then re-inserted into the output. EXIF extraction now normalizes orientation on a private copy, so the browser still straightens the source pixels and the output carries orientation 1 with all other Exif fields intact, without mutating the source file
+* Fixed EXIF insertion giving up on JPEGs whose first segment after SOI is not APP0 (JFIF). The Exif segment is now inserted directly after SOI and before every other segment for any valid JPEG, and the output remains a decodable JPEG
+
 ## [3.0.1] - 2026-10-02
 
 ### Changed

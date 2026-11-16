@@ -1,4 +1,5 @@
 .vitest-attachments/
+.vitest/
 __screenshots__/
 coverage/
 dist/

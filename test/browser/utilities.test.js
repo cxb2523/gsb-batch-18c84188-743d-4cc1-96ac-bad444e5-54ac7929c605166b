@@ -9,6 +9,8 @@ import {
   exifPayload,
   xmpPayload,
   readOrientation,
+  walkJpegSegments,
+  removeApp0,
 } from './helpers.js';
 
 const {
@@ -21,6 +23,7 @@ const {
   normalizeDecimalNumber,
   getAdjustedSizes,
   getExif,
+  getNormalizedExif,
   insertExif,
   stripExif,
   uint8ArrayToBlob,
@@ -242,28 +245,177 @@ describe('utilities', () => {
     });
   });
 
+  describe('getNormalizedExif', () => {
+    it('should return an empty array for non-JPEG data', () => {
+      const buffer = new Uint8Array([0x89, 0x50, 0x4E, 0x47]).buffer; // PNG signature
+
+      expect(getNormalizedExif(buffer)).toEqual([]);
+    });
+
+    it('should return an empty array for a JPEG without EXIF', () => {
+      const buffer = buildJpeg([jpegSegment(0xE0, [0x4A, 0x46, 0x49, 0x46, 0x00])]);
+
+      expect(getNormalizedExif(buffer)).toEqual([]);
+    });
+
+    it('should reset the orientation tag to 1 while keeping the segment', () => {
+      const buffer = buildJpeg([jpegSegment(0xE1, exifPayload(6))]);
+      const result = getNormalizedExif(buffer);
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(readOrientation(result)).toBe(1);
+    });
+
+    it('should normalize orientation across all APP1 segments, including an XMP-first layout', () => {
+      const buffer = buildJpeg([
+        jpegSegment(0xE1, xmpPayload()),
+        jpegSegment(0xE1, exifPayload(8)),
+      ]);
+      const result = getNormalizedExif(buffer);
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(readOrientation(result)).toBe(1);
+    });
+
+    it('should leave the source buffer untouched', () => {
+      const buffer = buildJpeg([jpegSegment(0xE1, exifPayload(6))]);
+      const bytesBefore = new Uint8Array(buffer).slice();
+
+      getNormalizedExif(buffer);
+
+      expect(new Uint8Array(buffer)).toEqual(bytesBefore);
+      expect(readOrientation(getExif(buffer))).toBe(6);
+    });
+
+    it('should not read past a truncated JPEG ending in fill bytes', () => {
+      const buffer = Uint8Array.from([0xFF, 0xD8, 0xFF, 0xFF, 0xFF, 0xFF]).buffer;
+
+      expect(() => getNormalizedExif(buffer)).not.toThrow();
+      expect(getNormalizedExif(buffer)).toEqual([]);
+    });
+
+    it('should reset any non-identity orientation to 1, including 3', () => {
+      const buffer = buildJpeg([jpegSegment(0xE1, exifPayload(3))]);
+
+      expect(readOrientation(getNormalizedExif(buffer))).toBe(1);
+    });
+
+    it('should keep a non-Exif APP1 (XMP) segment byte-for-byte', () => {
+      const buffer = buildJpeg([
+        jpegSegment(0xE1, xmpPayload()),
+        jpegSegment(0xE1, exifPayload(6)),
+      ]);
+      const result = getNormalizedExif(buffer);
+      const xmpSegment = jpegSegment(0xE1, xmpPayload());
+
+      // The XMP segment (the first APP1) is copied without modification
+      expect(result.slice(0, xmpSegment.length)).toEqual(Array.from(xmpSegment));
+      expect(readOrientation(result)).toBe(1);
+    });
+  });
+
   describe('insertExif', () => {
-    it('should return original buffer if no APP0 marker', () => {
-      const buffer = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE1]).buffer; // No APP0
-      const result = insertExif(buffer, []);
+    it('should return the original bytes for non-JPEG data', () => {
+      const buffer = new Uint8Array([0x89, 0x50, 0x4E, 0x47]).buffer; // PNG signature
+      const result = insertExif(buffer, jpegSegment(0xE1, exifPayload(1)));
 
       expect(result).toBeInstanceOf(Uint8Array);
       expect(result.length).toBe(4);
+      expect(result[0]).toBe(0x89);
     });
 
-    it('should handle empty exifArray', () => {
-      // Minimal JPEG with APP0
-      const buffer = new Uint8Array([
-        0xFF, 0xD8, // SOI
-        0xFF, 0xE0, // APP0 marker
-        0x00, 0x02, // APP0 length (2 bytes)
-        0xFF, 0xD9, // EOI
-      ]).buffer;
+    it('should return the original bytes when there is no EXIF to insert', () => {
+      const buffer = buildJpeg([jpegSegment(0xE0, [0x4A, 0x46, 0x49, 0x46, 0x00])]);
       const result = insertExif(buffer, []);
 
       expect(result).toBeInstanceOf(Uint8Array);
+      expect(result).toEqual(new Uint8Array(buffer));
+    });
+
+    it('should insert EXIF after SOI when an APP0 segment follows SOI', () => {
+      const app0 = jpegSegment(0xE0, [0x4A, 0x46, 0x49, 0x46, 0x00]);
+      const exif = jpegSegment(0xE1, exifPayload(1));
+      const buffer = buildJpeg([app0]);
+      const result = insertExif(buffer, Array.from(exif));
+      const segments = walkJpegSegments(result.buffer);
+
       expect(result[0]).toBe(0xFF);
       expect(result[1]).toBe(0xD8);
+      expect(segments[0].type).toBe(0xE1);
+      expect(segments[1].type).toBe(0xE0);
+      expect(result.length).toBe(buffer.byteLength + exif.length);
+    });
+
+    it('should insert EXIF after SOI when no APP0 segment is present', () => {
+      const exif = jpegSegment(0xE1, exifPayload(6));
+      // APP2 first: neither SOI+APP0 nor SOI+APP1 initially
+      const app2 = jpegSegment(0xE2, [0x49, 0x43, 0x43, 0x00]);
+      const buffer = buildJpeg([app2]);
+      const result = insertExif(buffer, Array.from(exif));
+      const segments = walkJpegSegments(result.buffer);
+
+      expect(result[0]).toBe(0xFF);
+      expect(result[1]).toBe(0xD8);
+      expect(segments[0].type).toBe(0xE1);
+      expect(segments[1].type).toBe(0xE2);
+      expect(result.length).toBe(buffer.byteLength + exif.length);
+    });
+
+    it('should insert EXIF before an existing APP1-first JPEG and keep the structure valid', () => {
+      const existingExif = jpegSegment(0xE1, xmpPayload());
+      const newExif = jpegSegment(0xE1, exifPayload(1));
+      const buffer = buildJpeg([existingExif]);
+      const result = insertExif(buffer, Array.from(newExif));
+      const segments = walkJpegSegments(result.buffer);
+
+      expect(result[0]).toBe(0xFF);
+      expect(result[1]).toBe(0xD8);
+      expect(segments[0].type).toBe(0xE1);
+      expect(segments[1].type).toBe(0xE1);
+      expect(segments[2].type).toBe(0xDA);
+    });
+
+    it('should keep every non-EXIF byte of the original JPEG intact', () => {
+      const app0 = jpegSegment(0xE0, [0x4A, 0x46, 0x49, 0x46, 0x00]);
+      const app2 = jpegSegment(0xE2, [0x49, 0x43, 0x43, 0x00, 0x01, 0x02]);
+      const exif = jpegSegment(0xE1, exifPayload(1));
+      const buffer = buildJpeg([app0, app2]);
+      const result = insertExif(buffer, Array.from(exif));
+      const original = new Uint8Array(buffer);
+
+      // Everything after SOI must reappear verbatim after the inserted segment
+      expect(result.subarray(2 + exif.length)).toEqual(original.subarray(2));
+    });
+
+    it('should produce a decodable JPEG when the source has no APP0', async () => {
+      const blob = await loadImageAsBlob(TEST_IMAGE);
+      const withoutApp0 = removeApp0(await blob.arrayBuffer());
+      const segmentsBefore = walkJpegSegments(withoutApp0);
+
+      expect(segmentsBefore[0].type).not.toBe(0xE0);
+
+      const exif = getNormalizedExif(await blob.arrayBuffer());
+      const result = insertExif(withoutApp0, exif);
+      const resultBlob = new Blob([result], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(resultBlob);
+
+      try {
+        await new Promise((resolve, reject) => {
+          const image = new Image();
+
+          image.onload = resolve;
+          image.onerror = () => reject(new Error('Result JPEG failed to decode.'));
+          image.src = url;
+        });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+
+      const segmentsAfter = walkJpegSegments(result.buffer);
+
+      expect(result[0]).toBe(0xFF);
+      expect(result[1]).toBe(0xD8);
+      expect(segmentsAfter[0].type).toBe(0xE1);
     });
   });
 

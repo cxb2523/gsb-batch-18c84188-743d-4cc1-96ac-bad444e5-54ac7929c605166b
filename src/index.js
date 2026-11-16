@@ -9,8 +9,7 @@ import {
   isImageType,
   isPositiveNumber,
   normalizeDecimalNumber,
-  resetOrientation,
-  getExif,
+  getNormalizedExif,
   insertExif,
   stripExif,
   uint8ArrayToBlob,
@@ -131,10 +130,12 @@ export default class Compressor {
       this.readAsArrayBuffer(file, {
         subject: 'image',
         onData: (arrayBuffer) => {
-          // Normalize EXIF orientation to 1 before extracting, since the browser
-          // handles rotation natively via `image-orientation: from-image`
-          resetOrientation(arrayBuffer);
-          this.exif = getExif(arrayBuffer);
+          // Extract the EXIF segments with the Orientation tag reset to 1.
+          // The browser straightens the pixels natively while decoding
+          // (`image-orientation: from-image`), so the retained metadata must
+          // claim orientation 1 to match the re-encoded pixels. The source
+          // buffer—and thus the blob the browser decodes—is left untouched.
+          this.exif = getNormalizedExif(arrayBuffer);
           this.url = URL.createObjectURL(file);
           this.load({
             url: this.url,
