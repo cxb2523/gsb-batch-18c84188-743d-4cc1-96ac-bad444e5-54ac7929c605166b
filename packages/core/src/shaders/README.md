@@ -173,7 +173,12 @@ coverage only if RCAS performance becomes material.
 - **Current status:** Deliberate divergence, measured (2026-07-21, NEXT-STEPS item 1).
 - **Local implementation:** Sharpens the accumulate history's conditioned tonemap-space
   texels directly (bounded [0,1), the range the limiter math assumes) and inverts the
-  conditioning once on the result.
+  conditioning once on the result. The `1×1` exposure texel is sampled once per pixel,
+  ahead of the five taps, and both resolve divisions reuse that one value (2026-11-17).
+  It stays the guarded divisor (`max(…, 1e-4)`) rather than a folded reciprocal:
+  `x * (1 / e)` is not bit-identical to `x / e` in IEEE-754, so folding it would move
+  output texels. The reciprocal-fold shape remains the `RCAS_HOISTED_EXPOSURE_SHADER`
+  benchmark candidate.
 - **FSR 3.1.5 behavior:** Sharpens in exposed linear space (applies `Exposure()` per
   load, reverses it after).
 - **Why it differs / evidence — Measured:** The per-tap inversion form (five
@@ -274,8 +279,12 @@ coverage only if RCAS performance becomes material.
   in linear space against the darkest ring tap (the *Lobe ceiling* above, issue #50;
   the linear taps are at hand, so it needs no inversion). Until 2026-10-03 the upper
   bound was `max5 · 1/(1 − 4·RCAS_LIMIT·peak)`; the ceiling is never looser.
-  - **The anchor:** a zero lobe passes the EASU texel through bit-exact, and texels
-    past `tonemapInvert`'s 0.999 clamp (linear ~1000) are not flattened to ~1000.
+  - **The anchor:** a zero lobe passes the EASU texel through to within one f16 ULP.
+    The expression is exact in real arithmetic, but the two `tonemapInvert`s round
+    independently: a 2026-11-17 GPU sweep of 64 solid tiles (10⁻³…999, sharpness 1)
+    read 51 bit-exact and 13 one ULP low, none worse, identical before and after the
+    exposure hoist. Texels past `tonemapInvert`'s 0.999 clamp (linear ~1000) are not
+    flattened to ~1000.
   - **The cap:** it stops isolated peaks that overshoot the conditioned range from
     inverting to ~1000× (unguarded, a lone 0.5 on near-black became 1303 at
     sharpness 1). It also stops converged HDR edges overshooting ~2× (a 64 plateau

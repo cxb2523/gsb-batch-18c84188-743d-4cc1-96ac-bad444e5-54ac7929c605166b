@@ -690,7 +690,7 @@ That is about **17 source texture operations per output pixel**. An active react
 
 #### RCAS or blit
 
-RCAS visibly performs five input loads. Its helper also loads the same exposure texel per tap on the temporal path, giving ten source texture expressions. A compiler may hoist or merge the invariant exposure loads, so **five input plus one-to-five exposure operations** is the honest range. See `../../packages/core/src/shaders/rcas.ts:36-61`.
+RCAS visibly performs five input loads, plus one load of the same 1×1 exposure texel per pixel on the temporal path (sampled once, ahead of the taps, and reused by both resolve divisions since 2026-11-17; the frozen per-tap forms still load it per tap), giving **six source texture operations** for production. See `../../packages/core/src/shaders/rcas.ts`.
 
 Blit has one filtered input sample and one exposure load on the temporal path. See `../../packages/core/src/shaders/blit.ts:30-45`.
 

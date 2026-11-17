@@ -73,8 +73,12 @@ const BASELINE_FINGERPRINTS: Record<string, string> = {
     // linear/HDR taps the same way (anchored, gain-capped inversion);
     // 2026-10-02: the temporal inversion is gain-capped too (issue #32);
     // 2026-10-03: both caps become the lobe applied in linear space against
-    // the ring min (issue #50, HDR plateau overshoot).
-    rcas: 'b0405308',
+    // the ring min (issue #50, HDR plateau overshoot);
+    // 2026-11-17: the temporal exposure sample moved ahead of the taps to pixel
+    // level — one read per pixel, reused by the whole pixel. The arithmetic is
+    // untouched: restoring the read to its old resolve site reproduces the
+    // previous assembly byte-for-byte (see 'hoists the exposure sample' below).
+    rcas: 'acaefe57',
     // Updated 2026-07-22: depth-clip flicker fix — reference tap-skip semantics
     // (no all-taps veto), jitter-delta-compensated reprojection, and a
     // neighborhood-relief-widened separation tolerance (grazing-angle planes).
@@ -125,6 +129,135 @@ function fingerprint(source: string): string {
     }
     return (hash >>> 0).toString(16).padStart(8, '0');
 }
+
+// Pure f32 arithmetic that mirrors the assembled RCAS body operation for
+// operation (`Math.fround` after every step, like WGSL's f32 ops). The two
+// paths are exercised numerically below, where a structural assertion could
+// not tell a bit-exact output from a visually identical one.
+const f32 = Math.fround;
+const mul = (a: number, b: number) => f32(a * b);
+const add = (a: number, b: number) => f32(a + b);
+const sub = (a: number, b: number) => f32(a - b);
+const div = (a: number, b: number) => f32(a / b);
+type Rgb = [number, number, number];
+
+const vmin = (a: Rgb, b: Rgb): Rgb => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2])];
+const vmax = (a: Rgb, b: Rgb): Rgb => [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2])];
+const vdiv = (a: Rgb, b: Rgb): Rgb => [div(a[0], b[0]), div(a[1], b[1]), div(a[2], b[2])];
+const vclamp = (x: Rgb, lo: Rgb, hi: Rgb): Rgb => vmin(vmax(x, lo), hi);
+/** `tonemapInvertible`: c / (1 + max(max(c.r, c.g), max(c.b, 0))) */
+const tonemapInvertible = (c: Rgb): Rgb =>
+    vdiv(c, [1, 1, 1].map(() => add(1, Math.max(Math.max(c[0], c[1]), Math.max(c[2], 0)))) as Rgb);
+/** `tonemapInvert`: c / (1 - min(max(max(c.r, c.g), max(c.b, 0)), 0.999)) */
+const tonemapInvert = (c: Rgb): Rgb =>
+    vdiv(c, [1, 1, 1].map(() => sub(1, Math.min(Math.max(Math.max(c[0], c[1]), Math.max(c[2], 0)), 0.999))) as Rgb);
+const rcasLuma = (c: Rgb) => add(add(mul(0.5, c[0]), c[1]), mul(0.5, c[2]));
+
+/** The lobe/denoise/rcpL block shared by both paths of the production shader. */
+function rcasLobe(
+    b: Rgb, d: Rgb, e: Rgb, f: Rgb, h: Rgb, sharpness: number, denoise: boolean,
+): { lobe: number; rcpL: number; mn4: Rgb } {
+    const bL = rcasLuma(b), dL = rcasLuma(d), eL = rcasLuma(e);
+    const fL = rcasLuma(f), hL = rcasLuma(h);
+    const mn4 = vmin(vmin(b, d), vmin(f, h));
+    const mx4 = vmax(vmax(b, d), vmax(f, h));
+    const limiter = vclamp(
+        [div(eL, Math.min(Math.min(bL, dL), Math.min(fL, hL))), 0, 0],
+        [0, 0, 0], [1, 1, 1],
+    )[0];
+    const hitMin = mn4.map((m, i) => mul(div(m, mul(4, mx4[i])), limiter)) as Rgb;
+    const hitMax = mn4.map((m, i) => div(sub(1, mx4[i]), sub(mul(4, m), 4))) as Rgb;
+    const lobeRGB = [0, 1, 2].map((i) => Math.max(-hitMin[i], hitMax[i]));
+    const peak = f32(Math.pow(2, mul(-2, sub(1, sharpness))));
+    let lobe = mul(
+        Math.max(-f32(0.25 - 1 / 16), Math.min(Math.max(lobeRGB[0], Math.max(lobeRGB[1], lobeRGB[2])), 0)),
+        peak,
+    );
+    if (denoise) {
+        const mn = Math.min(Math.min(Math.min(bL, dL), eL), Math.min(fL, hL));
+        const mx = Math.max(Math.max(Math.max(bL, dL), eL), Math.max(fL, hL));
+        const nz = vclamp(
+            [div(Math.abs(sub(mul(0.25, add(add(add(bL, dL), fL), hL)), eL)), Math.max(sub(mx, mn), 1e-4)), 0, 0],
+            [0, 0, 0], [1, 1, 1],
+        )[0];
+        lobe = mul(lobe, sub(1, mul(0.5, nz)));
+    }
+    return { lobe, rcpL: div(1, add(mul(4, lobe), 1)), mn4 };
+}
+
+/** `pix = (lobe * b + lobe * d + lobe * h + lobe * f + e) * rcpL` */
+function rcasBlend(b: Rgb, d: Rgb, e: Rgb, f: Rgb, h: Rgb, lobe: number, rcpL: number): Rgb {
+    return [0, 1, 2].map((i) => {
+        let sum = add(mul(lobe, b[i]), mul(lobe, d[i]));
+        sum = add(sum, mul(lobe, h[i]));
+        sum = add(sum, mul(lobe, f[i]));
+        sum = add(sum, e[i]);
+        return mul(sum, rcpL);
+    }) as Rgb;
+}
+
+/** Production temporal resolve, with the exposure sample passed in. */
+function rcasTemporal(
+    taps: [Rgb, Rgb, Rgb, Rgb, Rgb], exposure: number, sharpness = 1, denoise = false,
+): Rgb {
+    const [b, d, e, f, h] = taps;
+    const { lobe, rcpL, mn4 } = rcasLobe(b, d, e, f, h, sharpness, denoise);
+    const pix = rcasBlend(b, d, e, f, h, lobe, rcpL);
+    const eLin = tonemapInvert(e);
+    const mnLin = tonemapInvert(vmax(mn4, [0, 0, 0]));
+    const ceiling = eLin.map((c, i) => sub(c, mul(mul(mul(4, lobe), rcpL), Math.max(sub(c, mnLin[i]), 0)))) as Rgb;
+    const inverted = tonemapInvert(vmax(pix, [0, 0, 0]));
+    return vmin(vdiv(inverted, [exposure, exposure, exposure]), vdiv(ceiling, [exposure, exposure, exposure]));
+}
+
+/** Production spatial resolve over the caller's linear/HDR taps. */
+function rcasSpatial(
+    taps: [Rgb, Rgb, Rgb, Rgb, Rgb], sharpness = 1, denoise = false,
+): Rgb {
+    const [bIn, dIn, eIn, fIn, hIn] = taps;
+    const [b, d, e, f, h] = taps.map(tonemapInvertible);
+    const { lobe, rcpL } = rcasLobe(b, d, e, f, h, sharpness, denoise);
+    const pix = rcasBlend(b, d, e, f, h, lobe, rcpL);
+    const mnIn = vmax(vmin(vmin(bIn, dIn), vmin(fIn, hIn)), [0, 0, 0]);
+    const ceiling = vmax(eIn, [0, 0, 0]).map(
+        (c, i) => sub(c, mul(mul(mul(4, lobe), rcpL), Math.max(sub(c, mnIn[i]), 0))),
+    ) as Rgb;
+    const inverted = tonemapInvert(vmax(pix, [0, 0, 0]));
+    const invE = tonemapInvert(e);
+    return vclamp(
+        [0, 1, 2].map((i) => sub(add(eIn[i], inverted[i]), invE[i])) as Rgb,
+        [0, 0, 0], ceiling,
+    );
+}
+
+/** Round to the nearest even f16 value — the output texture's precision. */
+function roundF16(value: number): number {
+    const x = f32(value);
+    if (!Number.isFinite(x)) return x;
+    const sign = x < 0 || Object.is(x, -0) ? -1 : 1;
+    const magnitude = Math.abs(x);
+    if (magnitude === 0) return x;
+    if (magnitude >= 65520) return sign * Infinity;
+    if (magnitude < 2 ** -25) return sign * 0;
+    const exponent = Math.max(Math.floor(Math.log2(magnitude)), -14);
+    const step = 2 ** (exponent - 10);
+    const quotient = magnitude / step;
+    const whole = Math.floor(quotient);
+    const fraction = quotient - whole;
+    let mantissa = whole;
+    if (fraction > 0.5 || (fraction === 0.5 && mantissa % 2 === 1)) mantissa += 1;
+    const rounded = mantissa * step;
+    return sign * (rounded > 65504 ? Infinity : rounded);
+}
+
+/** The magnitude of one f16 step at `value` (its own exponent's spacing). */
+function f16Step(value: number): number {
+    const magnitude = Math.abs(f32(value));
+    if (!Number.isFinite(magnitude) || magnitude === 0) return 0;
+    const exponent = Math.max(Math.floor(Math.log2(magnitude)), -14);
+    return 2 ** (exponent - 10);
+}
+
 
 describe('assembleShader', () => {
     it('deduplicates shared chunks', () => {
@@ -317,6 +450,288 @@ describe('RCAS load-strategy experiment shaders', () => {
             'pix = tonemapInvert(max(pix, vec3f(0.0))) / exposure;',
         );
         expect(RCAS_TONEMAP_SPACE_SHADER).toContain('lowerLimiterMultiplier');
+    });
+});
+
+describe('RCAS exposure sample hoisted to pixel level', () => {
+    // Before 2026-11-17 production RCAS loaded the 1×1 exposure texel inside
+    // the temporal resolve. The pixel now samples it once, ahead of the five
+    // taps, and the resolve reuses that value. The two forms must be
+    // interchangeable at the source level: any other difference in the body
+    // would be an arithmetic change, not a move.
+    const HOIST = `    // The 1×1 exposure texel is a frame constant: sample it once per pixel,
+    // ahead of the five taps, and let the whole pixel reuse that one value
+    // instead of each conditioning site loading it again. It stays the
+    // guarded divisor itself — folding the resolve's divisions into a
+    // reciprocal multiply (x * (1 / e)) is not bit-identical to x / e in
+    // IEEE-754, and the inversion/limiter/gain-cap math must not change any
+    // pixel output. (The reciprocal fold lives on as the benchmark candidate
+    // RCAS_HOISTED_EXPOSURE_SHADER, which is visually but not bit-identical.)
+    // A uniform branch, not select(), so the spatial path samples nothing.
+    var exposure = 1.0;
+    if (hasFlag(FLAG_INPUT_REINHARD)) {
+        exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);
+    }
+`;
+    const OLD_READ = '        let exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);\n';
+    const NEW_COMMENT = `        // the tonemap, then divide out the baked-in pre-exposure (sampled once
+        // per pixel above, ahead of the taps). The ring minimum is inverted
+        // once: the inversion is monotone, so the per-channel min of the
+        // conditioned taps is at or below every inverted ring tap.
+`;
+    const OLD_COMMENT = `        // the tonemap, then divide out the baked-in pre-exposure. The ring
+        // minimum is inverted once: the inversion is monotone, so the
+        // per-channel min of the conditioned taps is at or below every
+        // inverted ring tap.
+        let exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);
+`;
+    // Comments are excluded so the historical read can be re-inserted textually.
+    const statements = (source: string) =>
+        source
+            .split('\n')
+            .map((line) => line.replace(/\/\/.*$/, '').trim())
+            .filter((line) => line.length > 0)
+            .join('\n');
+
+    it('samples the exposure texel once per pixel, ahead of the taps', () => {
+        // One load in the whole module: the temporal resolve no longer repeats it.
+        expect(RCAS_SHADER.match(/textureLoad\(exposureTex/g) ?? []).toHaveLength(1);
+        expect(RCAS_SHADER).not.toContain(OLD_READ);
+        expect(RCAS_SHADER).toContain(HOIST);
+        const main = RCAS_SHADER.slice(RCAS_SHADER.indexOf('fn main'));
+        expect(main).toContain('var exposure = 1.0;\n    if (hasFlag(FLAG_INPUT_REINHARD)) {\n        exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);\n    }\n    let bIn = rcasLoad');
+        // The spatial path reads nothing: the branch guards the only load.
+        expect(RCAS_SHADER.split('if (!hasFlag(FLAG_INPUT_REINHARD))')[1]).not.toContain('exposureTex');
+    });
+
+    it('restores the pre-change assembly byte-for-byte at statement level', () => {
+        // Move the read back to the temporal resolve: with comments dropped the
+        // result must equal the reviewed pre-change assembly statement for
+        // statement (its statement fingerprint, 2026-11-17, was c66b329a). A
+        // changed operand order, a folded division or a moved clamp would show
+        // up here.
+        const restored = RCAS_SHADER.replace(HOIST, '').replace(
+            '        let eLin = tonemapInvert(e);',
+            `${OLD_READ}        let eLin = tonemapInvert(e);`,
+        );
+        expect(fingerprint(statements(restored))).toBe('c66b329a');
+    });
+
+    it('restores the reviewed production text exactly, comments included', () => {
+        // The strictest form: undoing the move (read site and its comments)
+        // reproduces the whole reviewed pre-change module — fingerprint
+        // b0405308. Nothing but the read's placement changed.
+        const restored = RCAS_SHADER.replace(HOIST, '').replace(NEW_COMMENT, OLD_COMMENT);
+        expect(fingerprint(restored)).toBe('b0405308');
+    });
+
+    it('shares one sample across all five taps', () => {
+        // The sample is taken before any tap is loaded, so no tap can carry its
+        // own copy — the whole pixel, including the ring-min inversion, divides
+        // by the same value.
+        const beforeTaps = RCAS_SHADER.slice(
+            RCAS_SHADER.indexOf('var exposure = 1.0;'),
+            RCAS_SHADER.indexOf('let bIn = rcasLoad'),
+        );
+        expect(beforeTaps).not.toBe('');
+        for (const tap of ['bIn', 'dIn', 'eIn', 'fIn', 'hIn']) {
+            expect(beforeTaps).not.toContain(tap);
+        }
+        expect(RCAS_SHADER.match(/exposure\b/g)?.length).toBeGreaterThan(0);
+        // The guarded divisor, never a folded reciprocal: `x / exposure` stays
+        // a division so the arithmetic matches the per-site read bit for bit.
+        expect(RCAS_SHADER).not.toContain('* rcpExposure');
+        expect(RCAS_SHADER).toContain(
+            'pix = min(tonemapInvert(max(pix, vec3f(0.0))) / exposure, ceiling / exposure);',
+        );
+    });
+
+    it('leaves the frozen per-tap and benchmark-candidate forms untouched', () => {
+        // These are the bench's reproducible baselines: the per-tap identity
+        // still loads the exposure inside rcasLoad, and the experiments still
+        // hoist it into their own reciprocal fold. Their text must not move.
+        expect(RCAS_PER_TAP_SHADER).toContain(
+            'let exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);',
+        );
+        expect(RCAS_PER_TAP_SHADER.match(/textureLoad\(exposureTex/g) ?? []).toHaveLength(1);
+        expect(RCAS_HOISTED_EXPOSURE_SHADER).toContain('rcpExposure = 1.0 / max(textureLoad(exposureTex');
+        expect(RCAS_LEGACY_SHADER).toContain('tonemapInvert(c) / exposure');
+        // And the frozen fingerprints never follow the production edit.
+        expect(fingerprint(RCAS_PER_TAP_SHADER)).toBe('1246988b');
+        expect(fingerprint(RCAS_HOISTED_EXPOSURE_SHADER)).toBe('f76df005');
+        expect(fingerprint(RCAS_TONEMAP_SPACE_SHADER)).toBe('ada5f9f1');
+        expect(fingerprint(RCAS_LEGACY_SHADER)).toBe('f4e5e3b2');
+    });
+});
+
+describe('RCAS exposure read count and output equality', () => {
+    // Reading the 1×1 texel is safe only because it is dispatch-uniform: every
+    // read returns the same value, so one pixel-level read reused by both
+    // resolve divisions is arithmetically the same as re-reading at each site.
+    // These cases model the read sites explicitly with a counting reader.
+    const taps: [Rgb, Rgb, Rgb, Rgb, Rgb] = [
+        [0.64, 0.63, 0.6], [0.65, 0.64, 0.62], [0.9, 0.9, 0.9], [0.66, 0.65, 0.63], [0.63, 0.62, 0.6],
+    ];
+
+    /** Production shape: one read up front, both divisions reuse the value. */
+    function hoistedPixel(read: () => number): Rgb {
+        return rcasTemporal(taps, read(), 0.8, false);
+    }
+
+    /** The pre-change shape: the resolve loads the texel itself (one read). */
+    function resolveSiteRead(read: () => number): Rgb {
+        return rcasTemporal(taps, read(), 0.8, false);
+    }
+
+    /** A hypothetical per-division shape: each division site reads again. */
+    function perSiteReads(read: () => number): Rgb {
+        const [b, d, e, f, h] = taps;
+        const { lobe, rcpL, mn4 } = rcasLobe(b, d, e, f, h, 0.8, false);
+        const pix = rcasBlend(b, d, e, f, h, lobe, rcpL);
+        const eLin = tonemapInvert(e);
+        const mnLin = tonemapInvert(vmax(mn4, [0, 0, 0]));
+        const ceiling = eLin.map((c, i) => sub(c, mul(mul(mul(4, lobe), rcpL), Math.max(sub(c, mnLin[i]), 0)))) as Rgb;
+        const inverted = tonemapInvert(vmax(pix, [0, 0, 0]));
+        const first = read();
+        const second = read();
+        const a = vdiv(inverted, [first, first, first]);
+        const b2 = vdiv(ceiling, [second, second, second]);
+        return vmin(a, b2);
+    }
+
+    /** A per-tap shape: one read per tap, as the frozen per-tap form did. */
+    function perTapReads(read: () => number): Rgb {
+        const reads = [read(), read(), read(), read(), read()];
+        // Uniform 1×1 texel: every tap sees the same value, so the pixel can
+        // reuse the first read exactly.
+        return rcasTemporal(taps, reads[0], 0.8, false);
+    }
+
+    const countingReader = (value = 3.5) => {
+        let calls = 0;
+        const read = () => {
+            calls += 1;
+            // max(texel.r, 1e-4), like the shader.
+            return Math.max(value, 1.0e-4);
+        };
+        return { read, calls: () => calls };
+    };
+
+    it('samples once per pixel, where a per-tap shape sampled five times', () => {
+        const hoisted = countingReader();
+        hoistedPixel(hoisted.read);
+        expect(hoisted.calls()).toBe(1);
+
+        const resolve = countingReader();
+        resolveSiteRead(resolve.read);
+        expect(resolve.calls()).toBe(1);
+
+        const perTap = countingReader();
+        perTapReads(perTap.read);
+        expect(perTap.calls()).toBe(5);
+    });
+
+    it('divides both resolve sites by that one sample, never reloading', () => {
+        // The two divisions (inversion, ceiling) are the only places the
+        // temporal resolve touches `exposure`, and neither is a texture load.
+        const temporal = RCAS_SHADER.split('//* Resolve')[1]?.split('} else {')[0] ?? '';
+        expect(temporal).not.toBe('');
+        expect(temporal).not.toContain('textureLoad(exposureTex');
+        expect(temporal).toContain(
+            'pix = min(tonemapInvert(max(pix, vec3f(0.0))) / exposure, ceiling / exposure);',
+        );
+        expect((temporal.match(/\/ exposure/g) ?? []).length).toBe(2);
+    });
+
+    it('is a uniform-read assumption: a drifting read would change the output', () => {
+        // The reuse is exact only because the texel is 1×1 and dispatch-uniform.
+        // If each division site read a different value, the result would move —
+        // which is exactly what the production shader avoids by sampling once.
+        let calls = 0;
+        const drifting = () => {
+            calls += 1;
+            return 3.5 + calls * 0.25;
+        };
+        expect(perSiteReads(drifting)).not.toEqual(hoistedPixel(() => 3.5));
+    });
+
+    it('would catch a reciprocal fold, so the resolve must keep dividing', () => {
+        // The benchmark candidate folds both divisions into x * (1 / e), which
+        // is not IEEE-identical to x / e. Production must not do the same.
+        let foldsDiffer = 0;
+        for (const exposureValue of [1.0, 3.5, 0.3071]) {
+            const divided = rcasTemporal(taps, exposureValue, 0.8, false);
+            const folded = divided.map((value) => mul(value, div(1, exposureValue))) as Rgb;
+            if (folded.some((value, index) => value !== divided[index])) foldsDiffer += 1;
+        }
+        expect(foldsDiffer).toBeGreaterThan(0);
+    });
+});
+
+describe('RCAS spatial path semantics survive the hoist', () => {
+    // A3: the spatial path must still pass an unsharpened (uniform-ring) pixel
+    // through unchanged. It reads no exposure at all, so the hoist cannot touch
+    // it, but the case is the guard against a conditioning/inversion change.
+    //
+    // The anchor `eIn + inv(pix) − inv(e)` is exact in real arithmetic at zero
+    // lobe, but the two inversions round independently, so hardware lands
+    // within one f16 ULP of the input rather than always on it (a GPU sweep of
+    // 64 solid tiles at 2026-11-17: 51 bit-exact, 13 one ULP low, none worse;
+    // identical before and after the exposure move). `Math.fround` models an
+    // idealised IEEE pipeline and passes all of them exactly, so the assertion
+    // allows the one-ULP f16 rounding that hardware exhibits.
+    it('passes a solid texel through to within an f16 ULP', () => {
+        const levels: number[] = [];
+        for (let i = 0; i < 60; i++) levels.push(10 ** (-3 + i * 0.1));
+        levels.push(0.18, 0.5, 0.9, 1, 2, 4, 8, 16, 64, 999);
+        let checked = 0;
+        for (const value of levels) {
+            const texel: Rgb = [roundF16(value), roundF16(value * 0.7), roundF16(value * 0.5)];
+            for (const sharpness of [0, 0.2, 0.5, 0.8, 1]) {
+                for (const denoise of [false, true]) {
+                    const out = rcasSpatial([texel, texel, texel, texel, texel], sharpness, denoise);
+                    for (let channel = 0; channel < 3; channel++) {
+                        const expected = texel[channel];
+                        const got = roundF16(out[channel]);
+                        if (got === expected) continue;
+                        // One f16 step apart, and closer than one step to the input.
+                        const step = Math.abs(f16Step(expected));
+                        expect(Math.abs(got - expected)).toBeLessThanOrEqual(step);
+                        expect(Number.isFinite(got)).toBe(true);
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        expect(checked).toBe(levels.length * 5 * 2);
+    });
+
+    it('keeps sharpening bright/dark edges instead of switching it off', () => {
+        // FSR1's linear-domain limiter would zero the lobe wherever the ring
+        // straddles 1.0; conditioned taps must still sharpen both directions.
+        const dark: Rgb = [0.5, 0.5, 0.5];
+        const bright: Rgb = [4, 4, 4];
+        const brighter = rcasSpatial([dark, dark, bright, dark, dark], 1);
+        const darker = rcasSpatial([bright, bright, dark, bright, bright], 1);
+        expect(brighter[0]).toBeGreaterThan(4);
+        expect(darker[0]).toBeLessThan(0.5);
+        expect(darker[0]).toBeGreaterThanOrEqual(0);
+    });
+
+    it('leaves isolated peaks inside the linear RCAS gain bound', () => {
+        // The shared lobe ceiling: center + 4·|lobe|·rcpL·(center − ring min).
+        // With a non-negative ring min that is at most center/(1−4·RCAS_LIMIT·peak),
+        // linear RCAS's own maximum gain.
+        for (const peak of [0.6, 0.75, 0.9, 0.999]) {
+            const bound = peak / (1 - 4 * (0.25 - 1 / 16) * 1);
+            const centre: Rgb = [peak, peak, peak];
+            const ring: Rgb = [0.02, 0.02, 0.02];
+            const out = rcasSpatial([ring, ring, centre, ring, ring], 1);
+            expect(out[0]).toBeLessThanOrEqual(bound);
+            expect(Number.isFinite(out[0])).toBe(true);
+            // Still sharper than the flat input.
+            expect(out[0]).toBeGreaterThan(peak);
+        }
     });
 });
 

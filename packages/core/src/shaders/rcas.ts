@@ -24,6 +24,14 @@ import { assembleShader } from './wgsl';
  * linear space against the darkest ring tap (issues #32, #50): the limiter
  * keeps the result inside the conditioned range, but that range ends at
  * linear infinity, so near 1 it bounds nothing in linear terms.
+ *
+ * The production form samples the 1×1 exposure texture once per pixel, up
+ * front, before the five taps; the resolve reuses that pixel's sample. The
+ * sample stays the guarded divisor itself: folding the resolve's divisions
+ * into a reciprocal multiply (`x * (1 / e)`) is not bit-identical to `x / e`
+ * in IEEE-754, so the inversion, limiter and gain cap would change pixel
+ * outputs. The reciprocal-fold variant remains available as
+ * `RCAS_HOISTED_EXPOSURE_SHADER` for benchmark comparison.
  */
 function createRcasShader(fsr315NumericParity: boolean, conditionedInput = false): string {
     const luma = fsr315NumericParity
@@ -100,11 +108,10 @@ fn rcasLoad(p : vec2i) -> vec3f {
     // edges and isolated peaks and leaves ordinary edges bit-exact.
     if (hasFlag(FLAG_INPUT_REINHARD)) {
         // Undo the accumulate conditioning once on the sharpened result: invert
-        // the tonemap, then divide out the baked-in pre-exposure. The ring
-        // minimum is inverted once: the inversion is monotone, so the
-        // per-channel min of the conditioned taps is at or below every
-        // inverted ring tap.
-        let exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);
+        // the tonemap, then divide out the baked-in pre-exposure (sampled once
+        // per pixel above, ahead of the taps). The ring minimum is inverted
+        // once: the inversion is monotone, so the per-channel min of the
+        // conditioned taps is at or below every inverted ring tap.
         let eLin = tonemapInvert(e);
         let mnLin = tonemapInvert(max(mn4, vec3f(0.0)));
         let ceiling = eLin - 4.0 * lobe * rcpL * max(eLin - mnLin, vec3f(0.0));
@@ -128,7 +135,20 @@ fn rcasLoad(p : vec2i) -> vec3f {
         : /* wgsl */ `
     let pix = (lobe * b + lobe * d + lobe * h + lobe * f + e) * rcpL;`;
     const taps = conditionedInput
-        ? /* wgsl */ `    let bIn = rcasLoad(sp + vec2i(0, -1));
+        ? /* wgsl */ `    // The 1×1 exposure texel is a frame constant: sample it once per pixel,
+    // ahead of the five taps, and let the whole pixel reuse that one value
+    // instead of each conditioning site loading it again. It stays the
+    // guarded divisor itself — folding the resolve's divisions into a
+    // reciprocal multiply (x * (1 / e)) is not bit-identical to x / e in
+    // IEEE-754, and the inversion/limiter/gain-cap math must not change any
+    // pixel output. (The reciprocal fold lives on as the benchmark candidate
+    // RCAS_HOISTED_EXPOSURE_SHADER, which is visually but not bit-identical.)
+    // A uniform branch, not select(), so the spatial path samples nothing.
+    var exposure = 1.0;
+    if (hasFlag(FLAG_INPUT_REINHARD)) {
+        exposure = max(textureLoad(exposureTex, vec2i(0), 0).r, 1.0e-4);
+    }
+    let bIn = rcasLoad(sp + vec2i(0, -1));
     let dIn = rcasLoad(sp + vec2i(-1, 0));
     let eIn = rcasLoad(sp);
     let fIn = rcasLoad(sp + vec2i(1, 0));
