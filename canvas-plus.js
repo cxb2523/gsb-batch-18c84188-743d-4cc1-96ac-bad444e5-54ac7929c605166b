@@ -4789,9 +4789,9 @@
     }
   });
 
-  // ../pixl-class/class.js
+  // node_modules/pixl-class/class.js
   var require_class = __commonJS({
-    "../pixl-class/class.js"(exports2) {
+    "node_modules/pixl-class/class.js"(exports2) {
       init_esbuild_shims();
       var util = require_util();
       var events = require_events();
@@ -4869,9 +4869,9 @@
     }
   });
 
-  // ../pixl-perf/perf.js
+  // node_modules/pixl-perf/perf.js
   var require_perf = __commonJS({
-    "../pixl-perf/perf.js"(exports2, module2) {
+    "node_modules/pixl-perf/perf.js"(exports2, module2) {
       init_esbuild_shims();
       var Class2 = require_class();
       module2.exports = Class2.create({
@@ -17358,25 +17358,29 @@
           var edge_repeat = edges.match(/repeat/i);
           var edge_wrap = edges.match(/wrap/i);
           var edge_mirror = edges.match(/mirror/i);
-          var clip = opts.clip || this.getBounds();
-          if (!this.isValidRect(clip)) return this.doError("convolve", "Invalid clipping rectangle");
-          var pixels = this.context.getImageData(clip.x, clip.y, clip.width, clip.height);
+          var canvas_width = this.canvas.width;
+          var canvas_height = this.canvas.height;
+          var clip = opts.clip || { x: 0, y: 0, width: canvas_width, height: canvas_height };
+          if (!this.isValidRect(clip, canvas_width, canvas_height) || clip.x + clip.width > canvas_width || clip.y + clip.height > canvas_height) {
+            return this.doError("convolve", "Invalid clipping rectangle");
+          }
+          var pixels = this.context.getImageData(0, 0, canvas_width, canvas_height);
           var weights = opts.matrix;
           var offset = opts.offset || 0;
           var m = Math;
           var side = m.round(m.sqrt(weights.length));
           var halfSide = m.floor(side / 2);
           var src = pixels.data;
-          var sw = pixels.width;
-          var sh = pixels.height;
-          var w = sw;
-          var h = sh;
+          var sw = canvas_width;
+          var sh = canvas_height;
+          var w = clip.width;
+          var h = clip.height;
           var output = this.context.getImageData(clip.x, clip.y, clip.width, clip.height);
           var dst = output.data;
           for (var y = 0; y < h; y++) {
             for (var x = 0; x < w; x++) {
-              var sy = y;
-              var sx = x;
+              var sy = clip.y + y;
+              var sx = clip.x + x;
               var dstOff = (y * w + x) * 4;
               var r = 0, g = 0, b = 0, a = 0;
               for (var cy = 0; cy < side; cy++) {
@@ -26433,16 +26437,18 @@
         height: function() {
           return this.settings.height;
         },
-        isValidRect: function(rect) {
+        isValidRect: function(rect, maxWidth, maxHeight) {
           if (!("x" in rect) || !("y" in rect) || !("width" in rect) || !("height" in rect)) return false;
           if (typeof rect.x != "number" || typeof rect.y != "number") return false;
           if (typeof rect.width != "number" || typeof rect.width != "number") return false;
           if (rect.x != Math.floor(rect.x) || rect.y != Math.floor(rect.y)) return false;
           if (rect.width != Math.floor(rect.width) || rect.height != Math.floor(rect.height)) return false;
-          if (rect.x < 0 || rect.x >= this.width()) return false;
-          if (rect.y < 0 || rect.y >= this.height()) return false;
+          if (maxWidth === void 0) maxWidth = this.width();
+          if (maxHeight === void 0) maxHeight = this.height();
+          if (rect.x < 0 || rect.x >= maxWidth) return false;
+          if (rect.y < 0 || rect.y >= maxHeight) return false;
           if (rect.width < 1 || rect.height < 1) return false;
-          if (rect.width > this.width() || rect.height > this.height()) return false;
+          if (rect.width > maxWidth || rect.height > maxHeight) return false;
           return true;
         },
         parseColor: function(str) {

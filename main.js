@@ -264,17 +264,21 @@ var CanvasPlus = module.exports = Class.create({
 	width: function() { return this.settings.width; },
 	height: function() { return this.settings.height; },
 	
-	isValidRect: function(rect) {
+	isValidRect: function(rect, maxWidth, maxHeight) {
 		// validate rectangle
+		// optional maxWidth/maxHeight override the bounds to check against
+		// (defaults to current image dimensions)
 		if (!("x" in rect) || !("y" in rect) || !("width" in rect) || !("height" in rect)) return false;
 		if ((typeof(rect.x) != 'number') || (typeof(rect.y) != 'number')) return false;
 		if ((typeof(rect.width) != 'number') || (typeof(rect.width) != 'number')) return false;
 		if ((rect.x != Math.floor(rect.x)) || (rect.y != Math.floor(rect.y))) return false;
 		if ((rect.width != Math.floor(rect.width)) || (rect.height != Math.floor(rect.height))) return false;
-		if ((rect.x < 0) || (rect.x >= this.width())) return false;
-		if ((rect.y < 0) || (rect.y >= this.height())) return false;
+		if (maxWidth === undefined) maxWidth = this.width();
+		if (maxHeight === undefined) maxHeight = this.height();
+		if ((rect.x < 0) || (rect.x >= maxWidth)) return false;
+		if ((rect.y < 0) || (rect.y >= maxHeight)) return false;
 		if ((rect.width < 1) || (rect.height < 1)) return false;
-		if ((rect.width > this.width()) || (rect.height > this.height())) return false;
+		if ((rect.width > maxWidth) || (rect.height > maxHeight)) return false;
 		return true;
 	},
 	
