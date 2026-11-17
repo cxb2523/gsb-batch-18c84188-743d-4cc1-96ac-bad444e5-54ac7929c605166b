@@ -12,13 +12,15 @@ class GaussianBlurrer
   kernelSizeArray: number[];
   luminosity_high_pass_mat: LuminosityHighPassMaterial;
   nMips: number;
+  radius: number;
   renderTargetBright: RenderTarget;
   renderTargetsHorizontal: Array<RenderTarget>;
   renderTargetsVertical: Array<RenderTarget>;
+  resolution_scale: number;
   rt_pars: RenderTargetOptions;
   separableBlurMaterials: Array<GaussianBlurMaterial>;
   use_half_float: boolean;
-  
+
   constructor(use_half_float = false)
   {
     this.current_width = 1;
@@ -30,6 +32,12 @@ class GaussianBlurrer
     this.use_half_float = use_half_float;
     this.nMips = 5;
     this.kernelSizeArray = [3, 5, 7, 9, 11];
+
+    // The radius is expressed in logical pixels. resolution_scale converts it to
+    // render target texels, so the glow keeps the same on-screen range when the
+    // render resolution changes (e.g. a higher DPR).
+    this.radius = 1;
+    this.resolution_scale = 1;
 
     this.rt_pars = {
       minFilter: LinearFilter,
@@ -116,8 +124,8 @@ class GaussianBlurrer
     this.current_width = texture_width;
     this.current_height = texture_height;
 
-    let width = Math.round(texture_width / 2);
-    let height = Math.round(texture_height / 2);
+    let width = Math.max(1, Math.round(texture_width / 2));
+    let height = Math.max(1, Math.round(texture_height / 2));
 
     this.renderTargetBright.setSize(width, height);
 
@@ -127,8 +135,8 @@ class GaussianBlurrer
       this.renderTargetsHorizontal[i].setSize(width, height);
       this.separableBlurMaterials[i].set_size(width, height);
 
-      width   = Math.round(width / 2);
-      height  = Math.round(height / 2);
+      width   = Math.max(1, Math.round(width / 2));
+      height  = Math.max(1, Math.round(height / 2));
     }
   }
 
@@ -144,9 +152,28 @@ class GaussianBlurrer
 
   set_radius(value: number)
   {
+    this.radius = value;
+    this.__apply_radius();
+  }
+
+  set_resolution_scale(scale: number)
+  {
+    if (this.resolution_scale === scale)
+    {
+      return;
+    }
+
+    this.resolution_scale = scale;
+    this.__apply_radius();
+  }
+
+  __apply_radius()
+  {
+    const scaled_radius = this.radius * this.resolution_scale;
+
     for (let i = 0; i < this.separableBlurMaterials.length; i++)
     {
-      this.separableBlurMaterials[i].set_radius(value);
+      this.separableBlurMaterials[i].set_radius(scaled_radius);
     }
   }
 

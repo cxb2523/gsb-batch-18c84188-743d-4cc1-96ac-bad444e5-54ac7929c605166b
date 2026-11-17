@@ -4,6 +4,7 @@ import { Mesh, PlaneGeometry } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 
 import { Graphics } from '../../src/Graphics';
+import { OScreen } from '../../src/OScreen';
 import { SceneManager } from '../../src/SceneManager';
 import { BaseRender } from '../../src/render_mode/BaseRender';
 import { NormalRender } from '../../src/render_mode/NormalRender';
@@ -102,6 +103,51 @@ for (const backend of BACKENDS)
       const bloomed = render_with(create_bloom());
       expect(bloomed.luminance(HORIZONTAL_GLOW_PROBE)).toBeGreaterThan(20);
       expect(bloomed.luminance(VERTICAL_GLOW_PROBE)).toBeGreaterThan(20);
+    });
+
+    it('spreads the same on-screen glow range for the same radius at 1x and 2x pixel density', () =>
+    {
+      const bloom_1x = new UnrealBloomRender(false, false, false, true);
+      const glow_1x = render_with(bloom_1x, () => bloom_1x.set_bloom_radius(1)).luminance(HORIZONTAL_GLOW_PROBE);
+
+      // Same logical size at twice the pixel density: the render targets double.
+      OScreen.dpr = 2;
+      OScreen.update_size(SIZE, SIZE);
+
+      const bloom_2x = new UnrealBloomRender(false, false, false, true);
+      const glow_2x = render_with(bloom_2x, () => bloom_2x.set_bloom_radius(1)).luminance(HORIZONTAL_GLOW_PROBE);
+
+      // The radius the user set is scaled to the denser render targets.
+      expect(bloom_2x.blurrer.resolution_scale).toBe(2);
+      expect(bloom_2x.blurrer.separableBlurMaterials[0].uniforms.radius.value).toBe(2);
+
+      expect(glow_1x).toBeGreaterThan(20);
+      expect(glow_2x).toBeGreaterThan(glow_1x * 0.5);
+      expect(glow_2x).toBeLessThan(glow_1x * 1.5);
+    });
+
+    it('keeps every blur target at a positive integer size when the render size gets tiny', () =>
+    {
+      OScreen.update_size(2, 2);
+
+      const bloom = create_bloom();
+      render_with(bloom);
+
+      expect(harness.reported_errors).toEqual([]);
+
+      const targets = [
+        bloom.blurrer.renderTargetBright,
+        ...bloom.blurrer.renderTargetsHorizontal,
+        ...bloom.blurrer.renderTargetsVertical
+      ];
+
+      for (const target of targets)
+      {
+        expect(Number.isInteger(target.width)).toBe(true);
+        expect(Number.isInteger(target.height)).toBe(true);
+        expect(target.width).toBeGreaterThanOrEqual(1);
+        expect(target.height).toBeGreaterThanOrEqual(1);
+      }
     });
 
     it('adds no glow at zero bloom strength', () =>

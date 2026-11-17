@@ -171,14 +171,15 @@ blur(RT, use_luminosity_high_pass)
 
 | Method | Description |
 |--------|-------------|
-| `set_radius(value)` | Scales the tap spacing of every mip's blur. Default `1`. |
+| `set_radius(value)` | Sets the blur radius in logical pixels. The tap spacing of every mip is scaled by `resolution_scale`, so the glow keeps the same on-screen range at any render resolution. Default `1`. |
+| `set_resolution_scale(scale)` | Render texels per logical pixel. `UnrealBloomRender` derives it from `OScreen` every frame; set it directly only when driving the blurrer yourself. Default `1`. |
 | `set_luminosity_threshold(value)` | Sets the high pass threshold (0–1). Default `0.23`. |
 
 #### Resources
 
 | Method | Description |
 |--------|-------------|
-| `resize_RT(width, height)` | Resizes every target and blur material for an input of that size. Called by `blur()`; it does nothing when the size matches the last one. |
+| `resize_RT(width, height)` | Resizes every target and blur material for an input of that size. Called by `blur()`; it does nothing when the size matches the last one. Every mip size is a whole pixel count of at least 1×1, even for tiny inputs. |
 | `init_RT()` / `init_materials()` | Dispose and rebuild the mip targets or the blur materials. The constructor calls both. |
 | `dispose_RT()` / `dispose_materials()` | Dispose the targets or the blur materials. There is no `dispose()`, and neither of them frees `luminosity_high_pass_mat`. |
 

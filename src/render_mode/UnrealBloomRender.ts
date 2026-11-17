@@ -126,6 +126,10 @@ class UnrealBloomRender extends BaseRender
     {
       this.main_RT.setSize(width, height);
     }
+
+    // The bloom radius is set in logical pixels. Scale it by the render target's
+    // pixel density so the glow spans the same on-screen range at any DPR.
+    this.blurrer.set_resolution_scale(width / Math.max(1, OScreen.width));
   }
 }
 

@@ -8,9 +8,11 @@ declare class GaussianBlurrer {
     kernelSizeArray: number[];
     luminosity_high_pass_mat: LuminosityHighPassMaterial;
     nMips: number;
+    radius: number;
     renderTargetBright: RenderTarget;
     renderTargetsHorizontal: Array<RenderTarget>;
     renderTargetsVertical: Array<RenderTarget>;
+    resolution_scale: number;
     rt_pars: RenderTargetOptions;
     separableBlurMaterials: Array<GaussianBlurMaterial>;
     use_half_float: boolean;
@@ -22,6 +24,8 @@ declare class GaussianBlurrer {
     resize_RT(texture_width: number, texture_height: number): void;
     init_materials(): void;
     set_radius(value: number): void;
+    set_resolution_scale(scale: number): void;
+    __apply_radius(): void;
     set_luminosity_threshold(value: number): void;
     dispose_materials(): void;
     dispose_RT(): void;

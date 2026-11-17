@@ -135,7 +135,7 @@ Unreal-style bloom. It renders the scene to `main_RT`, then runs a five-mip Gaus
 | Method | Description |
 |--------|-------------|
 | `set_bloom_strength(val)` | Scales the composed bloom. Default `1`. |
-| `set_bloom_radius(val)` | Sets the radius of the blurrer's separable blur materials. |
+| `set_bloom_radius(val)` | Sets the blurrer's radius in logical pixels. The render mode scales it by the render target's pixel density, so the glow spans the same on-screen range at any DPR. |
 | `set_luminosity_threshold(value)` | Sets the high pass threshold (0–1). Default `0.23`. Only affects the frame when `use_hight_luminosity_pass` is `true`. |
 | `set_tint_color_0(col_string)` … `set_tint_color_4(col_string)` | Tints one mip, from finest (`0`) to widest (`4`). Takes any string `Color.set()` accepts, such as `'#ff8800'`. Default white. |
 

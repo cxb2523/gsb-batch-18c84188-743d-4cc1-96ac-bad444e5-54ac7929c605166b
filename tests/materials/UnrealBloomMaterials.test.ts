@@ -163,4 +163,41 @@ describe('GaussianBlurrer', () =>
     expect(blurrer.separableBlurMaterials.every((material) => material.uniforms.radius.value === 3)).toBe(true);
     expect(blurrer.luminosity_high_pass_mat.uniforms.luminosityThreshold.value).toBe(0.7);
   });
+
+  it('scales the blur radius by the render pixel density', () =>
+  {
+    const blurrer = new GaussianBlurrer();
+
+    blurrer.set_radius(1.5);
+    expect(blurrer.separableBlurMaterials.every((material) => material.uniforms.radius.value === 1.5)).toBe(true);
+
+    blurrer.set_resolution_scale(2);
+    expect(blurrer.separableBlurMaterials.every((material) => material.uniforms.radius.value === 3)).toBe(true);
+
+    blurrer.set_radius(1);
+    expect(blurrer.separableBlurMaterials.every((material) => material.uniforms.radius.value === 2)).toBe(true);
+
+    blurrer.set_resolution_scale(1);
+    expect(blurrer.separableBlurMaterials.every((material) => material.uniforms.radius.value === 1)).toBe(true);
+  });
+
+  it('keeps every target at a positive integer size, even for tiny inputs', () =>
+  {
+    const blurrer = new GaussianBlurrer();
+
+    for (const [width, height] of [[64, 64], [3, 1], [2, 2], [1, 1], [0, 0]])
+    {
+      blurrer.resize_RT(width, height);
+
+      const targets = [blurrer.renderTargetBright, ...blurrer.renderTargetsHorizontal, ...blurrer.renderTargetsVertical];
+
+      for (const target of targets)
+      {
+        expect(Number.isInteger(target.width)).toBe(true);
+        expect(Number.isInteger(target.height)).toBe(true);
+        expect(target.width).toBeGreaterThanOrEqual(1);
+        expect(target.height).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
 });
