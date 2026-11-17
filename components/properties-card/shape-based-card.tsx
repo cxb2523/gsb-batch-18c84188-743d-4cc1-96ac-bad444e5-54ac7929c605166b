@@ -292,6 +292,8 @@ export default function ShapeBasedCard({
     UndoRedoService.push({
       type: UndoRedoEventType.DELETE,
       index,
+      //restore onto the live shape so undo keeps its identity (texts need that)
+      target: Store.allShapes[index] ?? null,
       shape: {
         from: fromShape,
         to: toShape,

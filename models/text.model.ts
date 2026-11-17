@@ -17,6 +17,17 @@ class TextModel {
   fontFamily: string;
   stackIndex: number;
   isSelected: boolean = false;
+  //stable identity shared between the canvas shape and its html input
+  id: string;
+  //true while the text is being edited through the html input element
+  isEditing: boolean = false;
+
+  private static nextId = 0;
+
+  static generateId() {
+    TextModel.nextId++;
+    return `text-${TextModel.nextId}`;
+  }
 
   setIsSelected(isSelected: boolean) {
     this.isSelected = isSelected;
@@ -29,7 +40,8 @@ class TextModel {
     fontSize: number,
     fontColor: StrokeColor,
     fontFamily: string,
-    stackIndex: number
+    stackIndex: number,
+    id?: string
   ) {
     this.x = x;
     this.y = y;
@@ -38,6 +50,7 @@ class TextModel {
     this.fontColor = fontColor;
     this.fontFamily = fontFamily;
     this.stackIndex = stackIndex;
+    this.id = id ?? TextModel.generateId();
   }
 
   static TEXT_DIV_TAG = 'text-input';
@@ -52,7 +65,7 @@ class TextModel {
   ) {
     if (mouseRef.current.down) {
       //get input elements count for stack index
-      const inputElements = parentRef.current?.querySelectorAll(`.${TextModel.TEXT_DIV_TAG}`);
+      const inputElements = TextModel.getInputElements(parentRef.current as HTMLElement);
       const inputElement = TextModel.createInput(
         mouseRef.current.x,
         mouseRef.current.y,
@@ -61,7 +74,7 @@ class TextModel {
         selectedFontFamily,
         parentRef.current?.clientWidth as number,
         parentRef.current?.clientHeight as number,
-        stackIndex + (inputElements?.length || 0)
+        stackIndex + inputElements.length
       );
 
       parentRef.current?.appendChild(inputElement);
@@ -169,7 +182,8 @@ class TextModel {
     fontFamily: string,
     screenWidth: number,
     screenHeight: number,
-    stackIndex: number
+    stackIndex: number,
+    id?: string
   ) {
     const inputElement = document.createElement('div');
     inputElement.className = TextModel.TEXT_DIV_TAG;
@@ -185,6 +199,11 @@ class TextModel {
     inputElement.style.fontFamily = fontFamily;
     inputElement.style.backgroundColor = 'transparent';
     inputElement.dataset.stackIndex = stackIndex.toString();
+    const textId = id ?? TextModel.generateId();
+    inputElement.dataset.textId = textId;
+    //an input created by the text tool has no canvas shape behind it yet, it must survive
+    //the reconciliation pass until it is switched away from
+    if (!id) inputElement.dataset.pending = 'true';
 
     inputElement.oninput = () => {
       //   move the input element to the left if it exceeds the screen width
@@ -203,64 +222,145 @@ class TextModel {
     return inputElement;
   }
 
-  static convertToCanvas(parentDiv: HTMLElement) {
-    const allChildren = Array.from(parentDiv.children);
-
-    const inputElements = allChildren.filter((child) => {
+  static getInputElements(parentDiv: HTMLElement) {
+    if (!parentDiv) return [];
+    return Array.from(parentDiv.children).filter((child) => {
       return child.className === TextModel.TEXT_DIV_TAG;
-    });
+    }) as HTMLDivElement[];
+  }
 
-    //convert input elements to canvas elements
+  static readInputText(input: HTMLDivElement) {
+    //contenteditable may leave a trailing newline or non breaking spaces behind
+    return input.innerText.replace(/\u00a0/g, ' ').replace(/\n$/, '');
+  }
+
+  static convertToCanvas(parentDiv: HTMLElement) {
+    //convert html input elements to canvas text shapes, one undo entry per text
+    const inputElements = TextModel.getInputElements(parentDiv);
+
     inputElements.forEach((inputElement) => {
       const input = inputElement as HTMLDivElement;
+      const textValue = TextModel.readInputText(input);
+      const id = input.dataset.textId;
+      const x = parseInt(input.style.left) || 0;
+      const y = parseInt(input.style.top) || 0;
+      const fontSize = parseInt(input.style.fontSize) || 30;
+
+      parentDiv.removeChild(inputElement);
+
+      const existingText = id ? Store.getTextById(id) : null;
+
+      if (textValue.trim().length === 0) {
+        //an empty input never becomes a shape; if it backed an existing text, keep that
+        //object so Store.filterEmptyShapes can drop it together with its history
+        if (existingText) {
+          existingText.text = textValue;
+          existingText.isEditing = false;
+        }
+        return;
+      }
+
+      if (existingText) {
+        //the user edited an existing text: keep the very same object so every undo entry
+        //that references it (and the selection) stays valid
+        existingText.x = x;
+        existingText.y = y;
+        existingText.text = textValue;
+        existingText.fontSize = fontSize;
+        existingText.fontColor = input.style.color as StrokeColor;
+        existingText.fontFamily = input.style.fontFamily;
+        existingText.isEditing = false;
+        existingText.stackIndex = Store.allShapes.indexOf(existingText);
+        return;
+      }
+
+      const stackIndex = Store.allShapes.length;
       const text = new TextModel(
-        parseInt(input.style.left),
-        parseInt(input.style.top),
-        input.innerText,
-        parseInt(input.style.fontSize),
+        x,
+        y,
+        textValue,
+        fontSize,
         input.style.color as StrokeColor,
         input.style.fontFamily,
-        parseInt(input.dataset.stackIndex!)
+        stackIndex,
+        id
       );
 
-      const stackIndex = parseInt(input.dataset.stackIndex!);
       Store.allShapes.splice(stackIndex, 0, text);
-      UndoRedoService.push(
-        {
-          type: UndoRedoEventType.CREATE,
-          index: stackIndex,
-          shape: {
-            from: null,
-            to: text,
-          },
+      UndoRedoService.push({
+        type: UndoRedoEventType.CREATE,
+        index: stackIndex,
+        shape: {
+          from: null,
+          to: text,
         },
-        stackIndex
-      );
-      parentDiv.removeChild(inputElement);
+      });
+    });
+
+    //texts that no longer have an input are canvas shapes again
+    const remainingIds = new Set(
+      TextModel.getInputElements(parentDiv)
+        .map((input) => input.dataset.textId)
+        .filter((id): id is string => typeof id === 'string')
+    );
+    Store.getTextShapes().forEach((text) => {
+      if (!remainingIds.has(text.id)) {
+        text.isEditing = false;
+        text.stackIndex = Store.allShapes.indexOf(text);
+      }
     });
   }
 
   static convertToHtml(parentDiv: HTMLElement) {
-    //convert canvas elements to input elements
-    const texts = Store.allShapes.filter((shape) => shape instanceof TextModel) as TextModel[];
-    texts.forEach((text) => {
-      const input = TextModel.createInput(
-        text.x,
-        text.y,
-        text.fontSize,
-        text.fontColor,
-        text.fontFamily,
-        parentDiv.clientWidth,
-        parentDiv.clientHeight,
-        text.stackIndex
-      );
-      input.innerText = text.text;
-      parentDiv.appendChild(input);
+    //convert canvas text shapes to html input elements, keeping the shapes in the store
+    //so undo/redo entries that reference them stay valid
+    const inputById = new Map<string, HTMLDivElement>();
+    TextModel.getInputElements(parentDiv).forEach((input) => {
+      const id = input.dataset.textId;
+      if (id && !inputById.has(id)) inputById.set(id, input);
     });
 
-    //clear all texts
-    Store.allShapes = Store.allShapes.filter((shape) => !(shape instanceof TextModel));
-    UndoRedoService.removeAllTexts();
+    Store.getTextShapes().forEach((text) => {
+      const stackIndex = Store.allShapes.indexOf(text);
+      let input = inputById.get(text.id);
+
+      if (!input) {
+        input = TextModel.createInput(
+          text.x,
+          text.y,
+          text.fontSize,
+          text.fontColor,
+          text.fontFamily,
+          parentDiv.clientWidth,
+          parentDiv.clientHeight,
+          stackIndex,
+          text.id
+        );
+        input.innerText = text.text;
+        parentDiv.appendChild(input);
+      } else {
+        inputById.delete(text.id);
+        //keep programmatic state in sync without fighting the user while typing
+        if (document.activeElement !== input && input.innerText !== text.text) {
+          input.innerText = text.text;
+        }
+        input.style.left = `${text.x}px`;
+        input.style.top = `${text.y}px`;
+        input.style.fontSize = `${text.fontSize}px`;
+        input.style.color = text.fontColor;
+        input.style.fontFamily = text.fontFamily;
+      }
+
+      text.isEditing = true;
+      text.stackIndex = stackIndex;
+    });
+
+    //inputs whose text shape no longer exists (for example removed by an undo) must go away;
+    //pending inputs are the ones the text tool just created and have no shape yet
+    inputById.forEach((input) => {
+      if (input.dataset.pending === 'true') return;
+      parentDiv.removeChild(input);
+    });
   }
 
   static isAnyTextFocused(parentDiv: HTMLElement) {

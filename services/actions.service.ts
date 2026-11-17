@@ -53,9 +53,12 @@ class ActionsService {
         break;
       case TextModel:
         {
+          //the copy is a distinct text, give it its own identity so undo can tell them apart
           const text = copiedShape as TextModel;
           text.x += this.offset;
           text.y += this.offset;
+          text.id = TextModel.generateId();
+          text.isEditing = false;
         }
         break;
     }
@@ -64,12 +67,18 @@ class ActionsService {
     copiedShape.isSelected = true;
     Store.allShapes.push(copiedShape);
 
+    //a copy is a single CREATE record; undoing it must bring the selection back to the
+    //original shape instead of leaving both texts unselected
     UndoRedoService.push({
       type: UndoRedoEventType.CREATE,
       index: Store.allShapes.length - 1,
       shape: {
         from: null,
         to: copiedShape,
+      },
+      selection: {
+        undo: selectedShape,
+        redo: copiedShape,
       },
     });
   }
@@ -86,12 +95,17 @@ class ActionsService {
     const index = shapes.indexOf(selectedShape);
     shapes.splice(index, 1);
 
+    //a delete is a single DELETE record; undoing it restores the text and its selection
     UndoRedoService.push({
       type: UndoRedoEventType.DELETE,
       index,
       shape: {
         from: selectedShape,
         to: null,
+      },
+      selection: {
+        undo: selectedShape,
+        redo: null,
       },
     });
   }

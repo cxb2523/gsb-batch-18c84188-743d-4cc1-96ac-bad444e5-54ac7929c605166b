@@ -38,6 +38,8 @@ class MoveService {
       UndoRedoService.push({
         type: UndoRedoEventType.MOVE,
         index: Store.allShapes.indexOf(selectedShape),
+        //undo/redo restores onto this live object so the shape keeps its identity
+        target: selectedShape,
         shape: {
           from: fromShape,
           //decouple the shape when mouse is up to store the final state after moving

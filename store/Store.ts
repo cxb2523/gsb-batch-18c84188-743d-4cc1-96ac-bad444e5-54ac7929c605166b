@@ -36,13 +36,27 @@ class Store {
         return line.x1 !== line.x2 || line.y1 !== line.y2;
       case TextModel:
         const text = shape as TextModel;
-        return text.text.length > 0;
+        //whitespace-only content is treated the same as an empty text
+        return text.text.trim().length > 0;
       case ImageModel:
         const image = shape as ImageModel;
         return image.x1 !== image.x2 || image.y1 !== image.y2;
       default:
         return false;
     }
+  }
+
+  static getTextById(id: string) {
+    //find the canvas text shape that a html text input is backed by
+    const text = this.allShapes.find(
+      (shape) => shape instanceof TextModel && (shape as TextModel).id === id
+    );
+    return (text as TextModel | undefined) ?? null;
+  }
+
+  static getTextShapes() {
+    //all text shapes currently stored on the canvas
+    return this.allShapes.filter((shape) => shape instanceof TextModel) as TextModel[];
   }
 
   static filterEmptyShapes(selectedTool: Tools) {
@@ -106,7 +120,10 @@ class Store {
           PolygonModel.drawStoredPolygon(ctx, shape as PolygonModel);
           break;
         case TextModel:
-          TextModel.drawStoredText(ctx, shape as TextModel);
+          //texts under edition live in their html input, drawing them again would double them
+          if (!(shape as TextModel).isEditing) {
+            TextModel.drawStoredText(ctx, shape as TextModel);
+          }
           break;
         case ImageModel:
           ImageModel.drawStoredImage(ctx, shape as ImageModel);
