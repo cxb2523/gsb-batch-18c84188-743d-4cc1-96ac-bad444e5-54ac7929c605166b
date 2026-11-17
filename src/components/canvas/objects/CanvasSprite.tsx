@@ -1,6 +1,6 @@
 import useImage from 'use-image'
 import { Image as KonvaImage } from 'react-konva'
-import React, { useEffect } from 'react'
+import React, { useContext, useEffect } from 'react'
 import { KonvaNodeEvents } from 'react-konva'
 import { ImageConfig } from 'konva/lib/shapes/Image'
 import Konva from 'konva'
@@ -10,20 +10,18 @@ import {
   spriteDatasWithId,
   spriteMetasWithId,
 } from '../../../state/SpritesState'
-import { SpriteTransformer } from './SpriteTransformer'
 import { noop } from 'lodash'
+import { CanvasNodesContext } from '../CanvasNodesContext'
 
 interface Props extends KonvaNodeEvents, Partial<ImageConfig> {
   id: string
 }
 
 export const CanvasSprite = ({ id, ...props }: Props) => {
-  const ref = React.useRef<Konva.Node>(null)
   const [selectedIds, setSelectedIds] = useAtom(selectedSpriteIdsState)
   const [spriteData, setSpriteData] = useAtom(spriteDatasWithId(id))
   const [spriteMeta, setSpriteMeta] = useAtom(spriteMetasWithId(id))
-
-  const isSelected = selectedIds.includes(id)
+  const { nodesRef } = useContext(CanvasNodesContext)
 
   const { scale, rotation, position, opacity, locked } = spriteData
   const { src, isDragging } = spriteMeta
@@ -39,6 +37,20 @@ export const CanvasSprite = ({ id, ...props }: Props) => {
     if (!width || !height) return
     setSpriteMeta((meta) => ({ ...meta, spriteWidth: width, spriteHeight: height }))
   }, [width, height, setSpriteMeta])
+
+  // Register the live node so the single selection transformer can attach to
+  // it together with the other selected sprites. Kept identity-stable so React
+  // does not detach and re-attach it on every render.
+  const setNode = React.useCallback(
+    (node: Konva.Node | null) => {
+      if (node) {
+        nodesRef.current.set(id, node)
+      } else {
+        nodesRef.current.delete(id)
+      }
+    },
+    [id, nodesRef],
+  )
 
   const onDragStart = (_e: Konva.KonvaEventObject<DragEvent>) => {
     setSpriteMeta((meta) => ({ ...meta, isDragging: true }))
@@ -73,50 +85,39 @@ export const CanvasSprite = ({ id, ...props }: Props) => {
     }
   }
 
-  const onTransformEnd = (_e: Konva.KonvaEventObject<Event>) => {
-    const node = ref.current
-    if (!node) return
-
-    const scaleX = node.scaleX().toFixed(2)
-    const scaleY = node.scaleY().toFixed(2)
-    const rotation = Number(node.rotation().toFixed(0)) as Rotation
-    setSpriteData((data) => ({ ...data, scale: { x: scaleX, y: scaleY, z: '1.0' }, rotation }))
-  }
-
-  const draggable = !(locked && !isSelected)
+  // Locked sprites can never be dragged, even while selected. During a
+  // multi-selection transform they are also excluded from the transformer,
+  // so their geometry stays untouched.
+  const draggable = !locked
 
   return (
-    <>
-      {isSelected && <SpriteTransformer nodeRef={ref} />}
-      <KonvaImage
-        // @ts-ignore
-        ref={ref}
-        draggable={draggable}
-        shadowOffsetX={isDragging ? 10 : 5}
-        shadowOffsetY={isDragging ? 10 : 5}
-        shadowColor="rgba(0, 0, 0, 0.5)"
-        shadowBlur={10}
-        shadowOpacity={0.6}
-        {...props}
-        {...spriteMeta}
-        id={id}
-        image={htmlImageElement}
-        x={position.x}
-        y={position.y}
-        offsetX={width / 2}
-        offsetY={height / 2}
-        rotation={rotation}
-        scaleX={scaleX}
-        scaleY={scaleY}
-        opacity={opacity}
-        onDragStart={onDragStart}
-        onDragEnd={onDragEnd}
-        onClick={locked ? noop : onClick}
-        onDblClick={onDoubleClick}
-        onTap={locked ? noop : onClick}
-        onDblTap={onDoubleClick}
-        onTransformEnd={onTransformEnd}
-      />
-    </>
+    <KonvaImage
+      // @ts-ignore
+      ref={setNode}
+      draggable={draggable}
+      shadowOffsetX={isDragging ? 10 : 5}
+      shadowOffsetY={isDragging ? 10 : 5}
+      shadowColor="rgba(0, 0, 0, 0.5)"
+      shadowBlur={10}
+      shadowOpacity={0.6}
+      {...props}
+      {...spriteMeta}
+      id={id}
+      image={htmlImageElement}
+      x={position.x}
+      y={position.y}
+      offsetX={width / 2}
+      offsetY={height / 2}
+      rotation={rotation}
+      scaleX={scaleX}
+      scaleY={scaleY}
+      opacity={opacity}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onClick={locked ? noop : onClick}
+      onDblClick={onDoubleClick}
+      onTap={locked ? noop : onClick}
+      onDblTap={onDoubleClick}
+    />
   )
 }

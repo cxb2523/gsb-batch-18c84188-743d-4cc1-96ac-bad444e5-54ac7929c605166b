@@ -1,10 +1,11 @@
 import { Layer, Stage } from 'react-konva'
-import React, { DragEventHandler, useContext } from 'react'
+import React, { DragEventHandler, useContext, useRef } from 'react'
 import Konva from 'konva'
 import { useWindowSize } from '../../hooks/useWindowSize'
 import { AppContext, AppContextProps } from '../../context/AppContext'
 import { SpriteMeta } from '../../model/SpriteMeta'
 import { CanvasSprite } from './objects/CanvasSprite'
+import { SelectionTransformer } from './objects/SelectionTransformer'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { SpriteData } from '../../model/SpriteData'
 import { addSpriteAction, selectedSpriteIdsState, spriteIdsState } from '../../state/SpritesState'
@@ -13,9 +14,11 @@ import DeleteListener from './listeners/DeleteListener'
 import DeselectListener from './listeners/DeselectListener'
 import { useGlobalHotkeys } from '../../hooks/useGlobalHotkeys'
 import { defaultPropertiesState } from '../../state/AssetsState'
+import { CanvasNodesContext } from './CanvasNodesContext'
 
 export const Canvas = () => {
   const stageRef = React.useRef<Konva.Stage>(null)
+  const nodesRef = useRef<Map<string, Konva.Node>>(new Map())
   const windowSize = useWindowSize()
   const setSelectedSpriteIds = useSetAtom(selectedSpriteIdsState)
   const defaultProps = useAtomValue(defaultPropertiesState)
@@ -26,6 +29,7 @@ export const Canvas = () => {
   const spriteIds = useAtomValue(spriteIdsState)
   const { dragAndDropRef } = useContext<AppContextProps>(AppContext)
   const [enableHotkeys, disableHotkeys] = useGlobalHotkeys()
+  const canvasNodesContextValue = React.useMemo(() => ({ nodesRef }), [nodesRef])
 
   const onDragOver: DragEventHandler = (e) => {
     e.preventDefault()
@@ -55,24 +59,27 @@ export const Canvas = () => {
   }
 
   return (
-    <div
-      style={{ flexGrow: 1 }}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onMouseEnter={enableHotkeys}
-      onMouseLeave={disableHotkeys}
-    >
-      <CopyAndPasteListener />
-      <DeleteListener />
-      <DeselectListener />
+    <CanvasNodesContext.Provider value={canvasNodesContextValue}>
+      <div
+        style={{ flexGrow: 1 }}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onMouseEnter={enableHotkeys}
+        onMouseLeave={disableHotkeys}
+      >
+        <CopyAndPasteListener />
+        <DeleteListener />
+        <DeselectListener />
 
-      <Stage width={width} height={height} ref={stageRef} onClick={onClick}>
-        <Layer>
-          {spriteIds.map((id) => (
-            <CanvasSprite key={id} id={id} />
-          ))}
-        </Layer>
-      </Stage>
-    </div>
+        <Stage width={width} height={height} ref={stageRef} onClick={onClick}>
+          <Layer>
+            {spriteIds.map((id) => (
+              <CanvasSprite key={id} id={id} />
+            ))}
+            <SelectionTransformer />
+          </Layer>
+        </Stage>
+      </div>
+    </CanvasNodesContext.Provider>
   )
 }

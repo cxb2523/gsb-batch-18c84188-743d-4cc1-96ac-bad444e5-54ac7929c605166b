@@ -72,3 +72,37 @@ export const deleteSpritesAction = atom(null, (_get, set, ids: string[]) => {
     metas: allSprites.metas.filter((meta) => !ids.includes(meta.id)),
   }))
 })
+
+/**
+ * Geometry written back to one sprite after a (possibly multi-selection)
+ * transform. Only the transformable properties are carried; everything else
+ * (opacity, locked, physics, ...) is preserved from the current sprite data.
+ */
+export interface SpriteTransformWriteback {
+  id: string
+  position: { x: number; y: number }
+  scale: { x: string; y: string }
+  rotation: Rotation
+}
+
+/**
+ * Apply one transformer interaction to every given sprite at once.
+ * All listed sprites receive the transform the single selection transformer
+ * produced on their nodes, keeping their relative layout intact. Locked
+ * sprites are simply never listed by the caller, so their geometry is never
+ * touched. Multi-selection state itself is left untouched.
+ */
+export const applySpriteTransformsAction = atom(
+  null,
+  (_get, set, updates: SpriteTransformWriteback[]) => {
+    for (const update of updates) {
+      const dataAtom = spriteDatasWithId(update.id)
+      set(dataAtom, (data) => ({
+        ...data,
+        position: { ...data.position, x: update.position.x, y: update.position.y },
+        scale: { ...data.scale, x: update.scale.x, y: update.scale.y },
+        rotation: update.rotation,
+      }))
+    }
+  },
+)
