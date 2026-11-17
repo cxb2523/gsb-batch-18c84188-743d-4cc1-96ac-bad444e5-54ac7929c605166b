@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added
+
+- Per-tool default styles on `DrawingManager`: `saveDefaultStyle(kind, style)` /
+  `saveStyleAsDefault(id)` save a "Save as default" style for one tool kind,
+  `defaultStyleFor(kind)` returns the effective default (saved style, else the factory) and
+  `hasDefaultStyle(kind)` reports whether one is saved. New drawings and the placement preview use
+  it; existing drawings keep their own style. Overrides are isolated by kind. Each save / clear /
+  undo emits one `change`, so a host can refresh its toolbar.
+- `clearDefaultStyle(kind)` drops the saved default (new drawings are back on the factory style)
+  and `undoDefaultStyle(kind?)` undoes the last save, returning the tool to the default in effect
+  before it — an earlier saved default when there is one, else the factory style. Saving the same
+  kind twice keeps one override (the last save).
+- `cloneDrawingStyle(style)` (exported) and deep-copying `defaultStyleFor` / `factoryStyleFor`:
+  every array / nested object (`levels`, `vLevels`, `gannLevels`, `regressionLines`, `vp`, …) is a
+  fresh copy, so two drawings and two queries never share an array reference. `finishPlacement`
+  gained an optional `style` (the effective default for placement-time styles such as the position
+  tool's stop / target or the trend angle).
+
 ### Changed
 
 - Filled areas (#30): a press inside a fill is a background hit (`{ hit: "body", background: true }`, TV

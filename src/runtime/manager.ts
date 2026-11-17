@@ -15,8 +15,8 @@ import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { HitResult, Pt } from "../core/_shared";
 import type { Coords, OHLC } from "../core/coords";
 import type { LabelFormatter } from "../core/labels";
-import { isVisibleOnInterval, type DataPoint, type Drawing, type DrawingKind, type NewDrawing } from "../core/types";
-import { defaultStyleFor, findOverlaySpec, type OverlaySpec } from "../core/specs";
+import { isVisibleOnInterval, type DataPoint, type Drawing, type DrawingKind, type DrawingStyle, type NewDrawing } from "../core/types";
+import { cloneDrawingStyle, defaultStyleFor as coreDefaultStyleFor, findOverlaySpec, type OverlaySpec } from "../core/specs";
 import { hitTestKind, pickTopmostHit } from "../core/kinds/hit-tests";
 import { signpostPositionFor } from "../core/kinds/signpost";
 import { drawingAxisLabels } from "../core/kinds/axis-labels";
@@ -121,6 +121,14 @@ export class DrawingManager {
   private readonly listeners: Listeners = { change: new Set(), add: new Set(), update: new Set(), remove: new Set(), selection: new Set(), tool: new Set(), visibility: new Set(), textEdit: new Set(), gestureEnd: new Set(), tableEdit: new Set() };
   private list: Drawing[] = [];
   private selected: string[] = [];
+  /** Saved "Save as default" style per tool (one record per kind: a later save
+   *  replaces it). Drawings created from now on use it; existing drawings keep
+   *  their own style. */
+  private readonly defaultOverrides = new Map<DrawingKind, DrawingStyle>();
+  /** Per-save history for undo: the override that was in effect before each
+   *  save (null = no override, i.e. the factory / host default). Undoing a save
+   *  restores the entry and drops it. */
+  private defaultSaveHistory: { kind: DrawingKind; previous: DrawingStyle | null }[] = [];
   /** TV "Hide all drawings": off = nothing is drawn or hit (not saved). */
   private visible = true;
   private hovered: { id: string; anchor: number } | null = null;
@@ -266,6 +274,91 @@ export class DrawingManager {
     this.redraw();
   }
 
+  // ── tool default style ("Save as default") ───────────────────────────────
+  //
+  // An override belongs to one tool kind and only affects drawings created
+  // AFTER it is saved (the placement preview included). Existing drawings keep
+  // their own style. Each save / clear / undo is one observable step: it emits
+  // one `change` (the list is unchanged, but a host refreshing its toolbar
+  // hears about the new default) and can be undone.
+
+  /** The style a new drawing of `kind` gets now: the tool's factory defaults
+   *  (including any host `setDefaultStyleOverride`) merged with the default
+   *  saved here, if there is one. Returns a deep copy, so callers may edit it. */
+  defaultStyleFor(kind: DrawingKind): DrawingStyle {
+    const base = coreDefaultStyleFor(kind);
+    const override = this.defaultOverrides.get(kind);
+    return override ? cloneDrawingStyle({ ...base, ...override }) : base;
+  }
+
+  /** Alias of `defaultStyleFor(kind)`: the tool's effective default style. */
+  getDefaultStyle(kind: DrawingKind): DrawingStyle {
+    return this.defaultStyleFor(kind);
+  }
+
+  /** Whether the tool currently has a user-saved default. */
+  hasDefaultStyle(kind: DrawingKind): boolean {
+    return this.defaultOverrides.has(kind);
+  }
+
+  /** Save `style` as the tool's default for drawings created from now on.
+   *  `style` omitted = snapshot the tool's current effective default. A copy
+   *  is stored, so later edits of `style` do not change the default. Saving
+   *  again for the same kind replaces the previous default (one record per
+   *  kind); `undoDefaultStyle` then goes back to the style in effect before
+   *  that save. Emits one `change`. */
+  saveDefaultStyle(kind: DrawingKind, style?: DrawingStyle): void {
+    this.defaultSaveHistory.push({ kind, previous: cloneOptional(this.defaultOverrides.get(kind)) });
+    this.defaultOverrides.set(kind, cloneDrawingStyle(style ?? this.defaultStyleFor(kind)));
+    this.defaultsChanged();
+  }
+
+  /** Save the style of an existing drawing as its tool's default. The source
+   *  drawing itself is untouched, as are all other existing drawings. */
+  saveStyleAsDefault(id: string): boolean {
+    const d = this.get(id);
+    if (!d) return false;
+    this.saveDefaultStyle(d.kind, d.style);
+    return true;
+  }
+
+  /** Drop the tool's saved default: new drawings use the factory style again.
+   *  No-op when the kind has no saved default. The step is undoable: the dropped
+   *  default is pushed on the undo stack, so `undoDefaultStyle` restores it.
+   *  Emits one `change`. */
+  clearDefaultStyle(kind: DrawingKind): void {
+    const previous = this.defaultOverrides.get(kind);
+    if (!previous) return;
+    this.defaultSaveHistory.push({ kind, previous: cloneOptional(previous) });
+    this.defaultOverrides.delete(kind);
+    this.defaultsChanged();
+  }
+
+  /** Undo the last save for `kind` (or the latest save of any kind when
+   *  omitted): the tool's effective default goes back to what it was before
+   *  that save — an earlier saved default if there is one, else the factory
+   *  style. The undone save is dropped from the history, so calling it again
+   *  walks further back. Returns false (emits nothing) when there is nothing
+   *  to undo. Emits one `change`. */
+  undoDefaultStyle(kind?: DrawingKind): boolean {
+    for (let i = this.defaultSaveHistory.length - 1; i >= 0; i--) {
+      const entry = this.defaultSaveHistory[i];
+      if (kind !== undefined && entry.kind !== kind) continue;
+      this.defaultSaveHistory.splice(i, 1);
+      if (entry.previous) this.defaultOverrides.set(entry.kind, entry.previous);
+      else this.defaultOverrides.delete(entry.kind);
+      this.defaultsChanged();
+      return true;
+    }
+    return false;
+  }
+
+  /** One observable default-style step: the drawing list is unchanged, but a
+   *  host rebuilds its toolbar from the new effective default. */
+  private defaultsChanged(): void {
+    this.changed();
+  }
+
   drawings(): readonly Drawing[] {
     return this.list;
   }
@@ -274,7 +367,7 @@ export class DrawingManager {
   }
   /** Add a drawing (default style of its kind when none); returns its id. */
   add(nd: NewDrawing | Drawing): string {
-    const d = { id: newId(), style: defaultStyleFor(nd.kind), ...nd } as Drawing;
+    const d = { id: newId(), style: this.defaultStyleFor(nd.kind), ...nd } as Drawing;
     this.list = [...this.list, d];
     this.emit("add", d);
     this.changed();
@@ -333,7 +426,7 @@ export class DrawingManager {
     const { w, h } = this.paneSize();
     const dp = unproject(this.coords, { x: w / 2, y: h / 2 });
     if (!dp) return null;
-    const style = defaultStyleFor("image");
+    const style = this.defaultStyleFor("image");
     const id = this.add({
       kind: "image",
       points: [dp],
@@ -806,10 +899,11 @@ export class DrawingManager {
       return;
     }
     const { w, h } = this.paneSize();
-    let placed = finishPlacement(spec.kind, next, c, { w, h }, { glyph: this.glyph });
+    const baseStyle = this.defaultStyleFor(spec.kind);
+    let placed = finishPlacement(spec.kind, next, c, { w, h }, { glyph: this.glyph, style: baseStyle });
     // TV signpost addPoint: the click height sets the label position.
     if (placed && spec.kind === "signpost") {
-      placed = { ...placed, style: { ...defaultStyleFor("signpost"), signpostPosition: signpostPositionFor(c, next[0], h) } } as NewDrawing;
+      placed = { ...placed, style: { ...baseStyle, signpostPosition: signpostPositionFor(c, next[0], h) } } as NewDrawing;
     }
     this.pending = [];
     this.cursor = null;
@@ -1042,7 +1136,7 @@ export class DrawingManager {
     const c = this.coords;
     const placed = p.map((dp) => projectPoint(c, dp)).filter((x): x is Pt => !!x);
     if (!placed.length) return null;
-    const style = defaultStyleFor(spec.kind);
+    const style = this.defaultStyleFor(spec.kind);
     const cur = this.aimAt(raw);
     const dots: Scene = placed.map((pt) => ({ t: "circle", cx: pt.x, cy: pt.y, r: 3, fill: style.color }));
     if (!spec.variableLength && !spec.freehand && !SEGMENT_PREVIEW_KINDS.has(spec.kind) && placed.length === p.length && placed.length < spec.pointCount) {
@@ -1086,6 +1180,11 @@ function seriesBars(series: ISeriesApi<SeriesType>): OHLC[] {
     const v = r.value ?? r.close ?? 0;
     return { time: r.time, open: r.open ?? v, high: r.high ?? v, low: r.low ?? v, close: r.close ?? v, volume: r.volume };
   }) as OHLC[];
+}
+
+/** Deep copy of an optional style (null stays null). */
+function cloneOptional(style: DrawingStyle | undefined): DrawingStyle | null {
+  return style ? cloneDrawingStyle(style) : null;
 }
 
 function mixHex(a: string, b: string, t: number): string {

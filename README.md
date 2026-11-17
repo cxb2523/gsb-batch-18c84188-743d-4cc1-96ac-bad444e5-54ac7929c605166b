@@ -67,6 +67,26 @@ pointer of a drag and the placement preview are kept inside the pane; default `f
 (Escape, Delete / Backspace), and no event is stopped, so the chart pans over them;
 `setInteractive(false)` also clears the selection and a half-placed drawing).
 
+### Per-tool default style ("Save as default")
+
+`saveDefaultStyle(kind, style)` stores a style as the default of one tool kind; drawings created
+afterwards — and the live placement preview — use it. Existing drawings are never restyled.
+`saveStyleAsDefault(id)` does the same from a placed drawing's own style (the drawing stays as it
+is). Overrides are isolated by kind: a trend-line default does not touch fib retracement. The
+style is stored as a deep copy, and every new drawing / query gets its own copy, so two drawings
+never share a `levels` (or any other array) reference.
+
+`defaultStyleFor(kind)` returns the effective default (the saved one, else
+`factoryStyleFor(kind)`), as a deep copy; `hasDefaultStyle(kind)` tells whether a default is saved.
+`clearDefaultStyle(kind)` drops it, so new drawings are back on the factory style.
+`undoDefaultStyle(kind?)` undoes the last save (of `kind`, or the latest save of any kind when
+called with no argument): the tool returns to the default in effect before that save — an earlier
+saved default if there is one, else the factory style.
+
+Each save / clear / undo emits exactly one `change` (the drawing list is unchanged, but a host
+rebuilds its toolbar from the new default) and is one undo step. Saving the same kind twice keeps
+one override (the last save); its undo history goes back through the earlier saves.
+
 ### Labels and number format
 
 `formatLabel?: (label: DrawingLabel) => string | null | undefined` is called
@@ -118,6 +138,7 @@ for a host changing only part of it. The labels then reach `formatLabel` with th
 | `exportJSON()`, `importJSON(json)` | save / restore |
 | `addImage({ name, width, height })` | place an image (file put in the image cache by the host: `cacheImage` / `setImageReader`) |
 | `setTableCellText(id, cell, text)`, `endTableEdit()`, `tableOp(id, op)`, `tableState()` | table cell editing (after a `tableEdit` event) and row / column operations |
+| `saveDefaultStyle(kind, style)`, `saveStyleAsDefault(id)`, `clearDefaultStyle(kind)`, `undoDefaultStyle(kind?)`, `defaultStyleFor(kind)`, `hasDefaultStyle(kind)` | per-tool "Save as default": drawings created later (and the placement preview) use it, existing drawings keep their style; each save / clear / undo emits one `change` |
 | `on(event, cb)` → unsubscribe | events |
 | `redraw()`, `destroy()` | |
 

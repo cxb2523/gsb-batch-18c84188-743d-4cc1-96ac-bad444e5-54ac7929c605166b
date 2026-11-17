@@ -42,6 +42,15 @@ Required: `color`, `width` (px), `lineStyle` (`"solid" | "dashed" | "dotted"`). 
 optional and read only by the tools that use it; unset means the tool's default. The defaults of
 each tool are in [tools.md](tools.md); `defaultStyleFor(kind)` returns them (with the host's saved
 defaults, see `setDefaultStyleOverride`), `factoryStyleFor(kind)` without the host's defaults.
+Both return a deep copy (arrays included), so editing the result never changes the factory table
+or another drawing.
+
+Per-tool "Save as default" on a manager: `dm.saveDefaultStyle(kind, style)` /
+`dm.saveStyleAsDefault(id)` store a default for one kind (drawings created later and the
+placement preview use it; existing drawings keep their own); `dm.defaultStyleFor(kind)` is the
+effective default; `dm.clearDefaultStyle(kind)` goes back to the factory style;
+`dm.undoDefaultStyle(kind?)` undoes the last save (back to the previous effective default). Each
+step emits one `change` and only affects drawings created afterwards.
 
 Main groups (full list with comments in `src/core/types.ts`):
 

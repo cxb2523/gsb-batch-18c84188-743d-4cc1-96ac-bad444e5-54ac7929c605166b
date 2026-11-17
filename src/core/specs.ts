@@ -539,27 +539,41 @@ export function findOverlaySpec(toolId: string | null): OverlaySpec | undefined 
   return undefined;
 }
 
+/** Deep copy of plain style data (objects, arrays, primitives). Styles are
+ *  JSON-shaped, so no Dates / maps / functions need handling. */
+function deepClone<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => deepClone(v)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>)) out[k] = deepClone((value as Record<string, unknown>)[k]);
+    return out as T;
+  }
+  return value;
+}
+
+/** A style safe to hand to a drawing / host: every array and nested object
+ *  (`levels`, `vLevels`, `gannLevels`, `regressionLines`, `vp`, table cells,
+ *  theming objects, …) is a fresh copy, so two drawings can never share one
+ *  array reference and editing one drawing's style cannot leak into another. */
+export function cloneDrawingStyle(style: DrawingStyle): DrawingStyle {
+  return deepClone(style);
+}
+
 /** Resolve a fresh drawing's style: DEFAULT_STYLE merged with the kind's
  *  per-tool overrides. Used both when committing a new drawing and when
  *  rendering the live placement preview, so the in-progress draw looks exactly
- *  like the finished one (TV behaviour). */
+ *  like the finished one (TV behaviour). The result is a deep copy. */
 export function defaultStyleFor(kind: DrawingKind): DrawingStyle {
   // Factory base + per-spec defaults, then any user-saved "Save as default"
   // override for this kind (so new drawings + Apply-default honour it).
-  const style = { ...DEFAULT_STYLE, ...OVERLAY_SPECS[kind].defaults, ...defaultStyleOverride(kind) };
-  // Deep-copy the level ladder so two drawings never share one array (level
-  // edits in the settings dialog replace the array immutably, but a shared
-  // reference would still leak factory-set edits across drawings).
-  if (style.levels) style.levels = style.levels.map((l) => ({ ...l }));
-  return style;
+  return cloneDrawingStyle({ ...DEFAULT_STYLE, ...OVERLAY_SPECS[kind].defaults, ...defaultStyleOverride(kind) });
 }
 
 /** Factory style of a tool: base + per-spec defaults, WITHOUT the user's
- *  saved default (TV restoreFactoryDefaults / "Apply defaults"). */
+ *  saved default (TV restoreFactoryDefaults / "Apply defaults"). The result
+ *  is a deep copy. */
 export function factoryStyleFor(kind: DrawingKind): DrawingStyle {
-  const style = { ...DEFAULT_STYLE, ...OVERLAY_SPECS[kind].defaults };
-  if (style.levels) style.levels = style.levels.map((l) => ({ ...l }));
-  return style;
+  return cloneDrawingStyle({ ...DEFAULT_STYLE, ...OVERLAY_SPECS[kind].defaults });
 }
 
 /** Host hook: the user's saved default style of a tool (OpenTrader: its

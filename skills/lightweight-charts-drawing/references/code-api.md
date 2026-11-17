@@ -128,6 +128,8 @@ the chart element. Call `dm.destroy()` before removing the chart or the series.
 | `cancelPending()` | cancels a half-placed drawing and its preview, keeps the tool armed; no-op with nothing pending |
 | `setMagnet`, `setInterval`, `setStayInDrawingMode`, `setInteractive` | settings |
 | `setFormatLabel(fn \| undefined)` | swap the `formatLabel` hook and repaint; `undefined` = library defaults |
+| `saveDefaultStyle(kind, style)`, `saveStyleAsDefault(id)`, `clearDefaultStyle(kind)`, `undoDefaultStyle(kind?)` | save / clear / undo a per-kind default style: drawings created later and the preview use it, existing drawings keep theirs; each step emits one `change` |
+| `defaultStyleFor(kind)`, `hasDefaultStyle(kind)` | the effective default style (saved, else factory) as a deep copy; whether a saved default exists |
 | `exportJSON()`, `importJSON(json)` → count | save / load (load replaces everything, clears the selection) |
 | `addImage({ name, width, height })` | image tool; the file must be in the image cache (`cacheImage` / `setImageReader`) |
 | `setTableCellText`, `endTableEdit`, `tableOp`, `tableState` | table editing after `tableEdit` |

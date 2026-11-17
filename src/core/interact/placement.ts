@@ -7,7 +7,7 @@
 import type { Time } from "lightweight-charts";
 import { timeToSec } from "../_shared";
 import type { Coords } from "../coords";
-import type { DataPoint, DrawingKind } from "../types";
+import type { DataPoint, DrawingKind, DrawingStyle } from "../types";
 import { defaultStyleFor } from "../specs";
 import { barsBetween } from "../kinds/data-series";
 import { projectPoint, screenAngleDeg, unproject } from "./project";
@@ -187,6 +187,9 @@ export function enrichPositionPlacement(
   coords: Coords,
   paneW: number,
   paneH: number,
+  /** Base style to start from (the host's effective default); unset = the
+   *  tool's default style. */
+  base?: import("../types").DrawingStyle,
 ): import("../types").NewDrawing {
   const entry = placed.points[0];
   const pip = coords.pipSize();
@@ -206,7 +209,7 @@ export function enrichPositionPlacement(
   const visibleBars = spacing > 0 ? Math.round(paneW / spacing) : 0;
   const closeIdx = entryIdx + Math.max(3, Math.round(0.15 * visibleBars));
   const closeTime: Time = coords.barIndexToTime(closeIdx) ?? entry.time;
-  const style = { ...defaultStyleFor(kind), stopLevel: level, profitLevel: level };
+  const style = { ...(base ?? defaultStyleFor(kind)), stopLevel: level, profitLevel: level };
   return {
     ...placed,
     points: [entry, { time: closeTime, price: entry.price }],
@@ -305,13 +308,16 @@ export function enrichCurvePlacement(
 export function enrichTrendAngle(
   placed: import("../types").NewDrawing,
   coords: Coords,
+  /** Base style to start from (the host's effective default) when `placed`
+   *  has none; unset = the tool's default style. */
+  base?: import("../types").DrawingStyle,
 ): import("../types").NewDrawing {
   const a = projectPoint(coords, placed.points[0]);
   const b = placed.points[1] ? projectPoint(coords, placed.points[1]) : null;
   if (!a || !b) return placed;
   return {
     ...placed,
-    style: { ...(placed.style ?? defaultStyleFor("trend-angle")), angle: screenAngleDeg(a, b) },
+    style: { ...(placed.style ?? base ?? defaultStyleFor("trend-angle")), angle: screenAngleDeg(a, b) },
   } as import("../types").NewDrawing;
 }
 
@@ -346,13 +352,13 @@ export function finishPlacement(
   pts: DataPoint[],
   coords: Coords | null,
   pane: { w: number; h: number },
-  opts: { glyph?: string; closed?: boolean } = {},
+  opts: { glyph?: string; closed?: boolean; style?: DrawingStyle } = {},
 ): import("../types").NewDrawing | null {
   let placed = buildNewDrawing(kind, pts);
   if (!placed) return null;
   // Position tool (TV): one click creates the whole 1:1 box — stop = profit
   // = 20% of the visible price range, close point a span forward.
-  if ((kind === "long-position" || kind === "short-position") && coords) placed = enrichPositionPlacement(placed, kind, coords, pane.w, pane.h);
+  if ((kind === "long-position" || kind === "short-position") && coords) placed = enrichPositionPlacement(placed, kind, coords, pane.w, pane.h, opts.style);
   // Curves (TV): the auto-derived control point(s) bow perpendicular to the
   // chord in screen space (0.15 x chord length).
   if ((kind === "curve" || kind === "double-curve") && coords) placed = enrichCurvePlacement(placed, coords);
@@ -361,7 +367,7 @@ export function finishPlacement(
   // Copy tools (TV): bar-pattern freezes the covered bars.
   if (kind === "bar-pattern" && coords) placed = enrichBarPattern(placed, coords, Math.max(1, pane.h));
   // Trend-angle (TV): the readout angle freezes in screen space.
-  if (kind === "trend-angle" && coords) placed = enrichTrendAngle(placed, coords);
+  if (kind === "trend-angle" && coords) placed = enrichTrendAngle(placed, coords, opts.style);
   // TV polyline `filled`: stored explicitly (false = open) so older saves can
   // be told apart (see migrateDrawing).
   if (kind === "polyline" && opts.closed !== undefined) placed = { ...placed, closed: opts.closed } as typeof placed;
